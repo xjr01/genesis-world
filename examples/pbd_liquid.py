@@ -40,7 +40,7 @@ def main():
             density_relaxation=1.0,
             viscosity_relaxation=0.0,
         ),
-        morph=gs.morphs.Box(lower=(0.2, 0.1, 0.1), upper=(0.4, 0.3, 0.5)),
+        morph=gs.morphs.Box(lower=(0.2, 0.1, 0.1), upper=(0.6, 0.5, 0.5)),
     )
     scene.build(n_envs=0)
 

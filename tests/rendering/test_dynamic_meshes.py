@@ -6,11 +6,57 @@ import pytest
 import trimesh
 
 import genesis as gs
+import genesis.utils.particle as particle_utils
 from genesis.utils.misc import qd_to_numpy, tensor_to_array
 
 from ..conftest import IS_INTERACTIVE_VIEWER_AVAILABLE, SKIP_NO_VIEWER
 from ..utils import assert_allclose, assert_equal, get_hf_dataset, rgb_array_to_png_bytes
 from .conftest import RENDERER_TYPE
+
+
+@pytest.mark.required
+@pytest.mark.parametrize("renderer_type", [RENDERER_TYPE.RASTERIZER])
+def test_pbd_reconstruction_uses_pbd_particle_radius(monkeypatch, renderer):
+    particle_size = 0.04
+    reconstructed_radii = []
+
+    def reconstruct_surface(positions, radius, backend):
+        reconstructed_radii.append(radius)
+        mesh = trimesh.creation.icosphere(subdivisions=1, radius=radius)
+        if len(positions) > 0:
+            mesh.apply_translation(positions.mean(axis=0))
+        return mesh
+
+    monkeypatch.setattr(particle_utils, "particles_to_mesh", reconstruct_surface)
+
+    scene = gs.Scene(
+        pbd_options=gs.options.PBDOptions(
+            particle_size=particle_size,
+            lower_bound=(-0.2, -0.2, 0.0),
+            upper_bound=(0.2, 0.2, 0.4),
+        ),
+        # Keep the MPM radius deliberately different to catch accidental cross-solver use.
+        mpm_options=gs.options.MPMOptions(particle_size=0.01),
+        renderer=renderer,
+        show_viewer=False,
+        show_FPS=False,
+    )
+    scene.add_entity(
+        material=gs.materials.PBD.Liquid(sampler="regular"),
+        morph=gs.morphs.Box(pos=(0.0, 0.0, 0.12), size=(0.08, 0.08, 0.08)),
+        surface=gs.surfaces.Default(vis_mode="recon"),
+    )
+    camera = scene.add_camera(
+        res=(32, 32),
+        pos=(0.5, 0.5, 0.4),
+        lookat=(0.0, 0.0, 0.1),
+    )
+
+    scene.build()
+    camera.render()
+
+    assert reconstructed_radii
+    assert all(radius == pytest.approx(particle_size / 2.0) for radius in reconstructed_radii)
 
 
 @pytest.mark.slow  # ~200s

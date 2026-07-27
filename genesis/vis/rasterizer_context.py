@@ -843,7 +843,7 @@ class RasterizerContext:
                         ]
                         mesh = pu.particles_to_mesh(
                             positions=positions,
-                            radius=self.sim.mpm_solver.particle_radius,
+                            radius=self.sim.pbd_solver.particle_radius,
                             backend=pbd_entity.surface.recon_backend,
                         )
                         mesh.visual = mu.surface_uvs_to_trimesh_visual(pbd_entity.surface, n_verts=len(mesh.vertices))
