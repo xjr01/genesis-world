@@ -743,6 +743,66 @@ class SPHOptions(Options):
             self._hash_grid_res = np.ceil(np.array(self.hash_grid_res) / self.hash_grid_cell_size).astype(gs.np_int)
 
 
+class PBSTFOptions(Options):
+    """
+    Options configuring the GPU position-based surface-tension fluid solver.
+
+    ``particle_size`` is the particle diameter. The C++ reference fixes the
+    cubic-spline support radius to ``3 * particle_size`` (six particle radii).
+    The hash-grid cell must cover that support radius so a 3x3x3 cell stencil
+    contains every kernel neighbor.
+    """
+
+    dt: PositiveFloat | None = None
+    gravity: Vec3FType | None = None
+
+    particle_size: PositiveFloat = 0.02
+    kernel_scale: PositiveFloat = 6.0
+    max_solver_iterations: PositiveInt = 100
+    topology_rebuild_interval: PositiveInt = 1
+    max_surface_neighbors: PositiveInt = 128
+    enable_pca_normals: bool = True
+
+    hash_grid_res: Vec3FType | None = None
+    hash_grid_cell_size: PositiveFloat | None = None
+
+    lower_bound: Vec3FType = (-100.0, -100.0, 0.0)
+    upper_bound: Vec3FType = (100.0, 100.0, 100.0)
+
+    _support_radius: float = PrivateAttr(default=0.0)
+    _hash_grid_res: np.ndarray = PrivateAttr(default=None)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _resolve_defaults(cls, data: dict) -> dict:
+        particle_size = data.get("particle_size", 0.02)
+        kernel_scale = data.get("kernel_scale", 6.0)
+        if not np.isclose(kernel_scale, 6.0):
+            gs.raise_exception("PBSTF fixes `kernel_scale` to 6.0, matching the C++ reference implementation.")
+        support_radius = 3.0 * particle_size
+        if data.get("hash_grid_cell_size") is None:
+            data["hash_grid_cell_size"] = support_radius
+        return data
+
+    def model_post_init(self, context: Any) -> None:
+        if not np.all(np.array(self.upper_bound) > np.array(self.lower_bound)):
+            gs.raise_exception("Invalid pair of upper_bound and lower_bound.")
+        if self.max_surface_neighbors < 3:
+            gs.raise_exception("`max_surface_neighbors` must be at least 3.")
+
+        self._support_radius = 3.0 * self.particle_size
+        if self.hash_grid_cell_size < self._support_radius:
+            gs.raise_exception("`hash_grid_cell_size` must not be smaller than the PBSTF cubic-spline support radius.")
+
+        if self.hash_grid_res is None:
+            max_hash_grid_res = np.ceil(
+                (np.array(self.upper_bound) - np.array(self.lower_bound)) / self.hash_grid_cell_size
+            ).astype(gs.np_int)
+            self._hash_grid_res = np.minimum(max_hash_grid_res, np.array([150, 150, 150], dtype=gs.np_int))
+        else:
+            self._hash_grid_res = np.ceil(np.array(self.hash_grid_res) / self.hash_grid_cell_size).astype(gs.np_int)
+
+
 class PBDOptions(Options):
     """
     Options configuring the PBDSolver.

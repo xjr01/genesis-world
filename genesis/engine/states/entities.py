@@ -140,6 +140,10 @@ class SPHEntityState(RBC):
         return self._vel
 
 
+class PBSTFEntityState(SPHEntityState):
+    """Dynamic state queried from a genesis PBSTFEntity."""
+
+
 class FEMEntityState:
     """
     Dynamic state queried from a genesis FEMEntity.

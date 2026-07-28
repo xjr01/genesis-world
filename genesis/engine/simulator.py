@@ -13,6 +13,7 @@ from genesis.options.solvers import (
     FEMOptions,
     MPMOptions,
     PBDOptions,
+    PBSTFOptions,
     RigidOptions,
     SFOptions,
     SPHOptions,
@@ -27,6 +28,7 @@ from .solvers import (
     FEMSolver,
     MPMSolver,
     PBDSolver,
+    PBSTFSolver,
     RigidSolver,
     SFSolver,
     SPHSolver,
@@ -73,6 +75,8 @@ class Simulator(RBC):
         An SFOptions object that contains all the options for the SFSolver.
     pbd_options : gs.PBDOptions
         A PBDOptions object that contains all the options for the PBDSolver.
+    pbstf_options : gs.PBSTFOptions
+        A PBSTFOptions object that contains all the options for the PBSTFSolver.
     """
 
     def __init__(
@@ -88,6 +92,7 @@ class Simulator(RBC):
         fem_options: FEMOptions,
         sf_options: SFOptions,
         pbd_options: PBDOptions,
+        pbstf_options: PBSTFOptions,
     ):
         self._scene = scene
 
@@ -102,6 +107,7 @@ class Simulator(RBC):
         self.fem_options = fem_options
         self.sf_options = sf_options
         self.pbd_options = pbd_options
+        self.pbstf_options = pbstf_options
 
         self._dt: float = options.dt
         self._substep_dt: float = options.dt / options.substeps
@@ -120,6 +126,7 @@ class Simulator(RBC):
         self.mpm_solver = MPMSolver(self.scene, self, self.mpm_options)
         self.sph_solver = SPHSolver(self.scene, self, self.sph_options)
         self.pbd_solver = PBDSolver(self.scene, self, self.pbd_options)
+        self.pbstf_solver = PBSTFSolver(self.scene, self, self.pbstf_options)
         self.fem_solver = FEMSolver(self.scene, self, self.fem_options)
         self.sf_solver = SFSolver(self.scene, self, self.sf_options)
 
@@ -131,6 +138,7 @@ class Simulator(RBC):
                 self.mpm_solver,
                 self.sph_solver,
                 self.pbd_solver,
+                self.pbstf_solver,
                 self.fem_solver,
                 self.sf_solver,
             ]
@@ -176,6 +184,8 @@ class Simulator(RBC):
             entity = self.sph_solver.add_entity(self.n_entities, material, morph, surface, name=name)
         elif isinstance(material, gs.materials.PBD.Base):
             entity = self.pbd_solver.add_entity(self.n_entities, material, morph, surface, name=name)
+        elif isinstance(material, gs.materials.PBSTF.Base):
+            entity = self.pbstf_solver.add_entity(self.n_entities, material, morph, surface, name=name)
         elif isinstance(material, gs.materials.FEM.Base):
             entity = self.fem_solver.add_entity(self.n_entities, material, morph, surface, name=name)
         elif isinstance(material, gs.materials.Hybrid):

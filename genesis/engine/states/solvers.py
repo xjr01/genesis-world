@@ -242,6 +242,38 @@ class SPHSolverState:
         return self._active
 
 
+class PBSTFSolverState:
+    """Dynamic state queried from a PBSTFSolver."""
+
+    def __init__(self, scene):
+        self._scene = scene
+        args = {
+            "dtype": gs.tc_float,
+            "requires_grad": False,
+            "scene": scene,
+        }
+        self._pos = gs.zeros((scene.sim._B, scene.sim.pbstf_solver.n_particles, 3), **args)
+        self._vel = gs.zeros((scene.sim._B, scene.sim.pbstf_solver.n_particles, 3), **args)
+        args["dtype"] = gs.tc_bool
+        self._active = gs.zeros((scene.sim._B, scene.sim.pbstf_solver.n_particles), **args)
+
+    @property
+    def scene(self):
+        return self._scene
+
+    @property
+    def pos(self):
+        return self._pos
+
+    @property
+    def vel(self):
+        return self._vel
+
+    @property
+    def active(self):
+        return self._active
+
+
 class PBDSolverState:
     """
     Dynamic state queried from a PBDSolver.

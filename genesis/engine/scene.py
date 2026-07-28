@@ -25,6 +25,7 @@ from genesis.options import (
     FEMOptions,
     MPMOptions,
     PBDOptions,
+    PBSTFOptions,
     ProfilingOptions,
     RigidOptions,
     SFOptions,
@@ -79,6 +80,8 @@ class Scene(RBC):
         The options configuring the sf_solver (``scene.sim.SFSolver``).
     pbd_options : gs.options.PBDOptions
         The options configuring the pbd_solver (``scene.sim.PBDSolver``).
+    pbstf_options : gs.options.PBSTFOptions
+        The options configuring the fluid-only pbstf_solver (``scene.sim.PBSTFSolver``).
     vis_options : gs.options.VisOptions
         The options configuring the visualization system (``scene.visualizer``). Visualizer controls both the interactive viewer and the cameras.
     viewer_options : gs.options.ViewerOptions
@@ -103,6 +106,7 @@ class Scene(RBC):
         fem_options: FEMOptions | None = None,
         sf_options: SFOptions | None = None,
         pbd_options: PBDOptions | None = None,
+        pbstf_options: PBSTFOptions | None = None,
         vis_options: VisOptions | None = None,
         viewer_options: ViewerOptions | None = None,
         profiling_options: ProfilingOptions | None = None,
@@ -124,6 +128,7 @@ class Scene(RBC):
         fem_options = fem_options or FEMOptions()
         sf_options = sf_options or SFOptions()
         pbd_options = pbd_options or PBDOptions()
+        pbstf_options = pbstf_options or PBSTFOptions()
         vis_options = vis_options or VisOptions()
         viewer_options = viewer_options or ViewerOptions()
         profiling_options = profiling_options or ProfilingOptions()
@@ -145,6 +150,7 @@ class Scene(RBC):
             fem_options,
             sf_options,
             pbd_options,
+            pbstf_options,
             vis_options,
             viewer_options,
             profiling_options,
@@ -161,6 +167,7 @@ class Scene(RBC):
         self.fem_options = fem_options.model_copy_from(sim_options)
         self.sf_options = sf_options.model_copy_from(sim_options)
         self.pbd_options = pbd_options.model_copy_from(sim_options)
+        self.pbstf_options = pbstf_options.model_copy_from(sim_options)
         self.profiling_options = profiling_options
 
         self.vis_options = vis_options
@@ -180,6 +187,7 @@ class Scene(RBC):
             fem_options=self.fem_options,
             sf_options=self.sf_options,
             pbd_options=self.pbd_options,
+            pbstf_options=self.pbstf_options,
         )
 
         # visualizer
@@ -222,6 +230,7 @@ class Scene(RBC):
         fem_options: FEMOptions,
         sf_options: SFOptions,
         pbd_options: PBDOptions,
+        pbstf_options: PBSTFOptions,
         vis_options: VisOptions,
         viewer_options: ViewerOptions,
         profiling_options: ProfilingOptions,
@@ -256,6 +265,9 @@ class Scene(RBC):
 
         if not isinstance(pbd_options, PBDOptions):
             gs.raise_exception("`pbd_options` should be an instance of `PBDOptions`.")
+
+        if not isinstance(pbstf_options, PBSTFOptions):
+            gs.raise_exception("`pbstf_options` should be an instance of `PBSTFOptions`.")
 
         if not isinstance(vis_options, VisOptions):
             gs.raise_exception("`vis_options` should be an instance of `VisOptions`.")
@@ -434,6 +446,7 @@ class Scene(RBC):
                 gs.materials.MPM.Sand,
                 gs.materials.MPM.Snow,
                 gs.materials.SPH.Liquid,
+                gs.materials.PBSTF.Liquid,
             ),
         ):
             if surface.vis_mode is None:
@@ -453,7 +466,9 @@ class Scene(RBC):
                     f"Unsupported `surface.vis_mode` for material {material}: '{surface.vis_mode}'. Expected one of: ['particle', 'recon']."
                 )
 
-        elif isinstance(material, (gs.materials.PBD.Base, gs.materials.MPM.Base, gs.materials.SPH.Base)):
+        elif isinstance(
+            material, (gs.materials.PBD.Base, gs.materials.PBSTF.Base, gs.materials.MPM.Base, gs.materials.SPH.Base)
+        ):
             if surface.vis_mode is None:
                 surface.vis_mode = "visual"
 
@@ -1770,6 +1785,11 @@ class Scene(RBC):
     def pbd_solver(self):
         """The scene's `pbd_solver`, managing all the `PBDEntity` in the scene."""
         return self._sim.pbd_solver
+
+    @property
+    def pbstf_solver(self):
+        """The scene's fluid-only position-based surface-tension solver."""
+        return self._sim.pbstf_solver
 
     @property
     def segmentation_idx_dict(self):

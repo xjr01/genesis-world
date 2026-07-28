@@ -47,9 +47,9 @@ def nowhere_particles(n):
 
 def trimesh_to_particles_simple(mesh, p_size, sampler):
     """
-    Mesh to particles via `random` or `regular` sampler.
+    Mesh to particles via `random`, `regular`, or `staggered` sampler.
     """
-    assert sampler in ("random", "regular")
+    assert sampler in ("random", "regular", "staggered")
 
     # compute file name via hashing for caching
     ptc_file_path = msu.get_ptc_path(mesh.vertices, mesh.faces, p_size, sampler)
@@ -179,8 +179,15 @@ def trimesh_to_particles_pbs(mesh, p_size, sampler, pos=(0, 0, 0)):
 
 def _box_to_particles(p_size, pos, size, sampler):
     """
-    Private function to sample particles from a box. This function only supports `random` and `regular` samplers.
-    This is a private function that does not consider additional mesh offset or scale.
+    Private function to sample particles from a box.
+
+    ``staggered`` reproduces the three-dimensional ``generateBoxPacked``
+    lattice used by the PBSTF C++ reference: nodes and face centers of a
+    staggered grid whose spacing is ``sqrt(2) * particle_size``.  Its nearest
+    particle distance is therefore exactly ``particle_size``.
+
+    This is a private function that supports `random`, `regular`, and
+    `staggered` samplers and does not consider additional mesh offset or scale.
     """
     size = np.array(size)
     pos = np.array(pos)
@@ -202,6 +209,30 @@ def _box_to_particles(p_size, pos, size, sampler):
         z = np.linspace(p_lower[2], p_upper[2], n_z)
         positions = np.stack(np.meshgrid(x, y, z, indexing="ij"), -1).reshape((-1, 3))
 
+    elif sampler == "staggered":
+        radius = 0.5 * p_size
+        spacing = np.sqrt(2.0) * p_size
+        resolution = np.maximum(np.floor((size - 2.0 * radius) / spacing + 0.5).astype(np.int64), 0)
+        origin = pos - 0.5 * resolution * spacing
+
+        lattices = []
+
+        node_axes = [np.arange(n + 1, dtype=np.float64) for n in resolution]
+        nodes = np.stack(np.meshgrid(*node_axes, indexing="ij"), -1).reshape((-1, 3))
+        lattices.append(origin + spacing * nodes)
+
+        for axis in range(3):
+            face_shape = resolution.copy()
+            face_shape[axis] += 1
+            if np.all(face_shape > 0):
+                face_axes = [np.arange(n, dtype=np.float64) for n in face_shape]
+                faces = np.stack(np.meshgrid(*face_axes, indexing="ij"), -1).reshape((-1, 3))
+                offset = np.full(3, 0.5, dtype=np.float64)
+                offset[axis] = 0.0
+                lattices.append(origin + spacing * (faces + offset))
+
+        positions = np.concatenate(lattices, axis=0)
+
     else:
         gs.raise_exception(f"Unsupported sampler method: {sampler}.")
 
@@ -217,7 +248,7 @@ def box_to_particles(p_size=0.01, pos=(0, 0, 0), size=(1, 1, 1), sampler="random
         except gs.GenesisException:
             sampler = "random"
 
-    if sampler in ("random", "regular"):
+    if sampler in ("random", "regular", "staggered"):
         positions = _box_to_particles(
             p_size=p_size,
             pos=pos,

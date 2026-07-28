@@ -320,6 +320,11 @@ class Raytracer:
             for sph_entity in self.sim.sph_solver.entities:
                 self.add_particles(str(sph_entity.uid), self.sim.sph_solver.particle_radius, sph_entity.material.rho)
 
+        # Position-based surface-tension fluid particles
+        if self.sim.pbstf_solver.is_active:
+            for entity in self.sim.pbstf_solver.entities:
+                self.add_particles(str(entity.uid), self.sim.pbstf_solver.particle_radius, entity.material.rho)
+
         # PBD entities
         if self.sim.pbd_solver.is_active:
             for pbd_entity in self.sim.pbd_solver.entities:
@@ -741,6 +746,19 @@ class Raytracer:
                 self.update_particles(
                     str(sph_entity.uid), particles, self.sim.sph_solver.particle_radius, particles_vel
                 )
+
+        # Position-based surface-tension fluid particles
+        if self.sim.pbstf_solver.is_active:
+            particles_all = self.sim.pbstf_solver.particles_render.pos.to_numpy()[:, self.rendered_envs_idx[0]]
+            particles_vel_all = self.sim.pbstf_solver.particles_render.vel.to_numpy()[:, self.rendered_envs_idx[0]]
+            active_all = self.sim.pbstf_solver.particles_render.active.to_numpy().astype(bool)[
+                :, self.rendered_envs_idx[0]
+            ]
+            for entity in self.sim.pbstf_solver.entities:
+                active = active_all[entity.particle_start : entity.particle_end]
+                particles = particles_all[entity.particle_start : entity.particle_end][active]
+                particles_vel = particles_vel_all[entity.particle_start : entity.particle_end][active]
+                self.update_particles(str(entity.uid), particles, self.sim.pbstf_solver.particle_radius, particles_vel)
 
         # PBD entities
         if self.sim.pbd_solver.is_active:
