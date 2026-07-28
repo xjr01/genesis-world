@@ -119,6 +119,7 @@ def build_scene(case=CASE_CUBE, scale=10, show_viewer=False):
         viewer_options=gs.options.ViewerOptions(
             camera_pos=settings["camera_pos"],
             camera_lookat=settings["camera_lookat"],
+            camera_up=(0.0, 1.0, 0.0),
             camera_fov=40,
         ),
         show_viewer=show_viewer,
