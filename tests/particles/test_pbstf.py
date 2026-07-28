@@ -3,6 +3,8 @@ import pytest
 
 import genesis as gs
 
+from examples.pbstf_surface_tension import CASE_BOUNCE, CASE_MERGE, build_scene
+
 
 @pytest.mark.required
 @pytest.mark.parametrize("backend", [gs.cuda])
@@ -102,6 +104,67 @@ def test_pbstf_cpp_cube_converges_to_sphere(show_viewer):
     assert final_surface.sum() == final_valid.sum()
     assert final_cv < 0.01
     assert final_cv < 0.1 * initial_cv
+
+
+@pytest.mark.required
+@pytest.mark.parametrize("backend", [gs.cuda])
+def test_pbstf_cpp_two_cubes_merge(show_viewer):
+    """C++ buildCase3 must turn two opposing box droplets into one connected drop."""
+    scene, (left, right) = build_scene(case=CASE_MERGE, scale=10, show_viewer=show_viewer)
+    solver = scene.pbstf_solver
+
+    left_initial = left.get_particles_pos().cpu().numpy()
+    right_initial = right.get_particles_pos().cpu().numpy()
+    initial_gap = np.linalg.norm(left_initial[:, None, :] - right_initial[None, :, :], axis=2).min()
+    assert initial_gap > solver._support_radius
+
+    for _ in range(15):
+        scene.step()
+
+    left_pos = left.get_particles_pos().cpu().numpy()
+    right_pos = right.get_particles_pos().cpu().numpy()
+    velocities = np.concatenate(
+        (left.get_particles_vel().cpu().numpy(), right.get_particles_vel().cpu().numpy()), axis=0
+    )
+    final_gap = np.linalg.norm(left_pos[:, None, :] - right_pos[None, :, :], axis=2).min()
+
+    assert np.isfinite(left_pos).all()
+    assert np.isfinite(right_pos).all()
+    # Each staggered droplet is internally connected at one particle diameter;
+    # this cross-edge therefore joins them into a single neighbor component.
+    assert final_gap < solver.particle_size
+    assert abs(velocities[:, 0].mean()) < 5e-3
+    assert abs(velocities[:, 2].mean()) < 5e-3
+
+
+@pytest.mark.required
+@pytest.mark.parametrize("backend", [gs.cuda])
+def test_pbstf_cpp_drop_hits_floor_and_bounces(show_viewer):
+    """C++ buildCase0 must hit y=-2, rebound, and leave the floor without penetration."""
+    scene, (drop,) = build_scene(case=CASE_BOUNCE, scale=10, show_viewer=show_viewer)
+    floor_height = -2.0
+    touched_floor = False
+    upward_after_contact = False
+    left_floor = False
+
+    for _ in range(25):
+        scene.step()
+        positions = drop.get_particles_pos().cpu().numpy()
+        velocities = drop.get_particles_vel().cpu().numpy()
+        min_y = positions[:, 1].min()
+
+        assert np.isfinite(positions).all()
+        assert min_y >= floor_height - 1e-6
+        if min_y <= floor_height + 1e-5:
+            touched_floor = True
+        if touched_floor and velocities[:, 1].mean() > 0.05:
+            upward_after_contact = True
+        if touched_floor and min_y > floor_height + 0.01:
+            left_floor = True
+
+    assert touched_floor
+    assert upward_after_contact
+    assert left_floor
 
 
 @pytest.mark.required
