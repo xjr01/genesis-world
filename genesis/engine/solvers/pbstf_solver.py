@@ -6,7 +6,7 @@ import quadrants as qd
 
 import genesis as gs
 import genesis.utils.geom as gu
-from genesis.engine.boundaries import CubeBoundary
+from genesis.engine.boundaries import CubeBoundary, create_static_collider
 from genesis.engine.entities import PBSTFEntity
 from genesis.engine.states.solvers import PBSTFSolverState
 
@@ -42,7 +42,9 @@ class PBSTFSolver(Solver):
         self._topology_rebuild_interval = options.topology_rebuild_interval
         self._max_surface_neighbors = options.max_surface_neighbors
         self._enable_pca_normals = options.enable_pca_normals
-        self._static_colliders = tuple(options.static_colliders)
+        self._static_colliders = tuple(
+            create_static_collider(collider_options) for collider_options in options.static_colliders
+        )
         self._n_static_colliders = len(self._static_colliders)
         self._upper_bound = np.asarray(options.upper_bound, dtype=gs.np_float)
         self._lower_bound = np.asarray(options.lower_bound, dtype=gs.np_float)
@@ -114,7 +116,6 @@ class PBSTFSolver(Solver):
 
             self._validate_materials()
             self.sh.build(self._B)
-            self._init_static_collider_fields()
             self._init_particle_fields()
             self._init_surface_fields()
 
@@ -192,153 +193,17 @@ class PBSTFSolver(Solver):
         self._surface_grad_i = qd.field(gs.qd_vec3, shape=(n, b))
         self._overflow = qd.field(gs.qd_int, shape=())
 
-    def _init_static_collider_fields(self):
-        field_size = max(self._n_static_colliders, 1)
-        centers = np.zeros((field_size, 3), dtype=gs.np_float)
-        heights = np.zeros((field_size, 3), dtype=gs.np_float)
-        radii = np.zeros(field_size, dtype=gs.np_float)
-        for i, collider in enumerate(self._static_colliders):
-            centers[i] = collider.center
-            heights[i] = collider.height
-            radii[i] = collider.radius
-
-        self._static_collider_centers = qd.field(gs.qd_vec3, shape=(field_size,))
-        self._static_collider_heights = qd.field(gs.qd_vec3, shape=(field_size,))
-        self._static_collider_radii = qd.field(gs.qd_float, shape=(field_size,))
-        self._static_collider_centers.from_numpy(centers)
-        self._static_collider_heights.from_numpy(heights)
-        self._static_collider_radii.from_numpy(radii)
-
-    # ------------------------------------------------------------------
-    # Analytic static colliders (C++ ImplicitCone semantics)
-    # ------------------------------------------------------------------
-
-    @qd.func
-    def _cone_radial_direction(self, pos, collider_idx):
-        center = self._static_collider_centers[collider_idx]
-        axis = self._static_collider_heights[collider_idx].normalized()
-        axial_distance = (pos - center).dot(axis)
-        radial = pos - center - axial_distance * axis
-        if radial.norm_sqr() <= gs.EPS**2:
-            fallback = qd.Vector([1.0, 0.0, 0.0], dt=gs.qd_float)
-            if axis[0] >= 0.1:
-                fallback = qd.Vector([0.0, 1.0, 0.0], dt=gs.qd_float)
-            radial = axis.cross(fallback).normalized()
-        else:
-            radial = radial.normalized()
-        return radial
-
-    @qd.func
-    def _cone_closest_position(self, pos, collider_idx):
-        center = self._static_collider_centers[collider_idx]
-        height = self._static_collider_heights[collider_idx]
-        radius = self._static_collider_radii[collider_idx]
-        axis = height.normalized()
-        axial_distance = (pos - center).dot(axis)
-        radial = self._cone_radial_direction(pos, collider_idx)
-
-        base_position = pos - axial_distance * axis
-        if (base_position - center).norm() > radius:
-            base_position = center + radius * radial
-
-        side_direction = (radius * radial - height).normalized()
-        side_parameter = (pos - center - height).dot(side_direction)
-        side_position = center + height
-        slant_length_sqr = height.norm_sqr() + radius * radius
-        if side_parameter >= 0.0:
-            if side_parameter * side_parameter > slant_length_sqr:
-                side_position = center + radius * radial
-            else:
-                side_position = center + height + side_parameter * side_direction
-
-        closest = side_position
-        if (base_position - pos).norm_sqr() < (side_position - pos).norm_sqr():
-            closest = base_position
-        return closest
-
-    @qd.func
-    def _cone_closest_normal(self, pos, collider_idx):
-        center = self._static_collider_centers[collider_idx]
-        height = self._static_collider_heights[collider_idx]
-        radius = self._static_collider_radii[collider_idx]
-        axis = height.normalized()
-        axial_distance = (pos - center).dot(axis)
-        radial = self._cone_radial_direction(pos, collider_idx)
-
-        base_position = pos - axial_distance * axis
-        if (base_position - center).norm() > radius:
-            base_position = center + radius * radial
-
-        side_direction = (radius * radial - height).normalized()
-        side_parameter = (pos - center - height).dot(side_direction)
-        side_position = center + height
-        side_normal = axis
-        slant_length_sqr = height.norm_sqr() + radius * radius
-        if side_parameter >= 0.0:
-            if side_parameter * side_parameter > slant_length_sqr:
-                side_position = center + radius * radial
-                side_normal = -axis
-            else:
-                side_position = center + height + side_parameter * side_direction
-                side_normal = (radial * height.norm() + axis * radius).normalized()
-
-        closest_normal = side_normal
-        if (base_position - pos).norm_sqr() < (side_position - pos).norm_sqr():
-            closest_normal = -axis
-        return closest_normal
-
-    @qd.func
-    def _cone_is_inside(self, pos, collider_idx):
-        center = self._static_collider_centers[collider_idx]
-        height = self._static_collider_heights[collider_idx]
-        radius = self._static_collider_radii[collider_idx]
-        axis = height.normalized()
-        axial_distance = (pos - center).dot(axis)
-        radial = self._cone_radial_direction(pos, collider_idx)
-
-        base_position = pos - axial_distance * axis
-        inside_base = axial_distance >= 0.0
-        if (base_position - center).norm() > radius:
-            base_position = center + radius * radial
-            inside_base = False
-
-        side_direction = (radius * radial - height).normalized()
-        side_parameter = (pos - center - height).dot(side_direction)
-        side_position = center + height
-        inside_side = False
-        slant_length_sqr = height.norm_sqr() + radius * radius
-        if side_parameter >= 0.0:
-            if side_parameter * side_parameter > slant_length_sqr:
-                side_position = center + radius * radial
-            else:
-                side_position = center + height + side_parameter * side_direction
-                side_normal = (radial * height.norm() + axis * radius).normalized()
-                inside_side = (pos - side_position).dot(side_normal) <= 0.0
-
-        inside = inside_side
-        if (base_position - pos).norm_sqr() < (side_position - pos).norm_sqr():
-            inside = inside_base
-        return inside
-
     @qd.func
     def _project_out_static_colliders(self, pos):
         for collider_idx in qd.static(range(self._n_static_colliders)):
-            if self._cone_is_inside(pos, collider_idx):
-                pos = self._cone_closest_position(pos, collider_idx)
+            pos = self._static_colliders[collider_idx].project_out(pos)
         return pos
 
     @qd.func
     def _separated_by_static_colliders(self, pos_i, pos_j):
         separated = False
         for collider_idx in qd.static(range(self._n_static_colliders)):
-            closest_i = self._cone_closest_position(pos_i, collider_idx)
-            closest_j = self._cone_closest_position(pos_j, collider_idx)
-            if (
-                (pos_i - closest_i).norm() <= self._particle_radius
-                and (pos_j - closest_j).norm() <= self._particle_radius
-                and self._cone_closest_normal(pos_i, collider_idx).dot(self._cone_closest_normal(pos_j, collider_idx))
-                < 0.0
-            ):
+            if self._static_colliders[collider_idx].separates(pos_i, pos_j, self._particle_radius):
                 separated = True
         return separated
 

@@ -2,8 +2,73 @@ import numpy as np
 import pytest
 
 import genesis as gs
+from genesis.engine.boundaries import ConeStaticCollider, StaticCollider
 
 from examples.pbstf_surface_tension import CASE_BOUNCE, CASE_CONE, CASE_MERGE, build_scene
+
+
+@pytest.mark.required
+@pytest.mark.parametrize("backend", [gs.cuda])
+def test_cone_static_collider_geometry():
+    """The analytic cone exposes consistent GPU closest-point, normal, and collision queries."""
+    import quadrants as qd
+
+    collider = ConeStaticCollider(center=(0.0, 0.0, 0.0), height=(0.0, 2.0, 0.0), radius=2.0)
+    points = np.array(
+        [
+            (0.5, 1.0, 0.0),
+            (1.5, 1.0, 0.0),
+            (0.25, -0.5, 0.0),
+            (0.5, -0.05, 0.0),
+            (1.95, 0.1, 0.0),
+            (1.85, 0.2, 0.0),
+        ],
+        dtype=gs.np_float,
+    )
+
+    @qd.data_oriented
+    class ColliderProbe:
+        def __init__(self):
+            self.n_points = len(points)
+            self.points = qd.field(gs.qd_vec3, shape=(self.n_points,))
+            self.closest = qd.field(gs.qd_vec3, shape=(self.n_points,))
+            self.normals = qd.field(gs.qd_vec3, shape=(self.n_points,))
+            self.projected = qd.field(gs.qd_vec3, shape=(self.n_points,))
+            self.inside = qd.field(gs.qd_bool, shape=(self.n_points,))
+            self.separated = qd.field(gs.qd_bool, shape=(2,))
+            self.points.from_numpy(points)
+
+        @qd.kernel
+        def run(self):
+            for i in range(self.n_points):
+                self.closest[i] = collider.closest_position(self.points[i])
+                self.normals[i] = collider.closest_normal(self.points[i])
+                self.projected[i] = collider.project_out(self.points[i])
+                self.inside[i] = collider.is_inside(self.points[i])
+            self.separated[0] = collider.separates(self.points[3], self.points[4], 0.2)
+            self.separated[1] = collider.separates(self.points[4], self.points[5], 0.2)
+
+    probe = ColliderProbe()
+    probe.run()
+
+    closest = probe.closest.to_numpy()
+    normals = probe.normals.to_numpy()
+    projected = probe.projected.to_numpy()
+    inside = probe.inside.to_numpy().astype(bool)
+    separated = probe.separated.to_numpy().astype(bool)
+
+    np.testing.assert_allclose(closest[0], (0.75, 1.25, 0.0), atol=1e-5)
+    np.testing.assert_allclose(closest[1], (1.25, 0.75, 0.0), atol=1e-5)
+    np.testing.assert_allclose(closest[2], (0.25, 0.0, 0.0), atol=1e-5)
+    np.testing.assert_allclose(normals[0], np.sqrt(0.5) * np.array((1.0, 1.0, 0.0)), atol=1e-5)
+    np.testing.assert_allclose(normals[2], (0.0, -1.0, 0.0), atol=1e-5)
+    np.testing.assert_allclose(projected[0], closest[0], atol=1e-5)
+    np.testing.assert_allclose(projected[1:], points[1:], atol=1e-5)
+    np.testing.assert_array_equal(inside, (True, False, False, False, False, False))
+    np.testing.assert_array_equal(separated, (True, False))
+
+    with pytest.raises(TypeError):
+        StaticCollider()
 
 
 @pytest.mark.required
@@ -177,6 +242,7 @@ def test_pbstf_cpp_drop_hits_cone_tip(show_viewer):
     rebounded = False
 
     assert solver._n_static_colliders == 1
+    assert isinstance(solver._static_colliders[0], ConeStaticCollider)
     for _ in range(20):
         scene.step()
         positions = drop.get_particles_pos().cpu().numpy()
