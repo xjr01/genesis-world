@@ -1,7 +1,7 @@
 from typing import Any, Literal
 
 import numpy as np
-from pydantic import PrivateAttr, StrictBool, model_validator
+from pydantic import Field, PrivateAttr, StrictBool, model_validator
 
 import genesis as gs
 from genesis.typing import NonNegativeFloat, NonNegativeInt, PositiveFloat, PositiveInt, UnitVec4FType, Vec3FType
@@ -743,6 +743,26 @@ class SPHOptions(Options):
             self._hash_grid_res = np.ceil(np.array(self.hash_grid_res) / self.hash_grid_cell_size).astype(gs.np_int)
 
 
+class PBSTFStaticColliderOptions(Options):
+    """Analytic static collider used exclusively by :class:`PBSTFSolver`.
+
+    A cone is parameterized exactly like the C++ reference ``ImplicitCone``:
+    ``center`` is the center of its base disk, ``height`` points from the base
+    center to the apex, and ``radius`` is the base radius.
+    """
+
+    type: Literal["cone"] = "cone"
+    center: Vec3FType
+    height: Vec3FType
+    radius: PositiveFloat
+
+    @model_validator(mode="after")
+    def _validate_geometry(self):
+        if np.linalg.norm(self.height) <= gs.EPS:
+            gs.raise_exception("PBSTF cone collider `height` must be non-zero.")
+        return self
+
+
 class PBSTFOptions(Options):
     """
     Options configuring the GPU position-based surface-tension fluid solver.
@@ -762,6 +782,7 @@ class PBSTFOptions(Options):
     topology_rebuild_interval: PositiveInt = 1
     max_surface_neighbors: PositiveInt = 128
     enable_pca_normals: bool = True
+    static_colliders: list[PBSTFStaticColliderOptions] = Field(default_factory=list)
 
     hash_grid_res: Vec3FType | None = None
     hash_grid_cell_size: PositiveFloat | None = None

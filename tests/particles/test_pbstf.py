@@ -3,7 +3,7 @@ import pytest
 
 import genesis as gs
 
-from examples.pbstf_surface_tension import CASE_BOUNCE, CASE_MERGE, build_scene
+from examples.pbstf_surface_tension import CASE_BOUNCE, CASE_CONE, CASE_MERGE, build_scene
 
 
 @pytest.mark.required
@@ -165,6 +165,39 @@ def test_pbstf_cpp_drop_hits_floor_and_bounces(show_viewer):
     assert touched_floor
     assert upward_after_contact
     assert left_floor
+
+
+@pytest.mark.required
+@pytest.mark.parametrize("backend", [gs.cuda])
+def test_pbstf_cpp_drop_hits_cone_tip(show_viewer):
+    """C++ buildCase15 must collide with the analytic cone and rebound without penetration."""
+    scene, (drop,) = build_scene(case=CASE_CONE, scale=10, show_viewer=show_viewer)
+    solver = scene.pbstf_solver
+    hit_cone = False
+    rebounded = False
+
+    assert solver._n_static_colliders == 1
+    for _ in range(20):
+        scene.step()
+        positions = drop.get_particles_pos().cpu().numpy()
+        velocities = drop.get_particles_vel().cpu().numpy()
+        radial = np.linalg.norm(positions[:, (0, 2)], axis=1)
+        cone_radius = np.sqrt(3.0) * (-2.0 - positions[:, 1])
+        below_tip = positions[:, 1] <= -2.0
+        above_base = positions[:, 1] >= -7.0
+
+        assert np.isfinite(positions).all()
+        assert not np.any(below_tip & above_base & (radial < cone_radius - 2e-5))
+        if np.any(below_tip & (radial <= cone_radius + 2e-3)):
+            hit_cone = True
+        if hit_cone and velocities[:, 1].mean() > 0.05:
+            rebounded = True
+
+    on_surface = solver.on_surface.to_numpy()[:, 0].astype(bool)
+    topology_valid = solver.topology_valid.to_numpy()[:, 0].astype(bool)
+    assert hit_cone
+    assert rebounded
+    assert topology_valid[on_surface].all()
 
 
 @pytest.mark.required
