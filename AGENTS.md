@@ -1,3 +1,7 @@
+# Local Repository Instructions
+
+Read and retain the repository-specific context in `.agents/memory.md` when working in this repository (if it exists).
+
 # Genesis Development Guidelines
 
 ## Miscellaneous

@@ -157,3 +157,6 @@ outputs/
 
 # Local benchmark archive (not versioned)
 /benchmarks/
+
+# Local agent memory (not versioned)
+/.agents/
