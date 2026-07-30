@@ -320,7 +320,7 @@ def _add_case_entities(scene, case, particle_size, settings):
                 surface_viscosity=0.2,
                 interior_viscosity=0.05,
                 is_collider_adhesion_friction_enabled=True,
-                collider_adhesion_compliance=10.0,
+                collider_adhesion_compliance=100.0,
                 collider_friction=0.01,
             ),
         )
@@ -385,6 +385,7 @@ def build_scene(case=CASE_CUBE, scale=None, show_viewer=False, dt=None):
             static_colliders=list(settings.static_colliders),
         ),
         viewer_options=gs.options.ViewerOptions(
+            refresh_rate=round(1.0 / dt),
             camera_pos=settings.camera_pos,
             camera_lookat=settings.camera_lookat,
             camera_up=(0.0, 1.0, 0.0),
