@@ -269,6 +269,8 @@ class ParticleEntity(Entity):
         elif isinstance(self._morph, (gs.options.morphs.Primitive, gs.options.morphs.Mesh)):
             particles = self._vmesh.particlize(self._particle_size, self.sampler)
             particles = particles.astype(gs.np_float, order="C", copy=False)
+        elif isinstance(self._morph, gs.options.morphs.Particles):
+            particles = np.array(self._morph.positions)
         elif isinstance(self._morph, gs.options.morphs.Nowhere):
             particles = pu.nowhere_particles(self._morph.n_particles)
         else:
@@ -327,7 +329,8 @@ class ParticleEntity(Entity):
                 np.array(self._morph.pos, dtype=gs.np_float),
                 np.array(self._morph.quat, dtype=gs.np_float),
             )
-            self._vmesh.apply_transform(gu.trans_quat_to_T(pos, quat))
+            if self._vmesh is not None:
+                self._vmesh.apply_transform(gu.trans_quat_to_T(pos, quat))
             # transform particles
             particles = gu.transform_by_trans_quat(particles, pos, quat)
 
@@ -339,7 +342,7 @@ class ParticleEntity(Entity):
                     f"max: {particles.max(0)}\n"
                 )
 
-            if self._need_skinning:
+            if self._need_skinning and self._vmesh is not None:
                 self._vverts = np.asarray(self._vmesh.verts, dtype=gs.np_float)
                 self._vfaces = np.asarray(self._vmesh.faces, dtype=gs.np_int)
             else:

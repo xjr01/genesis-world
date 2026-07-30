@@ -1,7 +1,7 @@
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 import numpy as np
-from pydantic import Field, PrivateAttr, StrictBool, model_validator
+from pydantic import Field, PrivateAttr, StrictBool, StrictInt, model_validator
 
 import genesis as gs
 from genesis.typing import NonNegativeFloat, NonNegativeInt, PositiveFloat, PositiveInt, UnitVec4FType, Vec3FType
@@ -744,11 +744,22 @@ class SPHOptions(Options):
 
 
 class PBSTFStaticColliderOptions(Options):
-    """Analytic static collider used exclusively by :class:`PBSTFSolver`.
+    """Base pose options for one-way PBSTF colliders.
 
-    A cone is parameterized exactly like the C++ reference ``ImplicitCone``:
-    ``center`` is the center of its base disk, ``height`` points from the base
-    center to the apex, and ``radius`` is the base radius.
+    The pose can change after scene construction through
+    :meth:`PBSTFSolver.set_static_colliders_pose`. The collider remains one-way: it affects the liquid and receives no
+    force or velocity response from it.
+    """
+
+    pos: Vec3FType = (0.0, 0.0, 0.0)
+    quat: UnitVec4FType = (1.0, 0.0, 0.0, 0.0)
+
+
+class PBSTFConeStaticColliderOptions(PBSTFStaticColliderOptions):
+    """Finite analytic cone collider.
+
+    ``center`` is the local-frame center of the base disk, ``height`` points from the base center to the apex, and
+    ``radius`` is the base radius.
     """
 
     type: Literal["cone"] = "cone"
@@ -761,6 +772,25 @@ class PBSTFStaticColliderOptions(Options):
         if np.linalg.norm(self.height) <= gs.EPS:
             gs.raise_exception("PBSTF cone collider `height` must be non-zero.")
         return self
+
+
+class PBSTFMeshStaticColliderOptions(PBSTFStaticColliderOptions):
+    """Signed-distance-field collider built from a watertight triangle mesh.
+
+    Higher ``sdf_res`` resolves thinner walls and sharper features at the cost of cubic build memory and longer
+    preprocessing. The cached field is expressed in the collider's local frame, so pose updates do not rebuild it.
+    """
+
+    type: Literal["mesh"] = "mesh"
+    file: str
+    scale: PositiveFloat = 1.0
+    sdf_res: StrictInt = Field(default=150, ge=16)
+
+
+PBSTFStaticColliderOptionsType = Annotated[
+    PBSTFConeStaticColliderOptions | PBSTFMeshStaticColliderOptions,
+    Field(discriminator="type"),
+]
 
 
 class PBSTFOptions(Options):
@@ -782,7 +812,7 @@ class PBSTFOptions(Options):
     topology_rebuild_interval: PositiveInt = 1
     max_surface_neighbors: PositiveInt = 128
     enable_pca_normals: bool = True
-    static_colliders: list[PBSTFStaticColliderOptions] = Field(default_factory=list)
+    static_colliders: list[PBSTFStaticColliderOptionsType] = Field(default_factory=list)
 
     hash_grid_res: Vec3FType | None = None
     hash_grid_cell_size: PositiveFloat | None = None

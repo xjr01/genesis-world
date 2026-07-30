@@ -11,6 +11,7 @@ from multiprocessing import Process, Queue
 import igl
 import numpy as np
 import trimesh
+from scipy import ndimage
 
 import genesis as gs
 
@@ -257,6 +258,59 @@ def box_to_particles(p_size=0.01, pos=(0, 0, 0), size=(1, 1, 1), sampler="random
         )
 
     return positions
+
+
+def mesh_cavity_to_particles(mesh, p_size, seed, max_height, clearance=None, height_axis=1):
+    """Sample the mesh cavity connected to ``seed`` on a regular lattice below ``max_height``.
+
+    Six-connected flood filling confines the result to the selected positive signed-distance component. A clearance of
+    at least half the lattice spacing makes every axial step observe the rejected band around a positive-thickness wall.
+    The function raises when the selected component reaches the mesh bounds, which indicates a path into the exterior.
+    """
+    if p_size <= 0.0:
+        gs.raise_exception("Mesh cavity particle spacing must be positive.")
+    if clearance is None:
+        clearance = 0.5 * p_size
+    if clearance < 0.5 * p_size:
+        gs.raise_exception("Mesh cavity clearance must be at least half the particle spacing.")
+    if height_axis not in (0, 1, 2):
+        gs.raise_exception("Mesh cavity height axis must be 0, 1, or 2.")
+
+    seed = np.array(seed)
+    lower = mesh.bounds[0] + clearance
+    upper = mesh.bounds[1] - clearance
+    upper[height_axis] = min(upper[height_axis], max_height)
+    if np.any(seed < lower) or np.any(seed > upper):
+        gs.raise_exception("Mesh cavity seed must lie within the sampling bounds and below the maximum height.")
+
+    grid_axes = []
+    axis_tolerance = p_size * 1e-9
+    for axis in range(3):
+        negative = np.arange(seed[axis] - p_size, lower[axis] - p_size, -p_size)
+        negative = negative[negative >= lower[axis] - axis_tolerance][::-1]
+        positive = np.arange(seed[axis], upper[axis] + p_size, p_size)
+        positive = positive[positive <= upper[axis] + axis_tolerance]
+        grid_axes.append(np.concatenate((negative, positive)))
+
+    resolution = tuple(len(grid_axis) for grid_axis in grid_axes)
+    query_points = np.stack(np.meshgrid(*grid_axes, indexing="ij"), axis=-1).reshape((-1, 3))
+    signed_distance, *_ = igl.signed_distance(query_points, mesh.vertices, mesh.faces)
+    is_available = signed_distance.reshape(resolution) >= clearance
+    seed_idx = tuple(np.searchsorted(grid_axes[axis], seed[axis]) for axis in range(3))
+    if not is_available[seed_idx]:
+        gs.raise_exception("Mesh cavity seed must be at least the requested clearance from the mesh surface.")
+
+    labels, _ = ndimage.label(is_available, ndimage.generate_binary_structure(rank=3, connectivity=1))
+    is_selected = labels == labels[seed_idx]
+    for axis in range(3):
+        has_boundary_reach = np.take(is_selected, indices=0, axis=axis).any()
+        if axis != height_axis:
+            has_boundary_reach |= np.take(is_selected, indices=-1, axis=axis).any()
+        if has_boundary_reach:
+            gs.raise_exception("Mesh cavity flood fill reached the mesh bounds.")
+
+    particles_idx = np.nonzero(is_selected)
+    return np.column_stack(tuple(grid_axes[axis][particles_idx[axis]] for axis in range(3)))
 
 
 def cylinder_to_particles(p_size=0.01, pos=(0, 0, 0), radius=0.5, height=1.0, sampler="random"):

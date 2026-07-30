@@ -30,6 +30,7 @@ from genesis.typing import (
     UnitVec4FType,
     Vec2IType,
     PositiveVec2FType,
+    Vec3FArrayType,
     Vec3FType,
 )
 
@@ -172,6 +173,16 @@ class Nowhere(Morph):
     """
 
     n_particles: StrictInt = Field(ge=1)
+
+
+class Particles(Morph):
+    """Explicit local-frame positions for a particle-based entity.
+
+    This morph preserves the supplied positions instead of resampling a volume. Its pose transforms the complete point
+    set at construction time, and rendering uses the solver's particle representation.
+    """
+
+    positions: Vec3FArrayType
 
 
 ############################ Shape Primitives ############################

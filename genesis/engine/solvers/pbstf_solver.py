@@ -3,12 +3,26 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 import quadrants as qd
+import torch
 
 import genesis as gs
 import genesis.utils.geom as gu
-from genesis.engine.boundaries import CubeBoundary, create_static_collider
+from genesis.engine.boundaries import (
+    CubeBoundary,
+    create_static_collider,
+    project_out_static_collider,
+    query_static_collider,
+    static_collider_separates,
+)
 from genesis.engine.entities import PBSTFEntity
 from genesis.engine.states.solvers import PBSTFSolverState
+from genesis.utils.misc import (
+    assign_indexed_tensor,
+    broadcast_tensor,
+    indices_to_mask,
+    qd_to_torch,
+    sanitize_index,
+)
 
 from .base_solver import Solver
 
@@ -46,6 +60,8 @@ class PBSTFSolver(Solver):
             create_static_collider(collider_options) for collider_options in options.static_colliders
         )
         self._n_static_colliders = len(self._static_colliders)
+        self._static_colliders_pos = None
+        self._static_colliders_quat = None
         self._upper_bound = np.asarray(options.upper_bound, dtype=gs.np_float)
         self._lower_bound = np.asarray(options.lower_bound, dtype=gs.np_float)
 
@@ -77,20 +93,22 @@ class PBSTFSolver(Solver):
     def _validate_materials(self):
         if not self.entities:
             return
-        keys = (
-            "rho",
-            "density_compliance",
-            "surface_tension_compliance",
-            "surface_distance_compliance",
-            "interior_distance_compliance",
-            "surface_viscosity",
-            "interior_viscosity",
-        )
         self._material = self.entities[0].material
-        reference = tuple(getattr(self._material, key) for key in keys)
         for entity in self.entities[1:]:
-            current = tuple(getattr(entity.material, key) for key in keys)
-            if current != reference:
+            material = entity.material
+            if (
+                material.rho != self._material.rho
+                or material.density_compliance != self._material.density_compliance
+                or material.surface_tension_compliance != self._material.surface_tension_compliance
+                or material.surface_distance_compliance != self._material.surface_distance_compliance
+                or material.interior_distance_compliance != self._material.interior_distance_compliance
+                or material.surface_viscosity != self._material.surface_viscosity
+                or material.interior_viscosity != self._material.interior_viscosity
+                or material.is_collider_adhesion_friction_enabled
+                != self._material.is_collider_adhesion_friction_enabled
+                or material.collider_adhesion_compliance != self._material.collider_adhesion_compliance
+                or material.collider_friction != self._material.collider_friction
+            ):
                 gs.raise_exception(
                     "All entities in one PBSTFSolver must use identical PBSTF liquid properties. "
                     "The reference algorithm is a single-phase fluid solver."
@@ -100,6 +118,21 @@ class PBSTFSolver(Solver):
         super().build()
         self._B = self._sim._B
         self._n_particles = self.n_particles
+        if self._n_static_colliders > 0:
+            self._static_colliders_pos = qd.field(gs.qd_vec3, shape=(self._n_static_colliders, self._B))
+            self._static_colliders_quat = qd.field(gs.qd_vec4, shape=(self._n_static_colliders, self._B))
+            colliders_pos = np.repeat(
+                np.stack([collider.pos for collider in self._static_colliders])[:, None, :],
+                repeats=self._B,
+                axis=1,
+            )
+            colliders_quat = np.repeat(
+                np.stack([collider.quat for collider in self._static_colliders])[:, None, :],
+                repeats=self._B,
+                axis=1,
+            )
+            self._static_colliders_pos.from_numpy(colliders_pos)
+            self._static_colliders_quat.from_numpy(colliders_quat)
 
         # Convert before compiling any PBSTF kernel so every compiled instance
         # sees one stable gravity-field type.
@@ -136,6 +169,62 @@ class PBSTFSolver(Solver):
             self._kernel_set_particle_mass(self._default_mass)
             self._kernel_reorder_particles(0)
             self._kernel_compute_density(0)
+
+    @gs.assert_built
+    def set_static_colliders_pose(self, pos, quat, colliders_idx=None, envs_idx=None):
+        """Set positions and orientations of selected one-way static colliders.
+
+        ``pos`` and ``quat`` broadcast to ``(n_envs, n_colliders, 3)`` and ``(n_envs, n_colliders, 4)`` respectively.
+        Quaternion values use the w-x-y-z convention.
+        """
+        if self._n_static_colliders == 0:
+            gs.raise_exception("Cannot set PBSTF static collider poses because the scene has no static colliders.")
+
+        envs_idx = self._scene._sanitize_envs_idx(envs_idx)
+        colliders_idx = sanitize_index(colliders_idx, -1, self._n_static_colliders, 1, "colliders_idx")
+        pos = broadcast_tensor(
+            pos,
+            gs.tc_float,
+            (len(envs_idx), len(colliders_idx), 3),
+            ("envs_idx", "colliders_idx", ""),
+        ).contiguous()
+        quat = broadcast_tensor(
+            quat,
+            gs.tc_float,
+            (len(envs_idx), len(colliders_idx), 4),
+            ("envs_idx", "colliders_idx", ""),
+        ).contiguous()
+        quat_norm = torch.linalg.vector_norm(quat, dim=-1, keepdim=True)
+        if (quat_norm <= gs.EPS).any():
+            gs.raise_exception("PBSTF static collider quaternions must be non-zero.")
+        quat = quat / quat_norm
+
+        if gs.use_zerocopy:
+            colliders_pos = qd_to_torch(self._static_colliders_pos, transpose=True, copy=False)
+            colliders_quat = qd_to_torch(self._static_colliders_quat, transpose=True, copy=False)
+            mask = indices_to_mask(envs_idx, colliders_idx)
+            assign_indexed_tensor(colliders_pos, mask, pos, ("envs_idx", "colliders_idx", ""))
+            assign_indexed_tensor(colliders_quat, mask, quat, ("envs_idx", "colliders_idx", ""))
+            if gs.backend == gs.metal:
+                torch.mps.synchronize()
+        else:
+            self._kernel_set_static_colliders_pose(colliders_idx, envs_idx, pos, quat)
+
+    @qd.kernel
+    def _kernel_set_static_colliders_pose(
+        self,
+        colliders_idx: qd.types.ndarray(),
+        envs_idx: qd.types.ndarray(),
+        pos: qd.types.ndarray(),
+        quat: qd.types.ndarray(),
+    ):
+        for env_idx_local, collider_idx_local in qd.ndrange(envs_idx.shape[0], colliders_idx.shape[0]):
+            env_idx = envs_idx[env_idx_local]
+            collider_idx = colliders_idx[collider_idx_local]
+            for axis in qd.static(range(3)):
+                self._static_colliders_pos[collider_idx, env_idx][axis] = pos[env_idx_local, collider_idx_local, axis]
+            for axis in qd.static(range(4)):
+                self._static_colliders_quat[collider_idx, env_idx][axis] = quat[env_idx_local, collider_idx_local, axis]
 
     def _init_particle_fields(self):
         particle_state = qd.types.struct(
@@ -194,16 +283,32 @@ class PBSTFSolver(Solver):
         self._overflow = qd.field(gs.qd_int, shape=())
 
     @qd.func
-    def _project_out_static_colliders(self, pos):
+    def _project_out_static_colliders(self, env_idx, pos):
         for collider_idx in qd.static(range(self._n_static_colliders)):
-            pos = self._static_colliders[collider_idx].project_out(pos)
+            pos = project_out_static_collider(
+                collider_idx,
+                env_idx,
+                pos,
+                self._static_colliders_pos,
+                self._static_colliders_quat,
+                self._static_colliders[collider_idx],
+            )
         return pos
 
     @qd.func
-    def _separated_by_static_colliders(self, pos_i, pos_j):
+    def _separated_by_static_colliders(self, env_idx, pos_i, pos_j):
         separated = False
         for collider_idx in qd.static(range(self._n_static_colliders)):
-            if self._static_colliders[collider_idx].separates(pos_i, pos_j, self._particle_radius):
+            if static_collider_separates(
+                collider_idx,
+                env_idx,
+                pos_i,
+                pos_j,
+                self._particle_radius,
+                self._static_colliders_pos,
+                self._static_colliders_quat,
+                self._static_colliders[collider_idx],
+            ):
                 separated = True
         return separated
 
@@ -270,7 +375,7 @@ class PBSTFSolver(Solver):
         if self.particles_ng_reordered[j, i_b].active:
             pos_i = self.particles_reordered[i, i_b].pos
             pos_j = self.particles_reordered[j, i_b].pos
-            if not self._separated_by_static_colliders(pos_i, pos_j):
+            if not self._separated_by_static_colliders(i_b, pos_i, pos_j):
                 distance = (pos_i - pos_j).norm()
                 result += self.particles_info_reordered[j, i_b].mass * self.cubic_kernel(distance)
 
@@ -304,7 +409,7 @@ class PBSTFSolver(Solver):
         delta = self.particles_reordered[j, i_b].pos - self.particles_reordered[i, i_b].pos
         distance = delta.norm()
         if distance > gs.EPS and not self._separated_by_static_colliders(
-            self.particles_reordered[i, i_b].pos, self.particles_reordered[j, i_b].pos
+            i_b, self.particles_reordered[i, i_b].pos, self.particles_reordered[j, i_b].pos
         ):
             unit_theta = math.pi / self._N_THETA
             unit_phi = 2.0 * math.pi / self._N_PHI
@@ -381,7 +486,7 @@ class PBSTFSolver(Solver):
     def _task_normal_covariance(self, i, j, unused: qd.template(), i_b):
         delta = self.particles_reordered[j, i_b].pos - self.particles_reordered[i, i_b].pos
         separated = self._separated_by_static_colliders(
-            self.particles_reordered[i, i_b].pos, self.particles_reordered[j, i_b].pos
+            i_b, self.particles_reordered[i, i_b].pos, self.particles_reordered[j, i_b].pos
         )
         if not separated:
             density_j = self.particles_reordered[j, i_b].density
@@ -495,7 +600,7 @@ class PBSTFSolver(Solver):
     @qd.func
     def _task_collect_mesh_neighbor(self, i, j, result: qd.template(), i_b):
         if self.on_surface[j, i_b] and not self._separated_by_static_colliders(
-            self.particles_reordered[i, i_b].pos, self.particles_reordered[j, i_b].pos
+            i_b, self.particles_reordered[i, i_b].pos, self.particles_reordered[j, i_b].pos
         ):
             delta = self.particles_reordered[j, i_b].pos - self.particles_reordered[i, i_b].pos
             distance = delta.norm()
@@ -670,7 +775,7 @@ class PBSTFSolver(Solver):
     def _task_density_constraint(self, i, j, result: qd.template(), i_b):
         pos_i = self.particles_reordered[i, i_b].pos
         pos_j = self.particles_reordered[j, i_b].pos
-        if not self._separated_by_static_colliders(pos_i, pos_j):
+        if not self._separated_by_static_colliders(i_b, pos_i, pos_j):
             mass_j = self.particles_info_reordered[j, i_b].mass
             rho_rest = self._density_target(i, i_b)
             delta = pos_i - pos_j
@@ -712,7 +817,7 @@ class PBSTFSolver(Solver):
     def _task_apply_density_constraint(self, i, j, unused: qd.template(), i_b):
         pos_i = self.particles_reordered[i, i_b].pos
         pos_j = self.particles_reordered[j, i_b].pos
-        if not self._separated_by_static_colliders(pos_i, pos_j):
+        if not self._separated_by_static_colliders(i_b, pos_i, pos_j):
             rho_rest = self._density_target(i, i_b)
             mass_j = self.particles_info_reordered[j, i_b].mass
             delta = pos_i - pos_j
@@ -810,7 +915,7 @@ class PBSTFSolver(Solver):
             i < j
             and self.on_surface[i, i_b] == self.on_surface[j, i_b]
             and not self._separated_by_static_colliders(
-                self.particles_reordered[i, i_b].pos, self.particles_reordered[j, i_b].pos
+                i_b, self.particles_reordered[i, i_b].pos, self.particles_reordered[j, i_b].pos
             )
         ):
             pi = self.particles_reordered[i, i_b].pos
@@ -853,13 +958,34 @@ class PBSTFSolver(Solver):
                 )
 
     @qd.kernel
+    def _kernel_apply_static_collider_adhesion(self):
+        for i, i_b in qd.ndrange(self._n_particles, self._B):
+            if self.particles_ng_reordered[i, i_b].active and self.on_surface[i, i_b]:
+                pos = self.particles_reordered[i, i_b].pos
+                mass = self.particles_info_reordered[i, i_b].mass
+                for collider_idx in qd.static(range(self._n_static_colliders)):
+                    closest, normal, _, surface_distance = query_static_collider(
+                        collider_idx,
+                        i_b,
+                        pos,
+                        self._static_colliders_pos,
+                        self._static_colliders_quat,
+                        self._static_colliders[collider_idx],
+                    )
+                    if surface_distance <= self._particle_radius:
+                        constraint = (pos - closest).dot(normal)
+                        denominator = self._material.collider_adhesion_compliance / self._default_mass + 1.0 / mass
+                        if denominator > gs.EPS:
+                            self.particles_reordered[i, i_b].dpos += -constraint / denominator / mass * normal
+
+    @qd.kernel
     def _kernel_apply_position_delta(self):
         for i, i_b in qd.ndrange(self._n_particles, self._B):
             if self.particles_ng_reordered[i, i_b].active:
                 pos = self.boundary.impose_pos(
                     self.particles_reordered[i, i_b].pos + self.particles_reordered[i, i_b].dpos
                 )
-                self.particles_reordered[i, i_b].pos = self._project_out_static_colliders(pos)
+                self.particles_reordered[i, i_b].pos = self._project_out_static_colliders(i_b, pos)
 
     # ------------------------------------------------------------------
     # Time integration and XSPH velocity filtering
@@ -922,10 +1048,28 @@ class PBSTFSolver(Solver):
         for i, i_b in qd.ndrange(self._n_particles, self._B):
             if self.particles_ng_reordered[i, i_b].active:
                 self.particles_reordered[i, i_b].vel += self.particles_reordered[i, i_b].dpos
+                if qd.static(self._material.is_collider_adhesion_friction_enabled):
+                    if self.particles_reordered[i, i_b].surface:
+                        pos = self.particles_reordered[i, i_b].pos
+                        vel = self.particles_reordered[i, i_b].vel
+                        for collider_idx in qd.static(range(self._n_static_colliders)):
+                            _, normal, _, surface_distance = query_static_collider(
+                                collider_idx,
+                                i_b,
+                                pos,
+                                self._static_colliders_pos,
+                                self._static_colliders_quat,
+                                self._static_colliders[collider_idx],
+                            )
+                            if surface_distance <= self._particle_radius:
+                                vel_normal = vel.dot(normal) * normal
+                                vel_tangent = vel - vel_normal
+                                vel = vel_normal + (1.0 - self._material.collider_friction) * vel_tangent
+                        self.particles_reordered[i, i_b].vel = vel
                 pos = self.boundary.impose_pos(
                     self.particles_reordered[i, i_b].ipos + self._substep_dt * self.particles_reordered[i, i_b].vel
                 )
-                self.particles_reordered[i, i_b].pos = self._project_out_static_colliders(pos)
+                self.particles_reordered[i, i_b].pos = self._project_out_static_colliders(i_b, pos)
 
     # ------------------------------------------------------------------
     # Stepping
@@ -964,6 +1108,8 @@ class PBSTFSolver(Solver):
             self._kernel_apply_surface_constraints()
             if iteration % 2 == 0:
                 self._kernel_apply_distance_constraints()
+            if self._material.is_collider_adhesion_friction_enabled:
+                self._kernel_apply_static_collider_adhesion()
             self._kernel_apply_position_delta()
 
         self._kernel_update_velocities_from_positions()

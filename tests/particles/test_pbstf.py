@@ -1,18 +1,41 @@
+import math
+import os
+
+import igl
 import numpy as np
 import pytest
+import quadrants as qd
+import trimesh
 
 import genesis as gs
-from genesis.engine.boundaries import ConeStaticCollider, StaticCollider
+import genesis.utils.geom as geom_utils
+import genesis.utils.mesh as mesh_utils
+import genesis.utils.particle as particle_utils
+from genesis.engine.boundaries import (
+    ConeStaticCollider,
+    StaticCollider,
+    project_out_static_collider,
+    query_static_collider,
+    static_collider_separates,
+)
+from genesis.utils.misc import qd_to_numpy, tensor_to_array
+from tests.utils import assert_allclose, assert_equal
 
-from examples.pbstf_surface_tension import CASE_BOUNCE, CASE_CONE, CASE_MERGE, build_scene
+from examples.pbstf_surface_tension import (
+    CASE_BOUNCE,
+    CASE_CONE,
+    CASE_MERGE,
+    CASE_TEAPOT,
+    CASES,
+    _case_settings,
+    _teapot_pose,
+    build_scene,
+)
 
 
 @pytest.mark.required
 @pytest.mark.parametrize("backend", [gs.cuda])
 def test_cone_static_collider_geometry():
-    """The analytic cone exposes consistent GPU closest-point, normal, and collision queries."""
-    import quadrants as qd
-
     collider = ConeStaticCollider(center=(0.0, 0.0, 0.0), height=(0.0, 2.0, 0.0), radius=2.0)
     points = np.array(
         [
@@ -26,49 +49,261 @@ def test_cone_static_collider_geometry():
         dtype=gs.np_float,
     )
 
-    @qd.data_oriented
-    class ColliderProbe:
-        def __init__(self):
-            self.n_points = len(points)
-            self.points = qd.field(gs.qd_vec3, shape=(self.n_points,))
-            self.closest = qd.field(gs.qd_vec3, shape=(self.n_points,))
-            self.normals = qd.field(gs.qd_vec3, shape=(self.n_points,))
-            self.projected = qd.field(gs.qd_vec3, shape=(self.n_points,))
-            self.inside = qd.field(gs.qd_bool, shape=(self.n_points,))
-            self.separated = qd.field(gs.qd_bool, shape=(2,))
-            self.points.from_numpy(points)
+    points_qd = qd.field(gs.qd_vec3, shape=(len(points),))
+    closest_qd = qd.field(gs.qd_vec3, shape=(len(points),))
+    normals_qd = qd.field(gs.qd_vec3, shape=(len(points),))
+    projected_qd = qd.field(gs.qd_vec3, shape=(len(points),))
+    inside_qd = qd.field(gs.qd_bool, shape=(len(points),))
+    separated_qd = qd.field(gs.qd_bool, shape=(2,))
+    colliders_pos_qd = qd.field(gs.qd_vec3, shape=(1, 1))
+    colliders_quat_qd = qd.field(gs.qd_vec4, shape=(1, 1))
+    points_qd.from_numpy(points)
+    colliders_pos_qd.from_numpy(np.zeros((1, 1, 3), dtype=gs.np_float))
+    colliders_quat_qd.from_numpy(np.array([[[1.0, 0.0, 0.0, 0.0]]], dtype=gs.np_float))
 
-        @qd.kernel
-        def run(self):
-            for i in range(self.n_points):
-                self.closest[i] = collider.closest_position(self.points[i])
-                self.normals[i] = collider.closest_normal(self.points[i])
-                self.projected[i] = collider.project_out(self.points[i])
-                self.inside[i] = collider.is_inside(self.points[i])
-            self.separated[0] = collider.separates(self.points[3], self.points[4], 0.2)
-            self.separated[1] = collider.separates(self.points[4], self.points[5], 0.2)
+    @qd.kernel
+    def run(
+        points_field: qd.template(),
+        closest_field: qd.template(),
+        normals_field: qd.template(),
+        projected_field: qd.template(),
+        inside_field: qd.template(),
+        separated_field: qd.template(),
+        colliders_pos: qd.template(),
+        colliders_quat: qd.template(),
+        collider_geometry: qd.template(),
+    ):
+        for i in range(points_field.shape[0]):
+            closest, normal, is_inside, _ = query_static_collider(
+                0, 0, points_field[i], colliders_pos, colliders_quat, collider_geometry
+            )
+            closest_field[i] = closest
+            normals_field[i] = normal
+            projected_field[i] = project_out_static_collider(
+                0, 0, points_field[i], colliders_pos, colliders_quat, collider_geometry
+            )
+            inside_field[i] = is_inside
+        separated_field[0] = static_collider_separates(
+            0, 0, points_field[3], points_field[4], 0.2, colliders_pos, colliders_quat, collider_geometry
+        )
+        separated_field[1] = static_collider_separates(
+            0, 0, points_field[4], points_field[5], 0.2, colliders_pos, colliders_quat, collider_geometry
+        )
 
-    probe = ColliderProbe()
-    probe.run()
+    run(
+        points_qd,
+        closest_qd,
+        normals_qd,
+        projected_qd,
+        inside_qd,
+        separated_qd,
+        colliders_pos_qd,
+        colliders_quat_qd,
+        collider,
+    )
 
-    closest = probe.closest.to_numpy()
-    normals = probe.normals.to_numpy()
-    projected = probe.projected.to_numpy()
-    inside = probe.inside.to_numpy().astype(bool)
-    separated = probe.separated.to_numpy().astype(bool)
+    closest = qd_to_numpy(closest_qd, transpose=True)
+    normals = qd_to_numpy(normals_qd, transpose=True)
+    projected = qd_to_numpy(projected_qd, transpose=True)
+    inside = qd_to_numpy(inside_qd, transpose=True)
+    separated = qd_to_numpy(separated_qd, transpose=True)
 
-    np.testing.assert_allclose(closest[0], (0.75, 1.25, 0.0), atol=1e-5)
-    np.testing.assert_allclose(closest[1], (1.25, 0.75, 0.0), atol=1e-5)
-    np.testing.assert_allclose(closest[2], (0.25, 0.0, 0.0), atol=1e-5)
-    np.testing.assert_allclose(normals[0], np.sqrt(0.5) * np.array((1.0, 1.0, 0.0)), atol=1e-5)
-    np.testing.assert_allclose(normals[2], (0.0, -1.0, 0.0), atol=1e-5)
-    np.testing.assert_allclose(projected[0], closest[0], atol=1e-5)
-    np.testing.assert_allclose(projected[1:], points[1:], atol=1e-5)
-    np.testing.assert_array_equal(inside, (True, False, False, False, False, False))
-    np.testing.assert_array_equal(separated, (True, False))
+    assert_allclose(closest[0], (0.75, 1.25, 0.0), atol=1e-5)
+    assert_allclose(closest[1], (1.25, 0.75, 0.0), atol=1e-5)
+    assert_allclose(closest[2], (0.25, 0.0, 0.0), atol=1e-5)
+    assert_allclose(normals[0], np.sqrt(0.5) * np.array((1.0, 1.0, 0.0)), atol=1e-5)
+    assert_allclose(normals[2], (0.0, -1.0, 0.0), atol=1e-5)
+    assert_allclose(projected[0], closest[0], atol=1e-5)
+    assert_allclose(projected[1:], points[1:], atol=1e-5)
+    assert_equal(inside, (True, False, False, False, False, False))
+    assert_equal(separated, (True, False))
 
     with pytest.raises(TypeError):
         StaticCollider()
+
+
+@pytest.mark.required
+@pytest.mark.parametrize("backend", [gs.cuda])
+@pytest.mark.parametrize("n_envs", [0, 2])
+def test_mesh_static_collider_pose(asset_tmp_path, n_envs, show_viewer):
+    mesh_path = asset_tmp_path / f"pbstf_static_collider_box_{n_envs}.obj"
+    trimesh.creation.box().export(mesh_path)
+    target_pos = (1.0, 2.0, 3.0)
+    target_quat = (math.sqrt(0.5), math.sqrt(0.5), 0.0, 0.0)
+    collider_options = [
+        gs.options.PBSTFMeshStaticColliderOptions(
+            file=str(mesh_path),
+            sdf_res=16,
+        ),
+        gs.options.PBSTFMeshStaticColliderOptions(
+            file=str(mesh_path),
+            sdf_res=16,
+        ),
+    ]
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=1e-3,
+            gravity=(0.0, 0.0, 0.0),
+        ),
+        pbstf_options=gs.options.PBSTFOptions(
+            particle_size=0.1,
+            lower_bound=(-4.0, -4.0, -4.0),
+            upper_bound=(4.0, 4.0, 4.0),
+            max_solver_iterations=1,
+            max_surface_neighbors=16,
+            static_colliders=collider_options,
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(6.0, 6.0, 6.0),
+            camera_lookat=(1.0, 2.0, 3.0),
+        ),
+        show_viewer=show_viewer,
+    )
+    liquid = scene.add_entity(
+        morph=gs.morphs.Particles(
+            positions=(target_pos,),
+        ),
+        material=gs.materials.PBSTF.Liquid(
+            sampler="regular",
+        ),
+    )
+    scene.build(n_envs=n_envs)
+
+    scene.pbstf_solver.set_static_colliders_pose(
+        pos=target_pos,
+        quat=target_quat,
+        colliders_idx=1,
+        envs_idx=n_envs - 1 if n_envs else None,
+    )
+
+    colliders_pos = qd_to_numpy(scene.pbstf_solver._static_colliders_pos, transpose=True)
+    colliders_quat = qd_to_numpy(scene.pbstf_solver._static_colliders_quat, transpose=True)
+    expected_pos = np.zeros((max(n_envs, 1), 2, 3), dtype=gs.np_float)
+    expected_quat = np.zeros((max(n_envs, 1), 2, 4), dtype=gs.np_float)
+    expected_quat[..., 0] = 1.0
+    expected_pos[-1, 1] = target_pos
+    expected_quat[-1, 1] = target_quat
+
+    assert liquid.n_particles == 1
+    assert_allclose(colliders_pos, expected_pos, atol=1e-6)
+    assert_allclose(colliders_quat, expected_quat, atol=1e-6)
+
+    scene.step()
+    particles_pos = tensor_to_array(liquid.get_particles_pos())
+    if n_envs:
+        assert_allclose(particles_pos[:-1, 0], (target_pos,))
+        projected_pos = particles_pos[-1, 0]
+    else:
+        projected_pos = particles_pos[0]
+    assert np.linalg.norm(projected_pos - target_pos) > 0.4
+
+
+@pytest.mark.required
+@pytest.mark.parametrize("backend", [gs.cuda])
+def test_static_collider_adhesion_and_friction(show_viewer):
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=1e-3,
+            gravity=(0.0, 0.0, 0.0),
+        ),
+        pbstf_options=gs.options.PBSTFOptions(
+            particle_size=0.2,
+            lower_bound=(-3.0, -3.0, -3.0),
+            upper_bound=(3.0, 3.0, 3.0),
+            max_solver_iterations=1,
+            max_surface_neighbors=16,
+            static_colliders=[
+                gs.options.PBSTFConeStaticColliderOptions(
+                    center=(0.0, 0.0, 0.0),
+                    height=(0.0, 2.0, 0.0),
+                    radius=2.0,
+                ),
+            ],
+        ),
+        show_viewer=show_viewer,
+    )
+    liquid = scene.add_entity(
+        morph=gs.morphs.Particles(
+            positions=((0.0, -0.05, 0.0),),
+        ),
+        material=gs.materials.PBSTF.Liquid(
+            sampler="regular",
+            is_collider_adhesion_friction_enabled=True,
+            collider_adhesion_compliance=10.0,
+            collider_friction=0.25,
+        ),
+    )
+    scene.build()
+    solver = scene.pbstf_solver
+
+    solver._kernel_reorder_particles(0)
+    solver.particles_reordered.dpos.fill(0.0)
+    solver.on_surface.fill(True)
+    solver._kernel_apply_static_collider_adhesion()
+    adhesion_delta = qd_to_numpy(solver.particles_reordered.dpos, transpose=True)[0, 0]
+    mass = qd_to_numpy(solver.particles_info_reordered.mass, transpose=True)[0, 0]
+    denominator = liquid.material.collider_adhesion_compliance / solver._default_mass + 1.0 / mass
+    expected_adhesion_delta = np.array((0.0, 0.05 / denominator / mass, 0.0))
+    assert_allclose(adhesion_delta, expected_adhesion_delta, atol=1e-6)
+
+    liquid.set_particles_vel((1.0, 1.0, 0.0))
+    solver._kernel_reorder_particles(0)
+    solver.particles_reordered.dpos.fill(0.0)
+    solver.particles_reordered.surface.fill(True)
+    solver._kernel_apply_viscosity()
+    velocity = qd_to_numpy(solver.particles_reordered.vel, transpose=True)[0, 0]
+    assert_allclose(velocity, (0.75, 1.0, 0.0), atol=1e-6)
+
+
+@pytest.mark.required
+@pytest.mark.parametrize("backend", [gs.cpu])
+def test_teapot_initial_particles_pose_and_case_time_steps():
+    teapot_settings = _case_settings(CASE_TEAPOT).teapot
+    teapot_mesh = mesh_utils.load_mesh(os.path.join(gs.utils.get_assets_dir(), teapot_settings.asset)).copy()
+    teapot_mesh.merge_vertices(merge_tex=True, merge_norm=True)
+    teapot_mesh.vertices = geom_utils.transform_by_quat(
+        teapot_mesh.vertices * teapot_settings.mesh_scale,
+        np.array(teapot_settings.quat),
+    ) + np.array(teapot_settings.offset)
+    particles = particle_utils.mesh_cavity_to_particles(
+        teapot_mesh,
+        p_size=0.1,
+        seed=teapot_settings.particles_seed,
+        max_height=teapot_settings.particles_max_height,
+        clearance=0.05,
+    )
+    signed_distance, *_ = igl.signed_distance(particles, teapot_mesh.vertices, teapot_mesh.faces)
+
+    assert teapot_settings.asset == "meshes/utah_teapot.obj"
+    assert teapot_mesh.is_watertight
+    assert_equal(len(particles), 146612)
+    assert (signed_distance >= 0.05).all()
+    assert particles[:, 1].min() < -3.2
+    assert_allclose(particles[:, 1].max(), teapot_settings.particles_max_height, atol=1e-12)
+    assert particles[:, 2].max() > 5.0
+    for case in CASES:
+        settings = _case_settings(case)
+        expected_scale = 20 if case == CASE_TEAPOT else 10
+        expected_dt = 0.01 if case == CASE_TEAPOT else 1.0 / 30.0
+        assert_equal(settings.scale, expected_scale)
+        assert_equal(settings.dt, expected_dt)
+    for time, angle_degrees in ((0.0, 0.0), (18.0, 27.0), (28.0, 27.0), (29.6, 19.0), (35.0, 19.0)):
+        pose = _teapot_pose(time, teapot_settings)
+        angle = math.radians(angle_degrees)
+        assert_allclose(
+            pose.pos,
+            (
+                teapot_settings.offset[0],
+                teapot_settings.offset[1] * math.cos(angle) - teapot_settings.offset[2] * math.sin(angle),
+                teapot_settings.offset[1] * math.sin(angle) + teapot_settings.offset[2] * math.cos(angle),
+            ),
+            atol=1e-12,
+        )
+        expected_quat = geom_utils.transform_quat_by_quat(
+            np.array(teapot_settings.quat),
+            np.array((math.cos(0.5 * angle), math.sin(0.5 * angle), 0.0, 0.0)),
+        )
+        assert_allclose(pose.quat, expected_quat, atol=1e-12)
 
 
 @pytest.mark.required
