@@ -657,6 +657,13 @@ def func_forward_velocity_entity(
             cvel_ang = W(
                 I_j0, dyn_state.links.cd_ang[dyn_info.links.parent_idx[I_l], i_b], dyn_state.links.cd_ang_bw, BW
             )
+        else:
+            kinematic_ang = dyn_state.links.kinematic_ang[i_l, i_b]
+            kinematic_vel = dyn_state.links.kinematic_vel[i_l, i_b] + kinematic_ang.cross(
+                dyn_state.links.root_COM[i_l, i_b] - dyn_state.links.pos[i_l, i_b]
+            )
+            cvel_vel = W(I_j0, kinematic_vel, dyn_state.links.cd_vel_bw, BW)
+            cvel_ang = W(I_j0, kinematic_ang, dyn_state.links.cd_ang_bw, BW)
 
         for i_j_ in range(n_joints):
             i_j = i_j_ + dyn_info.links.joint_start[I_l]

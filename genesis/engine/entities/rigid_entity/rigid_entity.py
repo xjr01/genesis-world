@@ -3676,6 +3676,28 @@ class RigidEntity(KinematicEntity):
         return self._solver.get_links_vel(links_idx, envs_idx, ref=ref)
 
     @gs.assert_built
+    @tracked
+    def set_velocity(self, vel=None, ang=None, envs_idx=None):
+        """Set the prescribed world-frame velocity of a fixed entity's base link.
+
+        Parameters
+        ----------
+        vel : array_like | None
+            Linear velocity at the base-link origin. Zero if unspecified.
+        ang : array_like | None
+            Angular velocity. Zero if unspecified.
+        envs_idx : None | array_like, optional
+            The indices of the environments. If None, all environments are considered.
+        """
+        if not self.base_link.is_fixed:
+            gs.raise_exception("Prescribed base velocity is only supported for fixed rigid entities.")
+        if vel is None:
+            vel = (0.0, 0.0, 0.0)
+        if ang is None:
+            ang = (0.0, 0.0, 0.0)
+        self._solver.set_fixed_links_velocity(vel, ang, self.base_link_idx, envs_idx)
+
+    @gs.assert_built
     def get_links_acc(self, links_idx_local=None, envs_idx=None):
         links_idx = self._get_global_idx(links_idx_local, self.n_links, self._link_start, unsafe=True)
         return self._solver.get_links_acc(links_idx, envs_idx)

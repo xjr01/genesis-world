@@ -1,6 +1,8 @@
 import re
 import sys
 import time
+from threading import Lock
+from unittest.mock import MagicMock, Mock
 
 import numpy as np
 import OpenGL.error
@@ -12,10 +14,57 @@ from genesis.utils.misc import tensor_to_array
 from genesis.vis.keybindings import Key, KeyAction, Keybind, KeyMod, MouseButton
 
 from ..conftest import IS_INTERACTIVE_VIEWER_AVAILABLE, SKIP_NO_VIEWER
-from ..utils import assert_allclose
+from ..utils import assert_allclose, assert_equal
 from .conftest import RENDERER_TYPE
 
 CAM_RES = (480, 320)
+
+
+@pytest.mark.required
+def test_recording_without_frames(tmp_path, monkeypatch):
+    pyrender_viewer = object.__new__(gs.ext.pyrender.viewer.Viewer)
+    pyrender_viewer._recording_lock = Lock()
+    pyrender_viewer._viewer_flags = {"record": True}
+    video_recorder = Mock(filename=tmp_path / "tmp_video.mp4")
+    pyrender_viewer._video_recorder = video_recorder
+    get_save_filename = Mock()
+    monkeypatch.setattr(gs.ext.pyrender.viewer.Viewer, "_get_save_filename", get_save_filename)
+
+    pyrender_viewer.save_video()
+
+    assert_equal(video_recorder.close.call_count, 1)
+    assert_equal(get_save_filename.call_count, 0)
+
+
+@pytest.mark.required
+def test_recording_uses_independent_lock(monkeypatch):
+    pyrender_viewer = object.__new__(gs.ext.pyrender.viewer.Viewer)
+    recording_lock = Lock()
+    pyrender_viewer._recording_lock = recording_lock
+    render_lock = MagicMock()
+    render_lock.__enter__.side_effect = AssertionError("Recording must not acquire the scene render lock.")
+    pyrender_viewer._render_lock = render_lock
+    pyrender_viewer._viewer_flags = {
+        "record": False,
+        "refresh_rate": 60,
+        "window_title": "Viewer",
+    }
+    pyrender_viewer._viewport_size = (64, 64)
+
+    def set_caption(_caption):
+        is_recording_lock_acquired = recording_lock.acquire(blocking=False)
+        assert_equal(is_recording_lock_acquired, True)
+        recording_lock.release()
+
+    pyrender_viewer.set_caption = set_caption
+    video_writer = Mock()
+    monkeypatch.setattr("moviepy.video.io.ffmpeg_writer.FFMPEG_VideoWriter", video_writer)
+
+    pyrender_viewer.toggle_recording()
+
+    assert_equal(pyrender_viewer.viewer_flags["record"], True)
+    assert_equal(render_lock.__enter__.call_count, 0)
+    assert_equal(video_writer.call_count, 1)
 
 
 # Note that software emulation is so slow that it may takes minutes to render a single frame...

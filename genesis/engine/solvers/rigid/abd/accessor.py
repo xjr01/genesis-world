@@ -793,6 +793,23 @@ def kernel_set_dofs_limit(
 
 
 @qd.kernel(fastcache=True)
+def kernel_set_fixed_links_velocity(
+    links_idx: qd.types.ndarray(),
+    envs_idx: qd.types.ndarray(),
+    vel: qd.types.ndarray(),
+    ang: qd.types.ndarray(),
+    dyn_state: array_class.DynState,
+    rigid_config: qd.template(),
+):
+    qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.ALL))
+    for i_l_, i_b_ in qd.ndrange(links_idx.shape[0], envs_idx.shape[0]):
+        i_l = links_idx[i_l_]
+        i_b = envs_idx[i_b_]
+        dyn_state.links.kinematic_vel[i_l, i_b] = vel[i_b_, i_l_]
+        dyn_state.links.kinematic_ang[i_l, i_b] = ang[i_b_, i_l_]
+
+
+@qd.kernel(fastcache=True)
 def kernel_set_dofs_velocity(
     dofs_idx: qd.types.ndarray(),
     envs_idx: qd.types.ndarray(),

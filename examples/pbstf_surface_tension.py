@@ -47,6 +47,8 @@ class CaseSettings(NamedTuple):
 class TeapotPose(NamedTuple):
     pos: tuple[float, float, float]
     quat: tuple[float, float, float, float]
+    vel: tuple[float, float, float]
+    ang: tuple[float, float, float]
 
 
 def _liquid_material(
@@ -142,13 +144,13 @@ def _case_settings(case):
         )
     if case == CASE_TEAPOT:
         teapot = TeapotSettings(
-            asset="meshes/utah_teapot.obj",
+            asset="meshes/utah_teapot_modified.obj",
             entity_name="teapot_visual",
             mesh_scale=2.25,
             offset=(0.0, -3.79, 0.0),
             quat=(math.sqrt(0.5), 0.0, -math.sqrt(0.5), 0.0),
             particles_seed=(0.0, -3.15, 0.0),
-            particles_max_height=-0.35,
+            particles_max_height=0.7,
         )
         return CaseSettings(
             scale=20,
@@ -184,29 +186,71 @@ def _teapot_pose(time, settings):
 
     if time <= stop_angle_initial / turning_rate_initial:
         angle = turning_rate_initial * time
+        turning_rate = turning_rate_initial
     elif time <= hold_end:
         angle = stop_angle_initial
+        turning_rate = 0.0
     elif time <= turn_end:
         angle = stop_angle_initial - turning_rate_final * (time - hold_end)
+        turning_rate = -turning_rate_final
     else:
         angle = stop_angle_final
+        turning_rate = 0.0
 
     half_angle = 0.5 * angle
     cos_half_angle = math.cos(half_angle)
     sin_half_angle = math.sin(half_angle)
     quat = settings.quat
+    pos = (
+        settings.offset[0],
+        settings.offset[1] * math.cos(angle) - settings.offset[2] * math.sin(angle),
+        settings.offset[1] * math.sin(angle) + settings.offset[2] * math.cos(angle),
+    )
     return TeapotPose(
-        pos=(
-            settings.offset[0],
-            settings.offset[1] * math.cos(angle) - settings.offset[2] * math.sin(angle),
-            settings.offset[1] * math.sin(angle) + settings.offset[2] * math.cos(angle),
-        ),
+        pos=pos,
         quat=(
             cos_half_angle * quat[0] - sin_half_angle * quat[1],
             cos_half_angle * quat[1] + sin_half_angle * quat[0],
             cos_half_angle * quat[2] - sin_half_angle * quat[3],
             cos_half_angle * quat[3] + sin_half_angle * quat[2],
         ),
+        vel=(0.0, -turning_rate * pos[2], turning_rate * pos[1]),
+        ang=(turning_rate, 0.0, 0.0),
+    )
+
+
+def sample_teapot_particles(settings, particle_size):
+    teapot_mesh = mesh_utils.load_mesh(os.path.join(gs.utils.get_assets_dir(), settings.asset)).copy()
+    teapot_mesh.merge_vertices(merge_tex=True, merge_norm=True)
+    teapot_mesh.vertices = geom_utils.transform_by_quat(
+        teapot_mesh.vertices * settings.mesh_scale,
+        np.array(settings.quat),
+    ) + np.array(settings.offset)
+    return particle_utils.mesh_cavity_to_particles(
+        teapot_mesh,
+        p_size=particle_size,
+        seed=settings.particles_seed,
+        max_height=settings.particles_max_height,
+        clearance=0.5 * particle_size,
+    )
+
+
+def update_rigid_teapot(teapot, time, settings):
+    pose = _teapot_pose(time, settings)
+    teapot.set_pos(
+        pose.pos,
+        zero_velocity=False,
+        relative=False,
+        skip_forward=True,
+    )
+    teapot.set_quat(
+        pose.quat,
+        zero_velocity=False,
+        relative=False,
+    )
+    teapot.set_velocity(
+        vel=pose.vel,
+        ang=pose.ang,
     )
 
 
@@ -278,19 +322,7 @@ def _add_case_entities(scene, case, particle_size, settings):
         teapot = settings.teapot
         if teapot is None:
             gs.raise_exception("The teapot case requires teapot settings.")
-        teapot_mesh = mesh_utils.load_mesh(os.path.join(gs.utils.get_assets_dir(), teapot.asset)).copy()
-        teapot_mesh.merge_vertices(merge_tex=True, merge_norm=True)
-        teapot_mesh.vertices = geom_utils.transform_by_quat(
-            teapot_mesh.vertices * teapot.mesh_scale,
-            np.array(teapot.quat),
-        ) + np.array(teapot.offset)
-        particles = particle_utils.mesh_cavity_to_particles(
-            teapot_mesh,
-            p_size=particle_size,
-            seed=teapot.particles_seed,
-            max_height=teapot.particles_max_height,
-            clearance=0.5 * particle_size,
-        )
+        particles = sample_teapot_particles(teapot, particle_size)
 
         scene.add_entity(
             morph=gs.morphs.Mesh(
@@ -320,7 +352,7 @@ def _add_case_entities(scene, case, particle_size, settings):
                 surface_viscosity=0.2,
                 interior_viscosity=0.05,
                 is_collider_adhesion_friction_enabled=True,
-                collider_adhesion_compliance=100.0,
+                collider_adhesion_compliance=20.0,
                 collider_friction=0.01,
             ),
         )
@@ -350,6 +382,19 @@ def _draw_case_colliders(scene, case):
     )
     transform[:3, 3] = (0.0, -7.0, 0.0)
     scene.draw_debug_mesh(cone, T=transform)
+
+
+def start_viewer_recording(scene, is_recording):
+    if is_recording:
+        scene.viewer.toggle_recording()
+
+
+def stop_viewer(scene, is_viewer_shown):
+    if not is_viewer_shown:
+        return
+    if scene.viewer.recording:
+        scene.viewer.toggle_recording()
+    scene.viewer.stop()
 
 
 def build_scene(case=CASE_CUBE, scale=None, show_viewer=False, dt=None):
@@ -409,7 +454,14 @@ def main():
     parser.add_argument("--scale", type=int, default=None, help="C++ particle scale (radius = 1 / scale)")
     parser.add_argument("--dt", type=float, default=None, help="Override the case's default time step")
     parser.add_argument("--steps", type=int, default=None, help="Override the case's default simulation horizon")
-    parser.add_argument("-v", "--vis", action="store_true", default=False)
+    parser.add_argument("-v", "--vis", dest="show_viewer", action="store_true", default=False)
+    parser.add_argument(
+        "--record",
+        dest="is_recording",
+        action="store_true",
+        default=False,
+        help="Record the viewer and prompt for the output path on exit",
+    )
     args = parser.parse_args()
     if args.scale is not None and args.scale <= 0:
         parser.error("--scale must be positive")
@@ -420,31 +472,36 @@ def main():
 
     gs.init(backend=gs.cuda, precision="32", logging_level="info")
     settings = _case_settings(args.case)
-    scene, _ = build_scene(case=args.case, scale=args.scale, show_viewer=args.vis, dt=args.dt)
+    is_viewer_shown = args.show_viewer or args.is_recording
+    scene, _ = build_scene(case=args.case, scale=args.scale, show_viewer=is_viewer_shown, dt=args.dt)
     teapot_settings = settings.teapot
     teapot = scene.get_entity(name=teapot_settings.entity_name) if teapot_settings is not None else None
 
     steps = settings.steps if args.steps is None else args.steps
     if "PYTEST_VERSION" in os.environ:
         steps = min(steps, 2)
-    for _ in range(steps):
-        if teapot is not None:
-            pose = _teapot_pose(scene.cur_t, teapot_settings)
-            scene.pbstf_solver.set_static_colliders_pose(
-                pos=pose.pos,
-                quat=pose.quat,
-                colliders_idx=0,
-            )
-            teapot.set_pos(
-                pose.pos,
-                relative=False,
-                skip_forward=True,
-            )
-            teapot.set_quat(
-                pose.quat,
-                relative=False,
-            )
-        scene.step()
+    start_viewer_recording(scene, args.is_recording)
+    try:
+        for _ in range(steps):
+            if teapot is not None:
+                pose = _teapot_pose(scene.cur_t, teapot_settings)
+                scene.pbstf_solver.set_static_colliders_pose(
+                    pos=pose.pos,
+                    quat=pose.quat,
+                    colliders_idx=0,
+                )
+                teapot.set_pos(
+                    pose.pos,
+                    relative=False,
+                    skip_forward=True,
+                )
+                teapot.set_quat(
+                    pose.quat,
+                    relative=False,
+                )
+            scene.step()
+    finally:
+        stop_viewer(scene, is_viewer_shown)
 
 
 if __name__ == "__main__":

@@ -1759,6 +1759,8 @@ class LinksState:
     j_quat_bw: qd.Tensor
     j_vel: qd.Tensor
     j_ang: qd.Tensor
+    kinematic_vel: qd.Tensor
+    kinematic_ang: qd.Tensor
     cd_ang: qd.Tensor
     cd_vel: qd.Tensor
     # Whether any contact or connect/weld equality row involves the link this step. Written by the constraint
@@ -1816,6 +1818,8 @@ def get_links_state(solver):
         j_quat_bw=V(dtype=gs.qd_vec4, shape=shape_bw, needs_grad=requires_grad),
         j_vel=V(dtype=gs.qd_vec3, shape=shape, needs_grad=requires_grad),
         j_ang=V(dtype=gs.qd_vec3, shape=shape, needs_grad=requires_grad),
+        kinematic_vel=V(dtype=gs.qd_vec3, shape=shape),
+        kinematic_ang=V(dtype=gs.qd_vec3, shape=shape),
         cd_ang=V(dtype=gs.qd_vec3, shape=shape, needs_grad=requires_grad),
         cd_vel=V(dtype=gs.qd_vec3, shape=shape, needs_grad=requires_grad),
         is_constrained=V(dtype=gs.qd_bool, shape=shape),

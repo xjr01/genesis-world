@@ -156,6 +156,7 @@ from .abd.accessor import (
     kernel_set_dofs_damping,
     kernel_set_dofs_frictionloss,
     kernel_set_dofs_limit,
+    kernel_set_fixed_links_velocity,
     kernel_set_dofs_velocity,
     kernel_set_dofs_velocity_grad,
     kernel_set_dofs_zero_velocity,
@@ -1967,6 +1968,46 @@ class RigidSolver(KinematicSolver):
 
     def set_links_pos(self, pos, links_idx=None, envs_idx=None):
         raise DeprecationError("This method has been removed. Please use 'set_base_links_pos' instead.")
+
+    @mutates(StateChange.DYNAMICS, links="links_idx")
+    def set_fixed_links_velocity(self, vel, ang, links_idx=None, envs_idx=None):
+        """Set the world-frame velocity of fixed base links at their origins.
+
+        The prescribed linear and angular velocities drive velocity boundary conditions while each link's pose
+        remains controlled explicitly through the base-pose setters.
+        """
+        if links_idx is None:
+            links_idx = self._base_links_idx
+        if isinstance(links_idx, int) and not self.links[links_idx].is_fixed:
+            gs.raise_exception("Prescribed base velocity is only supported for fixed links.")
+
+        ang, _, _ = self._sanitize_io_variables(
+            ang, links_idx, self.n_links, "links_idx", envs_idx, (3,), skip_allocation=True
+        )
+        vel, links_idx, envs_idx = self._sanitize_io_variables(
+            vel, links_idx, self.n_links, "links_idx", envs_idx, (3,), skip_allocation=True
+        )
+        if self.n_envs == 0:
+            vel = vel[None]
+            ang = ang[None]
+
+        if gs.use_zerocopy:
+            mask = indices_to_mask(envs_idx, links_idx)
+            kinematic_vel = qd_to_torch(self.dyn_state.links.kinematic_vel, transpose=True, copy=False)
+            assign_indexed_tensor(kinematic_vel, mask, vel)
+            kinematic_ang = qd_to_torch(self.dyn_state.links.kinematic_ang, transpose=True, copy=False)
+            assign_indexed_tensor(kinematic_ang, mask, ang)
+            if gs.backend == gs.metal:
+                torch.mps.synchronize()
+        else:
+            kernel_set_fixed_links_velocity(links_idx, envs_idx, vel, ang, self.dyn_state, self.rigid_config)
+
+        if envs_idx.dtype == torch.bool:
+            fn = kernel_masked_forward_velocity
+        else:
+            fn = kernel_forward_velocity
+        fn(envs_idx, self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config, is_backward=False)
+        self._is_forward_vel_updated = True
 
     @mutates(StateChange.GEOMETRY, links="links_idx")
     def set_base_links_pos(self, pos, links_idx=None, envs_idx=None, *, relative=False, skip_forward=False):
