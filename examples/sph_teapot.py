@@ -27,7 +27,7 @@ def build_scene(pressure_solver="DFSPH", scale=None, show_viewer=False, dt=None)
     if scale < settings.scale:
         raise ValueError(f"The teapot case requires scale >= {settings.scale}.")
     if dt is None:
-        dt = settings.dt
+        dt = 1e-2
     if dt <= 0.0:
         raise ValueError("The SPH time step must be positive.")
 
@@ -36,6 +36,7 @@ def build_scene(pressure_solver="DFSPH", scale=None, show_viewer=False, dt=None)
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
             dt=dt,
+            substeps=10,
             gravity=settings.gravity,
         ),
         sph_options=gs.options.SPHOptions(
@@ -91,6 +92,7 @@ def build_scene(pressure_solver="DFSPH", scale=None, show_viewer=False, dt=None)
         ),
     )
     scene.build(n_envs=0)
+    liquid.set_particles_vel(teapot_settings.particles_vel)
     return scene, teapot, liquid, teapot_settings
 
 
@@ -104,7 +106,7 @@ def main():
         help="Pressure solver used by SPH (default: DFSPH)",
     )
     parser.add_argument("--scale", type=int, default=None, help="Particle scale (diameter = 2 / scale)")
-    parser.add_argument("--dt", type=float, default=None, help="Override the reference time step")
+    parser.add_argument("--dt", type=float, default=None, help="Override the SPH time step")
     parser.add_argument("--steps", type=int, default=None, help="Override the reference simulation horizon")
     parser.add_argument("-v", "--vis", dest="show_viewer", action="store_true", default=False)
     parser.add_argument(

@@ -28,6 +28,7 @@ class TeapotSettings(NamedTuple):
     quat: tuple[float, float, float, float]
     particles_seed: tuple[float, float, float]
     particles_max_height: float
+    particles_vel: tuple[float, float, float]
 
 
 class CaseSettings(NamedTuple):
@@ -151,6 +152,7 @@ def _case_settings(case):
             quat=(math.sqrt(0.5), 0.0, -math.sqrt(0.5), 0.0),
             particles_seed=(0.0, -3.15, 0.0),
             particles_max_height=0.7,
+            particles_vel=(0.0, 0.0, 0.0),
         )
         return CaseSettings(
             scale=20,
@@ -356,7 +358,7 @@ def _add_case_entities(scene, case, particle_size, settings):
                 collider_friction=0.01,
             ),
         )
-        return ((liquid, (0.0, 0.0, 0.0)),)
+        return ((liquid, teapot.particles_vel),)
 
     raise ValueError(f"Unknown PBSTF example case: {case}")
 

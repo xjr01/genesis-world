@@ -35,6 +35,8 @@ def build_scene(scale=None, show_viewer=False, dt=None):
             gravity=settings.gravity,
         ),
         pbd_options=gs.options.PBDOptions(
+            max_density_solver_iterations=10,
+            max_viscosity_solver_iterations=1,
             particle_size=particle_size,
             lower_bound=settings.lower_bound,
             upper_bound=settings.upper_bound,
@@ -78,21 +80,24 @@ def build_scene(scale=None, show_viewer=False, dt=None):
             positions=particles,
         ),
         material=gs.materials.PBD.Liquid(
-            rho=1000.0,
             sampler="regular",
+            rho=1.0,
+            density_relaxation=1.0,
+            viscosity_relaxation=0.0,
         ),
         surface=gs.surfaces.Default(
             color=(0.25, 0.55, 0.95),
         ),
     )
     scene.build(n_envs=0)
+    liquid.set_particles_vel(teapot_settings.particles_vel)
     return scene, teapot, liquid, teapot_settings
 
 
 def main():
     parser = argparse.ArgumentParser(description="PBD liquid in the moving teapot reference case")
     parser.add_argument("--scale", type=int, default=None, help="Particle scale (diameter = 2 / scale)")
-    parser.add_argument("--dt", type=float, default=None, help="Override the reference time step")
+    parser.add_argument("--dt", type=float, default=None, help="Override the PBD time step")
     parser.add_argument("--steps", type=int, default=None, help="Override the reference simulation horizon")
     parser.add_argument("-v", "--vis", dest="show_viewer", action="store_true", default=False)
     parser.add_argument(
