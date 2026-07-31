@@ -204,20 +204,20 @@ class LegacyCoupler(RBC):
         sdf_info: array_class.SDFInfo,
         collider_static_config: qd.template(),
     ):
-        """
-        Similar to _func_collide_with_rigid_geom, but additionally handles potential side flip due to penetration.
+        """Resolves Smoothed Particle Hydrodynamics (SPH) particle collisions with velocity response, predicted
+        position projection, and entry-side normal preservation across thin walls.
         """
         signed_dist = sdf.sdf_func_world(geom_idx, batch_idx, pos_world, geoms_state, geoms_info, sdf_info)
         normal_rigid = sdf.sdf_func_normal_world(
             geom_idx, batch_idx, pos_world, geoms_state, geoms_info, rigid_info, sdf_info, collider_static_config
         )
 
+        if normal_prev.dot(normal_prev) > gs.EPS and normal_rigid.dot(normal_prev) < 0:
+            normal_rigid = normal_prev
+
         # bigger coup_softness implies that the coupling influence extends further away from the object.
         influence = qd.min(qd.exp(-signed_dist / max(1e-10, geoms_info.coup_softness[geom_idx])), 1)
 
-        # if normal_rigid.dot(normal_prev) < 0: # side flip due to penetration
-        #     influence = 1.0
-        #     normal_rigid = normal_prev
         if influence > 0.1:
             vel = self._func_collide_in_rigid_geom(
                 pos_world, vel, mass, normal_rigid, influence, geom_idx, batch_idx, geoms_info, links_state, rigid_info
@@ -244,9 +244,58 @@ class LegacyCoupler(RBC):
             self.rigid_solver._func_apply_coupling_force(link_idx, batch_idx, pos_world, pressure_force, links_state)
             vel = vel - pressure_force * (rigid_info.substep_dt[None] / mass)
 
-        # attraction force
-        # if 0.001 < signed_dist < 0.01:
-        #     vel = vel - normal_rigid * 0.1 * signed_dist
+        predicted_pos = pos_world + rigid_info.substep_dt[None] * vel
+        predicted_signed_dist = sdf.sdf_func_world(
+            geom_idx, batch_idx, predicted_pos, geoms_state, geoms_info, sdf_info
+        )
+        predicted_normal = sdf.sdf_func_normal_world(
+            geom_idx,
+            batch_idx,
+            predicted_pos,
+            geoms_state,
+            geoms_info,
+            rigid_info,
+            sdf_info,
+            collider_static_config,
+        )
+        particle_radius = 0.5 * self.sph_solver.particle_size
+
+        # A normal flip across one substep identifies a complete crossing between opposite exterior sides of a thin
+        # wall. Resolve the velocity on the entry side before projecting the predicted particle center.
+        if predicted_normal.dot(normal_rigid) < 0:
+            vel_rigid = self.rigid_solver._func_vel_at_point(
+                pos_world=pos_world,
+                link_idx=geoms_info.link_idx[geom_idx],
+                i_b=batch_idx,
+                links_state=links_state,
+            )
+            rvel_normal_magnitude = (vel - vel_rigid).dot(normal_rigid)
+            if rvel_normal_magnitude < 0:
+                corrected_vel = vel - normal_rigid * rvel_normal_magnitude * (
+                    1.0 + geoms_info.coup_restitution[geom_idx]
+                )
+                delta_mv = mass * (corrected_vel - vel)
+                self.rigid_solver._func_apply_coupling_force(
+                    link_idx=geoms_info.link_idx[geom_idx],
+                    env_idx=batch_idx,
+                    pos=pos_world,
+                    force=-delta_mv / rigid_info.substep_dt[None],
+                    links_state=links_state,
+                )
+                vel = corrected_vel
+        elif predicted_signed_dist < particle_radius:
+            corrected_pos = predicted_pos + predicted_normal * (particle_radius - predicted_signed_dist)
+            corrected_vel = (corrected_pos - pos_world) / rigid_info.substep_dt[None]
+            delta_mv = mass * (corrected_vel - vel)
+            self.rigid_solver._func_apply_coupling_force(
+                link_idx=geoms_info.link_idx[geom_idx],
+                env_idx=batch_idx,
+                pos=predicted_pos,
+                force=-delta_mv / rigid_info.substep_dt[None],
+                links_state=links_state,
+            )
+            vel = corrected_vel
+            normal_rigid = predicted_normal
 
         return vel, normal_rigid
 

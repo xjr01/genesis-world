@@ -1,3 +1,5 @@
+import math
+
 import pytest
 
 import genesis as gs
@@ -9,7 +11,7 @@ from ..utils import assert_allclose
 @pytest.mark.required
 @pytest.mark.parametrize("n_envs", [0, 2])
 @pytest.mark.parametrize("pressure_solver", ["DFSPH", "WCSPH"])
-def test_moving_fixed_link_applies_velocity_boundary(n_envs, pressure_solver, show_viewer):
+def test_fixed_link_velocity_and_thin_wall_boundary(n_envs, pressure_solver, show_viewer):
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
             dt=1e-2,
@@ -35,11 +37,22 @@ def test_moving_fixed_link_applies_velocity_boundary(n_envs, pressure_solver, sh
         ),
         material=gs.materials.Rigid(
             coup_friction=0.0,
+            coup_softness=0.03,
+        ),
+    )
+    scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(-1.2, 0.0, 0.0),
+            size=(0.1, 1.0, 1.0),
+            fixed=True,
+        ),
+        material=gs.materials.Rigid(
+            coup_friction=0.0,
         ),
     )
     liquid = scene.add_entity(
         morph=gs.morphs.Particles(
-            positions=((0.49, 0.0, 0.0),),
+            positions=((0.55, 0.0, 0.0), (-1.3, 0.0, 0.0)),
         ),
         material=gs.materials.SPH.Liquid(
             sampler="regular",
@@ -51,9 +64,13 @@ def test_moving_fixed_link_applies_velocity_boundary(n_envs, pressure_solver, sh
         vel=(1.0, 0.0, 0.0),
         ang=(0.0, 0.0, 0.0),
     )
+    liquid.set_particles_vel(((0.0, 0.0, 0.0), (30.0, 0.0, 0.0)))
     scene.step()
 
-    assert_allclose(liquid.get_particles_vel(), (1.0, 0.0, 0.0), atol=1e-5)
+    influence = math.exp(-0.5 * scene.sph_solver.particle_size / collider.material.coup_softness)
+    assert_allclose(liquid.get_particles_vel()[..., 0, :], (influence, 0.0, 0.0), atol=1e-5)
+    assert_allclose(liquid.get_particles_pos()[..., 1, 0], -1.3, atol=1e-5)
+    assert_allclose(liquid.get_particles_vel()[..., 1, :], (0.0, 0.0, 0.0), atol=1e-5)
 
 
 @pytest.mark.required
