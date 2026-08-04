@@ -29,6 +29,7 @@ from examples.pbstf_surface_tension import (
     CASES,
     _case_settings,
     _teapot_pose,
+    _update_teapot_manipulator,
     build_scene,
 )
 
@@ -259,6 +260,7 @@ def test_static_collider_adhesion_and_friction(show_viewer):
 @pytest.mark.parametrize("backend", [gs.cpu])
 def test_teapot_initial_particles_pose_and_case_time_steps():
     teapot_settings = _case_settings(CASE_TEAPOT).teapot
+    particle_size = 0.1
     teapot_mesh = mesh_utils.load_mesh(os.path.join(gs.utils.get_assets_dir(), teapot_settings.asset)).copy()
     teapot_mesh.merge_vertices(merge_tex=True, merge_norm=True)
     teapot_mesh.vertices = geom_utils.transform_by_quat(
@@ -267,19 +269,23 @@ def test_teapot_initial_particles_pose_and_case_time_steps():
     ) + np.array(teapot_settings.offset)
     particles = particle_utils.mesh_cavity_to_particles(
         teapot_mesh,
-        p_size=0.1,
+        p_size=particle_size,
         seed=teapot_settings.particles_seed,
         max_height=teapot_settings.particles_max_height,
-        clearance=0.05,
+        clearance=0.5 * particle_size,
     )
     signed_distance, *_ = igl.signed_distance(particles, teapot_mesh.vertices, teapot_mesh.faces)
 
-    assert teapot_settings.asset == "meshes/utah_teapot.obj"
+    assert teapot_settings.asset == "meshes/utah_teapot_modified.obj"
     assert teapot_mesh.is_watertight
-    assert_equal(len(particles), 146612)
-    assert (signed_distance >= 0.05).all()
+    assert_equal(len(particles), 188716)
+    assert (signed_distance >= 0.5 * particle_size).all()
     assert particles[:, 1].min() < -3.2
-    assert_allclose(particles[:, 1].max(), teapot_settings.particles_max_height, atol=1e-12)
+    max_height_steps = math.floor(
+        (teapot_settings.particles_max_height - teapot_settings.particles_seed[1]) / particle_size
+    )
+    expected_max_height = teapot_settings.particles_seed[1] + max_height_steps * particle_size
+    assert_allclose(particles[:, 1].max(), expected_max_height, atol=1e-12)
     assert particles[:, 2].max() > 5.0
     for case in CASES:
         settings = _case_settings(case)
@@ -304,6 +310,106 @@ def test_teapot_initial_particles_pose_and_case_time_steps():
             np.array((math.cos(0.5 * angle), math.sin(0.5 * angle), 0.0, 0.0)),
         )
         assert_allclose(pose.quat, expected_quat, atol=1e-12)
+
+
+@pytest.mark.required
+@pytest.mark.parametrize("backend", [gs.cuda])
+def test_teapot_manipulator_tracks_grasp_pose(show_viewer):
+    teapot_settings = _case_settings(CASE_TEAPOT).teapot
+    manipulator = teapot_settings.manipulator
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=0.01,
+            gravity=(0.0, 0.0, 0.0),
+        ),
+        rigid_options=gs.options.RigidOptions(
+            enable_collision=False,
+            disable_constraint=True,
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=manipulator.camera_pos,
+            camera_lookat=manipulator.camera_lookat,
+            camera_up=(0.0, 1.0, 0.0),
+        ),
+        show_viewer=show_viewer,
+    )
+    kuka = scene.add_entity(
+        morph=gs.morphs.URDF(
+            file=manipulator.kuka_asset,
+            scale=manipulator.kuka_scale,
+            pos=manipulator.kuka_base_pos,
+            quat=manipulator.kuka_base_quat,
+            collision=False,
+            fixed=True,
+        ),
+        material=gs.materials.Rigid(
+            needs_coup=False,
+            gravity_compensation=1.0,
+        ),
+        name=manipulator.kuka_entity_name,
+    )
+    hand = scene.add_entity(
+        morph=gs.morphs.URDF(
+            file=manipulator.hand_asset,
+            scale=manipulator.hand_scale,
+            collision=False,
+        ),
+        material=gs.materials.Rigid(
+            needs_coup=False,
+            gravity_compensation=1.0,
+        ),
+        name=manipulator.hand_entity_name,
+    )
+    hand.attach(
+        kuka,
+        manipulator.kuka_end_effector_link,
+        pos=manipulator.hand_mount_pos,
+        quat=manipulator.hand_mount_quat,
+    )
+    scene.build()
+    hand.set_qpos(manipulator.hand_qpos)
+
+    assert_equal(kuka.n_dofs, 7)
+    assert_equal(hand.n_dofs, 24)
+    kuka_limit_lower, kuka_limit_upper = map(tensor_to_array, kuka.get_dofs_limit())
+    hand_limit_lower, hand_limit_upper = map(tensor_to_array, hand.get_dofs_limit())
+    assert (np.array(manipulator.hand_qpos) >= hand_limit_lower).all()
+    assert (np.array(manipulator.hand_qpos) <= hand_limit_upper).all()
+
+    end_effector = kuka.get_link(manipulator.kuka_end_effector_link)
+    qpos = kuka.get_qpos()
+    times = tuple(angle_twice / 3.0 for angle_twice in range(55)) + tuple(
+        28.0 + (54 - angle_twice) / 10.0 for angle_twice in range(53, 37, -1)
+    )
+    for time in times:
+        pose = _teapot_pose(time, teapot_settings)
+        qpos = _update_teapot_manipulator(kuka, pose, teapot_settings, qpos)
+        scene.step()
+
+        target_pos, target_quat = geom_utils.transform_pos_quat_by_trans_quat(
+            np.array(manipulator.grasp_pos) * teapot_settings.mesh_scale,
+            np.array(manipulator.grasp_quat),
+            np.array(pose.pos),
+            np.array(pose.quat),
+        )
+        end_effector_quat = tensor_to_array(end_effector.get_quat())
+        tool_center_pos = tensor_to_array(end_effector.get_pos()) + geom_utils.transform_by_quat(
+            np.array(manipulator.tool_center_point), end_effector_quat
+        )
+        qpos = kuka.get_qpos()
+        qpos_array = tensor_to_array(qpos)
+        hand_qpos = tensor_to_array(hand.get_qpos())
+        orientation_error = 2.0 * np.arccos(
+            np.minimum(np.abs(np.sum(end_effector_quat * target_quat)), 1.0)
+        )
+
+        assert np.linalg.norm(tool_center_pos - target_pos) <= 5e-4
+        assert orientation_error <= 5e-3
+        assert (qpos_array >= kuka_limit_lower).all()
+        assert (qpos_array <= kuka_limit_upper).all()
+        assert (hand_qpos >= hand_limit_lower).all()
+        assert (hand_qpos <= hand_limit_upper).all()
+        assert_allclose(hand_qpos, manipulator.hand_qpos, atol=1e-6)
 
 
 @pytest.mark.required

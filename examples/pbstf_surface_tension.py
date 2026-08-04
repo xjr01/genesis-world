@@ -20,6 +20,26 @@ CASES = (CASE_CUBE, CASE_MERGE, CASE_BOUNCE, CASE_CONE, CASE_TEAPOT)
 DEFAULT_CASE_DT = 1.0 / 30.0
 
 
+class TeapotManipulatorSettings(NamedTuple):
+    kuka_asset: str
+    kuka_entity_name: str
+    kuka_scale: float
+    kuka_base_pos: tuple[float, float, float]
+    kuka_base_quat: tuple[float, float, float, float]
+    kuka_end_effector_link: str
+    hand_asset: str
+    hand_entity_name: str
+    hand_scale: float
+    hand_mount_pos: tuple[float, float, float]
+    hand_mount_quat: tuple[float, float, float, float]
+    hand_qpos: tuple[float, ...]
+    grasp_pos: tuple[float, float, float]
+    grasp_quat: tuple[float, float, float, float]
+    tool_center_point: tuple[float, float, float]
+    camera_pos: tuple[float, float, float]
+    camera_lookat: tuple[float, float, float]
+
+
 class TeapotSettings(NamedTuple):
     asset: str
     entity_name: str
@@ -29,6 +49,7 @@ class TeapotSettings(NamedTuple):
     particles_seed: tuple[float, float, float]
     particles_max_height: float
     particles_vel: tuple[float, float, float]
+    manipulator: TeapotManipulatorSettings
 
 
 class CaseSettings(NamedTuple):
@@ -144,6 +165,50 @@ def _case_settings(case):
             teapot=None,
         )
     if case == CASE_TEAPOT:
+        manipulator = TeapotManipulatorSettings(
+            kuka_asset="urdf/kuka_iiwa/model.urdf",
+            kuka_entity_name="teapot_kuka",
+            kuka_scale=10.0,
+            kuka_base_pos=(-5.0, -5.0, -11.0),
+            kuka_base_quat=(math.sqrt(0.5), -math.sqrt(0.5), 0.0, 0.0),
+            kuka_end_effector_link="lbr_iiwa_link_7",
+            hand_asset="urdf/shadow_hand/shadow_hand.urdf",
+            hand_entity_name="teapot_shadow_hand",
+            hand_scale=8.0,
+            hand_mount_pos=(0.0, 0.0, 0.45),
+            hand_mount_quat=(1.0, 0.0, 0.0, 0.0),
+            hand_qpos=(
+                0.0,
+                0.0,
+                0.5,
+                0.8,
+                0.0,
+                0.35,
+                1.0,
+                0.05,
+                0.85,
+                1.05,
+                0.95,
+                0.0,
+                0.9,
+                1.1,
+                1.0,
+                -0.05,
+                0.9,
+                1.1,
+                1.0,
+                0.25,
+                -0.1,
+                0.85,
+                1.05,
+                0.95,
+            ),
+            grasp_pos=(-2.7, 1.45, 0.0),
+            grasp_quat=(0.5, 0.5, 0.5, 0.5),
+            tool_center_point=(0.0, -0.3, 3.3),
+            camera_pos=(18.0, 8.0, -20.0),
+            camera_lookat=(-1.0, -1.0, -5.0),
+        )
         teapot = TeapotSettings(
             asset="meshes/utah_teapot_modified.obj",
             entity_name="teapot_visual",
@@ -153,6 +218,7 @@ def _case_settings(case):
             particles_seed=(0.0, -3.15, 0.0),
             particles_max_height=0.7,
             particles_vel=(0.0, 0.0, 0.0),
+            manipulator=manipulator,
         )
         return CaseSettings(
             scale=20,
@@ -160,8 +226,8 @@ def _case_settings(case):
             gravity=(0.0, -9.8, 0.0),
             lower_bound=(-20.0, -6.04186, -20.0),
             upper_bound=(20.0, 15.0, 20.0),
-            camera_pos=(15.0, 5.0, 18.0),
-            camera_lookat=(0.0, -2.0, 0.0),
+            camera_pos=manipulator.camera_pos,
+            camera_lookat=manipulator.camera_lookat,
             static_colliders=(
                 gs.options.PBSTFMeshStaticColliderOptions(
                     file=teapot.asset,
@@ -256,6 +322,26 @@ def update_rigid_teapot(teapot, time, settings):
     )
 
 
+def _update_teapot_manipulator(kuka, pose, settings, init_qpos):
+    """Set the KUKA joints so the tool center point follows the teapot grasp frame."""
+    manipulator = settings.manipulator
+    target_pos, target_quat = geom_utils.transform_pos_quat_by_trans_quat(
+        np.array(manipulator.grasp_pos) * settings.mesh_scale,
+        np.array(manipulator.grasp_quat),
+        np.array(pose.pos),
+        np.array(pose.quat),
+    )
+    qpos = kuka.inverse_kinematics(
+        link=kuka.get_link(manipulator.kuka_end_effector_link),
+        pos=target_pos,
+        quat=target_quat,
+        local_point=manipulator.tool_center_point,
+        init_qpos=init_qpos,
+    )
+    kuka.set_qpos(qpos)
+    return qpos
+
+
 def _add_case_entities(scene, case, particle_size, settings):
     if case == CASE_CUBE:
         liquid = scene.add_entity(
@@ -325,6 +411,7 @@ def _add_case_entities(scene, case, particle_size, settings):
         if teapot is None:
             gs.raise_exception("The teapot case requires teapot settings.")
         particles = sample_teapot_particles(teapot, particle_size)
+        manipulator = teapot.manipulator
 
         scene.add_entity(
             morph=gs.morphs.Mesh(
@@ -340,6 +427,39 @@ def _add_case_entities(scene, case, particle_size, settings):
                 opacity=0.3,
             ),
             name=teapot.entity_name,
+        )
+        kuka = scene.add_entity(
+            morph=gs.morphs.URDF(
+                file=manipulator.kuka_asset,
+                scale=manipulator.kuka_scale,
+                pos=manipulator.kuka_base_pos,
+                quat=manipulator.kuka_base_quat,
+                collision=False,
+                fixed=True,
+            ),
+            material=gs.materials.Rigid(
+                needs_coup=False,
+                gravity_compensation=1.0,
+            ),
+            name=manipulator.kuka_entity_name,
+        )
+        hand = scene.add_entity(
+            morph=gs.morphs.URDF(
+                file=manipulator.hand_asset,
+                scale=manipulator.hand_scale,
+                collision=False,
+            ),
+            material=gs.materials.Rigid(
+                needs_coup=False,
+                gravity_compensation=1.0,
+            ),
+            name=manipulator.hand_entity_name,
+        )
+        hand.attach(
+            kuka,
+            manipulator.kuka_end_effector_link,
+            pos=manipulator.hand_mount_pos,
+            quat=manipulator.hand_mount_quat,
         )
         liquid = scene.add_entity(
             morph=gs.morphs.Particles(
@@ -421,6 +541,14 @@ def build_scene(case=CASE_CUBE, scale=None, show_viewer=False, dt=None):
             dt=dt,
             gravity=settings.gravity,
         ),
+        rigid_options=(
+            gs.options.RigidOptions(
+                enable_collision=False,
+                disable_constraint=True,
+            )
+            if case == CASE_TEAPOT
+            else None
+        ),
         pbstf_options=gs.options.PBSTFOptions(
             particle_size=particle_size,
             lower_bound=settings.lower_bound,
@@ -444,6 +572,12 @@ def build_scene(case=CASE_CUBE, scale=None, show_viewer=False, dt=None):
     scene.build()
     for entity, velocity in entities_and_velocities:
         entity.set_particles_vel(velocity)
+    if settings.teapot is not None:
+        manipulator = settings.teapot.manipulator
+        kuka = scene.get_entity(name=manipulator.kuka_entity_name)
+        hand = scene.get_entity(name=manipulator.hand_entity_name)
+        hand.set_qpos(manipulator.hand_qpos)
+        _update_teapot_manipulator(kuka, _teapot_pose(0.0, settings.teapot), settings.teapot, kuka.get_qpos())
     if show_viewer:
         _draw_case_colliders(scene, case)
 
@@ -478,6 +612,12 @@ def main():
     scene, _ = build_scene(case=args.case, scale=args.scale, show_viewer=is_viewer_shown, dt=args.dt)
     teapot_settings = settings.teapot
     teapot = scene.get_entity(name=teapot_settings.entity_name) if teapot_settings is not None else None
+    if teapot_settings is None:
+        kuka = None
+        kuka_qpos = None
+    else:
+        kuka = scene.get_entity(name=teapot_settings.manipulator.kuka_entity_name)
+        kuka_qpos = kuka.get_qpos()
 
     steps = settings.steps if args.steps is None else args.steps
     if "PYTEST_VERSION" in os.environ:
@@ -501,6 +641,7 @@ def main():
                     pose.quat,
                     relative=False,
                 )
+                kuka_qpos = _update_teapot_manipulator(kuka, pose, teapot_settings, kuka_qpos)
             scene.step()
     finally:
         stop_viewer(scene, is_viewer_shown)
