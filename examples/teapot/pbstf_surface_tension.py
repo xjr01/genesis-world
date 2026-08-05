@@ -171,7 +171,7 @@ def _case_settings(case):
             kuka_asset="urdf/kuka_iiwa/model.urdf",
             kuka_entity_name="teapot_kuka",
             kuka_scale=12.0,
-            kuka_base_pos=(-6.165, -5.8945, -13.5525),
+            kuka_base_pos=(-3.165, -7.8945, -10.5525),
             kuka_base_quat=(math.sqrt(0.5), -math.sqrt(0.5), 0.0, 0.0),
             kuka_end_effector_link="lbr_iiwa_link_7",
             kuka_qpos=(
@@ -217,8 +217,8 @@ def _case_settings(case):
             grasp_pos=(-2.6035435064512424, 1.692335, 0.2395262797782305),
             grasp_quat=(0.5957038027506156, 0.38096847558355235, 0.38096847558355235, 0.5957038027506156),
             tool_center_point=(0.0, -0.525, 5.5275),
-            camera_pos=(63.0, 23.5, -7.25),
-            camera_lookat=(-3.0, -8.0, -12.5),
+            camera_pos=(30.0, 13.0, -1.5),
+            camera_lookat=(-1.5, -2.0, -4.0),
         )
         teapot_mesh_scale = 2.25
         teapot_offset = (0.0, -3.79, 0.0)
