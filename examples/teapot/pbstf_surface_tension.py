@@ -27,6 +27,7 @@ class TeapotManipulatorSettings(NamedTuple):
     kuka_base_pos: tuple[float, float, float]
     kuka_base_quat: tuple[float, float, float, float]
     kuka_end_effector_link: str
+    kuka_qpos: tuple[float, ...]
     hand_asset: str
     hand_entity_name: str
     hand_scale: float
@@ -46,6 +47,7 @@ class TeapotSettings(NamedTuple):
     mesh_scale: float
     offset: tuple[float, float, float]
     quat: tuple[float, float, float, float]
+    turning_axis_pos: tuple[float, float, float]
     particles_seed: tuple[float, float, float]
     particles_max_height: float
     particles_vel: tuple[float, float, float]
@@ -168,53 +170,73 @@ def _case_settings(case):
         manipulator = TeapotManipulatorSettings(
             kuka_asset="urdf/kuka_iiwa/model.urdf",
             kuka_entity_name="teapot_kuka",
-            kuka_scale=10.0,
-            kuka_base_pos=(-5.0, -5.0, -11.0),
+            kuka_scale=12.0,
+            kuka_base_pos=(-6.165, -5.8945, -13.5525),
             kuka_base_quat=(math.sqrt(0.5), -math.sqrt(0.5), 0.0, 0.0),
             kuka_end_effector_link="lbr_iiwa_link_7",
+            kuka_qpos=(
+                0.16527023911476135,
+                1.8198974132537842,
+                0.6981679201126099,
+                1.1762551069259644,
+                0.8250933289527893,
+                -1.3872859477996826,
+                0.9264655709266663,
+            ),
             hand_asset="urdf/shadow_hand/shadow_hand.urdf",
             hand_entity_name="teapot_shadow_hand",
-            hand_scale=8.0,
-            hand_mount_pos=(0.0, 0.0, 0.45),
+            hand_scale=14.0,
+            hand_mount_pos=(0.0, 0.0, 0.54),
             hand_mount_quat=(1.0, 0.0, 0.0, 0.0),
             hand_qpos=(
+                0.0000012000000424450263,
+                -0.00003170000127283856,
+                -0.396697998046875,
+                1.2216999530792236,
+                0.026160499081015587,
+                0.31376829743385315,
+                0.635699987411499,
+                -0.06306590139865875,
+                1.4007999897003174,
+                0.44350001215934753,
+                0.6726999878883362,
+                -0.03246590122580528,
+                1.5707999467849731,
+                0.6097999811172485,
+                0.2476000040769577,
+                -0.349065899848938,
+                1.3489999771118164,
+                0.7651000022888184,
+                0.41029998660087585,
                 0.0,
-                0.0,
-                0.5,
-                0.8,
-                0.0,
-                0.35,
-                1.0,
-                0.05,
-                0.85,
-                1.05,
-                0.95,
-                0.0,
-                0.9,
-                1.1,
-                1.0,
-                -0.05,
-                0.9,
-                1.1,
-                1.0,
-                0.25,
-                -0.1,
-                0.85,
-                1.05,
-                0.95,
+                -0.349065899848938,
+                0.9092000126838684,
+                0.6690000295639038,
+                0.8981000185012817,
             ),
-            grasp_pos=(-2.7, 1.45, 0.0),
-            grasp_quat=(0.5, 0.5, 0.5, 0.5),
-            tool_center_point=(0.0, -0.3, 3.3),
-            camera_pos=(18.0, 8.0, -20.0),
-            camera_lookat=(-1.0, -1.0, -5.0),
+            grasp_pos=(-2.6035435064512424, 1.692335, 0.2395262797782305),
+            grasp_quat=(0.5957038027506156, 0.38096847558355235, 0.38096847558355235, 0.5957038027506156),
+            tool_center_point=(0.0, -0.525, 5.5275),
+            camera_pos=(63.0, 23.5, -7.25),
+            camera_lookat=(-3.0, -8.0, -12.5),
+        )
+        teapot_mesh_scale = 2.25
+        teapot_offset = (0.0, -3.79, 0.0)
+        teapot_quat = (math.sqrt(0.5), 0.0, -math.sqrt(0.5), 0.0)
+        turning_axis_pos = tuple(
+            geom_utils.transform_by_trans_quat(
+                np.array(manipulator.grasp_pos) * teapot_mesh_scale,
+                np.array(teapot_offset),
+                np.array(teapot_quat),
+            ).tolist()
         )
         teapot = TeapotSettings(
             asset="meshes/utah_teapot_modified.obj",
             entity_name="teapot_visual",
-            mesh_scale=2.25,
-            offset=(0.0, -3.79, 0.0),
-            quat=(math.sqrt(0.5), 0.0, -math.sqrt(0.5), 0.0),
+            mesh_scale=teapot_mesh_scale,
+            offset=teapot_offset,
+            quat=teapot_quat,
+            turning_axis_pos=turning_axis_pos,
             particles_seed=(0.0, -3.15, 0.0),
             particles_max_height=0.7,
             particles_vel=(0.0, 0.0, 0.0),
@@ -245,6 +267,7 @@ def _case_settings(case):
 
 
 def _teapot_pose(time, settings):
+    """Return the teapot pose for a rotation about the world-X line through its grasp point."""
     turning_rate_initial = math.radians(1.5)
     stop_angle_initial = math.radians(27.0)
     hold_end = stop_angle_initial / turning_rate_initial + 10.0
@@ -269,10 +292,13 @@ def _teapot_pose(time, settings):
     cos_half_angle = math.cos(half_angle)
     sin_half_angle = math.sin(half_angle)
     quat = settings.quat
+    turning_axis_pos = settings.turning_axis_pos
+    offset_y = settings.offset[1] - turning_axis_pos[1]
+    offset_z = settings.offset[2] - turning_axis_pos[2]
     pos = (
         settings.offset[0],
-        settings.offset[1] * math.cos(angle) - settings.offset[2] * math.sin(angle),
-        settings.offset[1] * math.sin(angle) + settings.offset[2] * math.cos(angle),
+        turning_axis_pos[1] + offset_y * math.cos(angle) - offset_z * math.sin(angle),
+        turning_axis_pos[2] + offset_y * math.sin(angle) + offset_z * math.cos(angle),
     )
     return TeapotPose(
         pos=pos,
@@ -282,7 +308,11 @@ def _teapot_pose(time, settings):
             cos_half_angle * quat[2] - sin_half_angle * quat[3],
             cos_half_angle * quat[3] + sin_half_angle * quat[2],
         ),
-        vel=(0.0, -turning_rate * pos[2], turning_rate * pos[1]),
+        vel=(
+            0.0,
+            -turning_rate * (pos[2] - turning_axis_pos[2]),
+            turning_rate * (pos[1] - turning_axis_pos[1]),
+        ),
         ang=(turning_rate, 0.0, 0.0),
     )
 
@@ -323,7 +353,7 @@ def update_rigid_teapot(teapot, time, settings):
 
 
 def _update_teapot_manipulator(kuka, pose, settings, init_qpos):
-    """Set the KUKA joints so the tool center point follows the teapot grasp frame."""
+    """Set the KUKA joints so the attached hand keeps its teapot-local grasp transform."""
     manipulator = settings.manipulator
     target_pos, target_quat = geom_utils.transform_pos_quat_by_trans_quat(
         np.array(manipulator.grasp_pos) * settings.mesh_scale,
@@ -337,6 +367,8 @@ def _update_teapot_manipulator(kuka, pose, settings, init_qpos):
         quat=target_quat,
         local_point=manipulator.tool_center_point,
         init_qpos=init_qpos,
+        pos_tol=1e-4,
+        rot_tol=1e-4,
     )
     kuka.set_qpos(qpos)
     return qpos
@@ -576,8 +608,9 @@ def build_scene(case=CASE_CUBE, scale=None, show_viewer=False, dt=None):
         manipulator = settings.teapot.manipulator
         kuka = scene.get_entity(name=manipulator.kuka_entity_name)
         hand = scene.get_entity(name=manipulator.hand_entity_name)
+        kuka.set_qpos(manipulator.kuka_qpos)
         hand.set_qpos(manipulator.hand_qpos)
-        _update_teapot_manipulator(kuka, _teapot_pose(0.0, settings.teapot), settings.teapot, kuka.get_qpos())
+        _update_teapot_manipulator(kuka, _teapot_pose(0.0, settings.teapot), settings.teapot, manipulator.kuka_qpos)
     if show_viewer:
         _draw_case_colliders(scene, case)
 
