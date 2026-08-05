@@ -43,7 +43,7 @@ class ViewerOptions(Options):
     camera_lookat : tuple of float, shape (3,)
         The lookat position that the camera.
     camera_up : tuple of float, shape (3,)
-        The up vector of the camera's extrinsic pose.
+        The scene's up direction for the initial camera pose and mouse orbiting.
     camera_fov : float
         The field of view (in degrees) of the camera.
     enable_help_text : bool

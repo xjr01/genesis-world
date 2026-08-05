@@ -85,6 +85,8 @@ class Viewer(pyglet.window.Window):
     viewer_flags : dict
         A set of flags for controlling the viewer's behavior.
         Described in the note below.
+    world_up_axis : (3,) float
+        The scene axis that mouse orbiting treats as vertical.
     **kwargs : dict
         Any keyword arguments left over will be interpreted as belonging to
         either the :attr:`.Viewer.render_flags` or :attr:`.Viewer.viewer_flags`
@@ -183,6 +185,7 @@ class Viewer(pyglet.window.Window):
         shadow=False,
         plane_reflection=False,
         env_separate_rigid=False,
+        world_up_axis=None,
         plugins=None,
         enable_help_text=True,
         **kwargs,
@@ -206,6 +209,7 @@ class Viewer(pyglet.window.Window):
         self._thread: Optional[Thread] = None
         self._run_in_thread = run_in_thread
         self._seg_node_map = context.seg_node_map
+        self._world_up_axis = world_up_axis
 
         self._offscreen_event = Event()
         self._offscreen_pending_render = None
@@ -1023,7 +1027,13 @@ class Viewer(pyglet.window.Window):
         self._camera_node.matrix = self._default_camera_pose
         oc = self._default_orth_cam
         oc.xmag, oc.ymag = self._orth_cam_reset_mags
-        self._trackball = Trackball(self._default_camera_pose, self.viewport_size, scale, centroid)
+        self._trackball = Trackball(
+            self._default_camera_pose,
+            self.viewport_size,
+            scale,
+            centroid,
+            world_up_axis=self._world_up_axis,
+        )
 
     def _get_save_filename(self, file_exts):
         global root

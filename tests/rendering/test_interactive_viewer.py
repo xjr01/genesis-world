@@ -9,6 +9,7 @@ import OpenGL.error
 import pytest
 
 import genesis as gs
+from genesis.ext.pyrender.trackball import Trackball
 from genesis.options.sensors import RasterizerCameraOptions
 from genesis.utils.misc import tensor_to_array
 from genesis.vis.keybindings import Key, KeyAction, Keybind, KeyMod, MouseButton
@@ -18,6 +19,41 @@ from ..utils import assert_allclose, assert_equal
 from .conftest import RENDERER_TYPE
 
 CAM_RES = (480, 320)
+
+
+@pytest.mark.required
+def test_trackball_orbit_respects_world_up_axis():
+    rotation_z_to_y = np.array(((1.0, 0.0, 0.0), (0.0, 0.0, 1.0), (0.0, -1.0, 0.0)))
+    transform_z_to_y = np.eye(4)
+    transform_z_to_y[:3, :3] = rotation_z_to_y
+    camera_pos_z = np.array((4.0, -3.0, 2.0))
+    target_z = np.array((0.5, -0.25, 0.75))
+    world_up_z = np.array((0.0, 0.0, 1.0))
+    camera_backward_z = camera_pos_z - target_z
+    camera_backward_z /= np.linalg.norm(camera_backward_z)
+    camera_right_z = np.cross(world_up_z, camera_backward_z)
+    camera_right_z /= np.linalg.norm(camera_right_z)
+    camera_up_z = np.cross(camera_backward_z, camera_right_z)
+    camera_pose_z = np.eye(4)
+    camera_pose_z[:3, :3] = np.column_stack((camera_right_z, camera_up_z, camera_backward_z))
+    camera_pose_z[:3, 3] = camera_pos_z
+    camera_pose_y = transform_z_to_y @ camera_pose_z
+    target_y = rotation_z_to_y @ target_z
+    world_up_y = rotation_z_to_y @ world_up_z
+    viewport_size = (640.0, 480.0)
+    scale = 5.0
+    mouse_down = (100.0, 100.0)
+    mouse_drag = (140.0, 125.0)
+    trackball_z_default = Trackball(camera_pose_z, viewport_size, scale, target_z)
+    trackball_z = Trackball(camera_pose_z, viewport_size, scale, target_z, world_up_axis=world_up_z)
+    trackball_y = Trackball(camera_pose_y, viewport_size, scale, target_y, world_up_axis=world_up_y)
+
+    for trackball in (trackball_z_default, trackball_z, trackball_y):
+        trackball.down(mouse_down)
+        trackball.drag(mouse_drag)
+
+    assert_allclose(trackball_z.pose, trackball_z_default.pose, atol=1e-12)
+    assert_allclose(trackball_y.pose, transform_z_to_y @ trackball_z.pose, atol=1e-12)
 
 
 @pytest.mark.required
