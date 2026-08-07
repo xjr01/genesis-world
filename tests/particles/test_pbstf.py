@@ -193,7 +193,7 @@ def test_mesh_static_collider_pose(asset_tmp_path, n_envs, show_viewer):
     scene.step()
     particles_pos = tensor_to_array(liquid.get_particles_pos())
     if n_envs:
-        assert_allclose(particles_pos[:-1, 0], (target_pos,))
+        assert_equal(particles_pos[:-1, 0], (target_pos,))
         projected_pos = particles_pos[-1, 0]
     else:
         projected_pos = particles_pos[0]
@@ -290,7 +290,7 @@ def test_teapot_initial_particles_pose_and_case_time_steps():
     assert particles[:, 2].max() > 5.0
     for case in CASES:
         settings = _case_settings(case)
-        expected_scale = 20 if case == CASE_TEAPOT else 10
+        expected_scale = 20 if case in (CASE_TAP, CASE_TEAPOT) else 10
         expected_dt = 0.01 if case == CASE_TEAPOT else 1.0 / 30.0
         assert_equal(settings.scale, expected_scale)
         assert_equal(settings.dt, expected_dt)
@@ -301,8 +301,12 @@ def test_teapot_initial_particles_pose_and_case_time_steps():
             pose.pos,
             (
                 teapot_settings.offset[0],
-                teapot_settings.offset[1] * math.cos(angle) - teapot_settings.offset[2] * math.sin(angle),
-                teapot_settings.offset[1] * math.sin(angle) + teapot_settings.offset[2] * math.cos(angle),
+                teapot_settings.turning_axis_pos[1]
+                + (teapot_settings.offset[1] - teapot_settings.turning_axis_pos[1]) * math.cos(angle)
+                - (teapot_settings.offset[2] - teapot_settings.turning_axis_pos[2]) * math.sin(angle),
+                teapot_settings.turning_axis_pos[2]
+                + (teapot_settings.offset[1] - teapot_settings.turning_axis_pos[1]) * math.sin(angle)
+                + (teapot_settings.offset[2] - teapot_settings.turning_axis_pos[2]) * math.cos(angle),
             ),
             atol=1e-12,
         )
@@ -333,8 +337,8 @@ def test_tap_case_settings():
     assert_equal(settings.emitter.pos, (0.0, 5.0, 0.0))
     assert_equal(settings.emitter.direction, (0.0, -1.0, 0.0))
     assert_equal(settings.emitter.droplet_size, 2.0)
-    assert_equal(settings.emitter.generation_speed, 2.0)
-    assert_equal(settings.emitter.initial_speed, 1.0)
+    assert_equal(settings.emitter.generation_speed, 3.0)
+    assert_equal(settings.emitter.initial_speed, 0.0)
 
 
 @pytest.mark.required
