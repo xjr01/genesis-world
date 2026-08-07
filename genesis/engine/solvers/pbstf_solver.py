@@ -16,10 +16,12 @@ from genesis.engine.boundaries import (
 )
 from genesis.engine.entities import PBSTFEntity
 from genesis.engine.states.solvers import PBSTFSolverState
+from genesis.utils import particle
 from genesis.utils.misc import (
     assign_indexed_tensor,
     broadcast_tensor,
     indices_to_mask,
+    qd_to_numpy,
     qd_to_torch,
     sanitize_index,
 )
@@ -45,6 +47,9 @@ class PBSTFSolver(Solver):
     _N_PHI = 36
     _ILLUMINATED_THRESHOLD = 1.0 / 9.0
     _COS_PI_OVER_4 = 0.7071067811865476
+    _SURFACE_NEIGHBOR_OVERFLOW = 1
+    _LOCAL_MESH_QUEUE_OVERFLOW = 2
+    _LOCAL_MESH_NEIGHBOR_OVERFLOW = 3
 
     def __init__(self, scene, sim, options):
         super().__init__(scene, sim, options)
@@ -55,6 +60,7 @@ class PBSTFSolver(Solver):
         self._max_solver_iterations = options.max_solver_iterations
         self._topology_rebuild_interval = options.topology_rebuild_interval
         self._max_surface_neighbors = options.max_surface_neighbors
+        self._max_localmesh_neighbors = options.max_localmesh_neighbors
         self._enable_pca_normals = options.enable_pca_normals
         self._static_colliders = tuple(
             create_static_collider(collider_options) for collider_options in options.static_colliders
@@ -137,7 +143,7 @@ class PBSTFSolver(Solver):
         # Convert before compiling any PBSTF kernel so every compiled instance
         # sees one stable gravity-field type.
         if self._gravity is not None:
-            gravity = self._gravity.to_numpy()
+            gravity = qd_to_numpy(self._gravity, transpose=True)
             self._gravity = qd.field(dtype=gs.qd_vec3, shape=(self._B,))
             self._gravity.from_numpy(gravity)
 
@@ -155,16 +161,34 @@ class PBSTFSolver(Solver):
             for entity in self.entities:
                 entity._add_to_solver()
 
-            # The reference initializes unit particle masses, evaluates the same
-            # cubic-spline density used by the solver, then scales the mass so
-            # the maximum initial density equals the target rest density.
-            self._kernel_reorder_particles(0)
-            self._kernel_compute_density(0)
-            self._max_density[None] = 0.0
-            self._kernel_reduce_max_density()
-            max_density = float(self._max_density.to_numpy())
+            has_active_particles = any(entity.active for entity in self.entities)
+            if has_active_particles:
+                self._kernel_reorder_particles(0)
+                self._kernel_compute_density(0)
+                self._max_density[None] = 0.0
+                self._kernel_reduce_max_density()
+                max_density = qd_to_numpy(self._max_density, transpose=True)[()]
+            else:
+                # Empty emitters use the interior staggered lattice density that defines the PBSTF particle mass.
+                reference_half_extent = self._support_radius + 2.0 * self._particle_size
+                reference_particles = particle.box_to_particles(
+                    p_size=self._particle_size,
+                    size=(2.0 * reference_half_extent,) * 3,
+                    sampler="staggered",
+                )
+                center_idx = np.linalg.norm(reference_particles, axis=1).argmin()
+                distances = np.linalg.norm(reference_particles - reference_particles[center_idx], axis=1)
+                q = distances / self._support_radius
+                weights = np.zeros_like(distances)
+                coefficient = 8.0 / (math.pi * self._support_radius**3)
+                is_inner = q < 0.5
+                is_outer = (q >= 0.5) & (q < 1.0)
+                weights[is_inner] = coefficient * (6.0 * q[is_inner] ** 2 * (q[is_inner] - 1.0) + 1.0)
+                weights[is_outer] = 2.0 * coefficient * (1.0 - q[is_outer]) ** 3
+                max_density = weights.sum()
+
             if max_density <= gs.EPS:
-                gs.raise_exception("Cannot calibrate PBSTF particle mass from an empty active particle set.")
+                gs.raise_exception("PBSTF particle mass calibration requires a positive reference density.")
             self._default_mass = float(self._material.rho / max_density)
             self._kernel_set_particle_mass(self._default_mass)
             self._kernel_reorder_particles(0)
@@ -254,7 +278,6 @@ class PBSTFSolver(Solver):
     def _init_surface_fields(self):
         n = self._n_particles
         b = self._B
-        m = self._max_surface_neighbors
 
         self.on_surface = qd.field(gs.qd_bool, shape=(n, b))
         self.topology_valid = qd.field(gs.qd_bool, shape=(n, b))
@@ -267,17 +290,19 @@ class PBSTFSolver(Solver):
         # classifier (18 latitude x 36 longitude samples).
         self._screen_blocked = qd.field(gs.qd_int, shape=(n, b, self._N_THETA + 1, self._N_PHI + 1))
 
-        mesh_shape = (n, b, m)
-        self.projected_positions = qd.field(gs.qd_vec2, shape=mesh_shape)
-        self.neighbor_ids = qd.field(gs.qd_int, shape=mesh_shape)
-        self.local_mesh_neighbors = qd.field(gs.qd_int, shape=mesh_shape)
-        self._chain_pre = qd.field(gs.qd_int, shape=mesh_shape)
-        self._chain_nxt = qd.field(gs.qd_int, shape=mesh_shape)
-        self._surface_gradient = qd.field(gs.qd_vec3, shape=mesh_shape)
+        candidate_shape = (n, b, self._max_surface_neighbors)
+        self.projected_positions = qd.field(gs.qd_vec2, shape=candidate_shape)
+        self.neighbor_ids = qd.field(gs.qd_int, shape=candidate_shape)
+        self._chain_pre = qd.field(gs.qd_int, shape=candidate_shape)
+        self._chain_nxt = qd.field(gs.qd_int, shape=candidate_shape)
+        local_mesh_shape = (n, b, self._max_localmesh_neighbors)
+        self.local_mesh_neighbors = qd.field(gs.qd_int, shape=local_mesh_shape)
+        self._surface_gradient = qd.field(gs.qd_vec3, shape=local_mesh_shape)
         self.n_neighbors = qd.field(gs.qd_int, shape=(n, b))
         self._mesh_axis_x = qd.field(gs.qd_vec3, shape=(n, b))
         self._mesh_axis_y = qd.field(gs.qd_vec3, shape=(n, b))
-        self._node_queue = qd.field(gs.qd_int, shape=(n, b, 3 * m))
+        # Polar-order scratch reuses the queue because initial queue writes stay behind the scan cursor.
+        self._node_queue = qd.field(gs.qd_int, shape=(n, b, 3 * self._max_surface_neighbors))
         self._surface_lambda = qd.field(gs.qd_float, shape=(n, b))
         self._surface_grad_i = qd.field(gs.qd_vec3, shape=(n, b))
         self._overflow = qd.field(gs.qd_int, shape=())
@@ -648,12 +673,12 @@ class PBSTFSolver(Solver):
                     i_b,
                 )
                 if result.overflow:
-                    qd.atomic_max(self._overflow[None], 1)
+                    qd.atomic_max(self._overflow[None], self._SURFACE_NEIGHBOR_OVERFLOW)
                 n = result.count
                 self.n_neighbors[i, i_b] = n
 
                 for k in range(n):
-                    self.local_mesh_neighbors[i, i_b, k] = k
+                    self._node_queue[i, i_b, k] = k
                     self._chain_pre[i, i_b, k] = -1
                     self._chain_nxt[i, i_b, k] = -1
 
@@ -662,40 +687,40 @@ class PBSTFSolver(Solver):
                 for k in range(1, n):
                     cursor = k
                     while cursor > 0:
-                        u = self.local_mesh_neighbors[i, i_b, cursor - 1]
-                        v = self.local_mesh_neighbors[i, i_b, cursor]
+                        u = self._node_queue[i, i_b, cursor - 1]
+                        v = self._node_queue[i, i_b, cursor]
                         x_u = self.projected_positions[i, i_b, u]
                         x_v = self.projected_positions[i, i_b, v]
                         angle_u = qd.atan2(x_u[1], x_u[0])
                         angle_v = qd.atan2(x_v[1], x_v[0])
                         if angle_u > angle_v or (angle_u == angle_v and x_u.norm() > x_v.norm()):
-                            self.local_mesh_neighbors[i, i_b, cursor - 1] = v
-                            self.local_mesh_neighbors[i, i_b, cursor] = u
+                            self._node_queue[i, i_b, cursor - 1] = v
+                            self._node_queue[i, i_b, cursor] = u
                             cursor -= 1
                         else:
                             cursor = 0
 
                 if n >= 3:
                     for k in range(n - 1):
-                        u = self.local_mesh_neighbors[i, i_b, k]
-                        v = self.local_mesh_neighbors[i, i_b, k + 1]
+                        u = self._node_queue[i, i_b, k]
+                        v = self._node_queue[i, i_b, k + 1]
                         self._chain_nxt[i, i_b, u] = v
                         self._chain_pre[i, i_b, v] = u
-                    u_last = self.local_mesh_neighbors[i, i_b, n - 1]
-                    u_first = self.local_mesh_neighbors[i, i_b, 0]
+                    u_last = self._node_queue[i, i_b, n - 1]
+                    u_first = self._node_queue[i, i_b, 0]
                     self._chain_nxt[i, i_b, u_last] = u_first
                     self._chain_pre[i, i_b, u_first] = u_last
 
                     queue_start = 0
                     queue_end = 0
                     for k in range(n):
-                        u = self.local_mesh_neighbors[i, i_b, k]
+                        u = self._node_queue[i, i_b, k]
                         if self._need_flip(i, i_b, u):
                             if queue_end < 3 * self._max_surface_neighbors:
                                 self._node_queue[i, i_b, queue_end] = u
                                 queue_end += 1
                             else:
-                                qd.atomic_max(self._overflow[None], 2)
+                                qd.atomic_max(self._overflow[None], self._LOCAL_MESH_QUEUE_OVERFLOW)
 
                     while queue_start < queue_end:
                         u = self._node_queue[i, i_b, queue_start]
@@ -710,13 +735,13 @@ class PBSTFSolver(Solver):
                                     self._node_queue[i, i_b, queue_end] = u_nxt
                                     queue_end += 1
                                 else:
-                                    qd.atomic_max(self._overflow[None], 2)
+                                    qd.atomic_max(self._overflow[None], self._LOCAL_MESH_QUEUE_OVERFLOW)
                             if self._need_flip(i, i_b, u_pre):
                                 if queue_end < 3 * self._max_surface_neighbors:
                                     self._node_queue[i, i_b, queue_end] = u_pre
                                     queue_end += 1
                                 else:
-                                    qd.atomic_max(self._overflow[None], 2)
+                                    qd.atomic_max(self._overflow[None], self._LOCAL_MESH_QUEUE_OVERFLOW)
                             self._chain_nxt[i, i_b, u] = -1
                             self._chain_pre[i, i_b, u] = -1
 
@@ -730,7 +755,7 @@ class PBSTFSolver(Solver):
                     if start >= 0:
                         u = start
                         keep_walking = True
-                        while keep_walking and ring_size < self._max_surface_neighbors:
+                        while keep_walking and ring_size < self._max_localmesh_neighbors:
                             u_next = self._chain_nxt[i, i_b, u]
                             x_u = self.projected_positions[i, i_b, u]
                             x_next = self.projected_positions[i, i_b, u_next]
@@ -741,8 +766,12 @@ class PBSTFSolver(Solver):
                             if u == start:
                                 keep_walking = False
 
+                        if keep_walking:
+                            qd.atomic_max(self._overflow[None], self._LOCAL_MESH_NEIGHBOR_OVERFLOW)
+                        else:
+                            self.topology_valid[i, i_b] = ring_size >= 3 and qd.abs(projected_area_twice) > gs.EPS
+
                     self.n_neighbors[i, i_b] = ring_size
-                    self.topology_valid[i, i_b] = ring_size >= 3 and qd.abs(projected_area_twice) > gs.EPS
 
     def _rebuild_topology(self, f):
         self._kernel_compute_density(f)
@@ -752,9 +781,14 @@ class PBSTFSolver(Solver):
         self._kernel_compute_normals()
         self._kernel_mark_density_constraints()
         self._kernel_build_local_meshes()
-        overflow = int(self._overflow.to_numpy())
+        overflow = qd_to_numpy(self._overflow, transpose=True)[()]
+        if overflow == self._LOCAL_MESH_NEIGHBOR_OVERFLOW:
+            gs.raise_exception(
+                "PBSTF local mesh exceeded its one-ring neighbor capacity; increase "
+                f"`max_localmesh_neighbors` (currently {self._max_localmesh_neighbors})."
+            )
         if overflow:
-            detail = "neighbor capacity" if overflow == 1 else "Delaunator queue capacity"
+            detail = "projected neighbor capacity" if overflow == self._SURFACE_NEIGHBOR_OVERFLOW else "queue capacity"
             gs.raise_exception(
                 f"PBSTF local mesh exceeded its {detail}; increase `max_surface_neighbors` "
                 f"(currently {self._max_surface_neighbors})."

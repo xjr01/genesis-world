@@ -49,9 +49,32 @@ class Emitter(RBC):
 
     def reset(self):
         """
-        Reset the emitter's internal particle index to start emitting from the beginning.
+        Reset the emitter's particle index and accumulated emission length.
         """
         self._next_particle = 0
+        self._acc_droplet_len = 0.0
+
+    def _emit_particles(self, positions, velocities):
+        n_particles = len(positions)
+        if n_particles > self._entity.n_particles:
+            gs.raise_exception(
+                f"Number of particles to emit ({n_particles}) at the current step is larger than the maximum "
+                f"number of particles ({self._entity.n_particles})."
+            )
+
+        if self._next_particle + n_particles > self._entity.n_particles:
+            self._next_particle = 0
+        particles_idx = torch.arange(
+            self._next_particle, self._next_particle + n_particles, dtype=gs.tc_int, device=gs.device
+        )
+        self._entity.set_particles_pos(positions, particles_idx)
+        self._entity.set_particles_vel(velocities, particles_idx)
+        self._entity.set_particles_active(gs.ACTIVE, particles_idx)
+
+        self._next_particle += n_particles
+        if self._next_particle == self._entity.n_particles:
+            self._next_particle = 0
+        gs.logger.debug(f"Emitted {n_particles} particles. Next particle index: {self._next_particle}.")
 
     def emit(
         self,
@@ -155,32 +178,8 @@ class Emitter(RBC):
             if not self._solver.boundary.is_inside(positions):
                 gs.raise_exception("Emitted particles are outside the boundary.")
 
-            n_particles = len(positions)
-
-            # Expand vels with batch dimension
             vels = speed * direction
-
-            if n_particles > self._entity.n_particles:
-                gs.raise_exception(
-                    f"Number of particles to emit ({n_particles}) at the current step is larger than the maximum "
-                    f"number of particles ({self._entity.n_particles})."
-                )
-
-            particles_idx = torch.arange(
-                self._next_particle, self._next_particle + n_particles, dtype=gs.tc_int, device=gs.device
-            )
-
-            self._entity.set_particles_pos(positions, particles_idx)
-            self._entity.set_particles_vel(vels, particles_idx)
-            self._entity.set_particles_active(gs.ACTIVE, particles_idx)
-
-            self._next_particle += n_particles
-
-            # recycle particles
-            if self._next_particle + n_particles > self._entity.n_particles:
-                self._next_particle = 0
-
-            gs.logger.debug(f"Emitted {n_particles} particles. Next particle index: {self._next_particle}.")
+            self._emit_particles(positions, vels)
 
         else:
             gs.logger.debug("Droplet length is too short for current step. Skipping to next step.")
@@ -226,28 +225,7 @@ class Emitter(RBC):
         positions[dists < gs.EPS] = gs.EPS
         vels = (speed / (dists[:, None] + gs.EPS)) * positions_
 
-        n_particles = len(positions)
-        if n_particles > self._entity.n_particles:
-            gs.raise_exception(
-                f"Number of particles to emit ({n_particles}) at the current step is larger than the maximum number "
-                f"of particles ({self._entity.n_particles})."
-            )
-
-        particles_idx = torch.arange(
-            self._next_particle, self._next_particle + n_particles, dtype=gs.tc_int, device=gs.device
-        )
-
-        self._entity.set_particles_pos(positions, particles_idx)
-        self._entity.set_particles_vel(vels, particles_idx)
-        self._entity.set_particles_active(gs.ACTIVE, particles_idx)
-
-        self._next_particle += n_particles
-
-        # recycle particles
-        if self._next_particle + n_particles > self._entity.n_particles:
-            self._next_particle = 0
-
-        gs.logger.debug(f"Emitted {n_particles} particles. Next particle index: {self._next_particle}.")
+        self._emit_particles(positions, vels)
 
     @property
     def uid(self):

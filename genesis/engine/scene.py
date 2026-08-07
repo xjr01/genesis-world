@@ -814,7 +814,8 @@ class Scene(RBC):
         ----------
         material : gs.materials.Material
             The material of the fluid to be emitted. Must be an instance of `gs.materials.MPM.Base`,
-            `gs.materials.SPH.Base`, `gs.materials.PBD.Particle` or `gs.materials.PBD.Liquid`.
+            `gs.materials.SPH.Base`, `gs.materials.PBD.Particle`, `gs.materials.PBD.Liquid` or
+            `gs.materials.PBSTF.Base`.
         max_particles : int
             The maximum number of particles that can be emitted by the emitter. Particles will be recycled once this
             limit is reached.
@@ -832,11 +833,19 @@ class Scene(RBC):
             gs.raise_exception("Emitter is not supported in differentiable mode.")
 
         if not isinstance(
-            material, (gs.materials.MPM.Base, gs.materials.SPH.Base, gs.materials.PBD.Particle, gs.materials.PBD.Liquid)
+            material,
+            (
+                gs.materials.MPM.Base,
+                gs.materials.SPH.Base,
+                gs.materials.PBD.Particle,
+                gs.materials.PBD.Liquid,
+                gs.materials.PBSTF.Base,
+            ),
         ):
             gs.raise_exception(
                 "Non-supported material for emitter. Supported materials are: `gs.materials.MPM.Base`, "
-                "`gs.materials.SPH.Base`, `gs.materials.PBD.Particle`, `gs.materials.PBD.Liquid`."
+                "`gs.materials.SPH.Base`, `gs.materials.PBD.Particle`, `gs.materials.PBD.Liquid`, "
+                "`gs.materials.PBSTF.Base`."
             )
 
         if surface is None:

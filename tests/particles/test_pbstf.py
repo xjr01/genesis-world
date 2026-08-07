@@ -21,10 +21,11 @@ from genesis.engine.boundaries import (
 from genesis.utils.misc import qd_to_numpy, tensor_to_array
 from tests.utils import assert_allclose, assert_equal
 
-from examples.pbstf_surface_tension import (
+from examples.teapot.pbstf_surface_tension import (
     CASE_BOUNCE,
     CASE_CONE,
     CASE_MERGE,
+    CASE_TAP,
     CASE_TEAPOT,
     CASES,
     _case_settings,
@@ -313,6 +314,53 @@ def test_teapot_initial_particles_pose_and_case_time_steps():
 
 
 @pytest.mark.required
+@pytest.mark.parametrize("backend", [gs.cpu])
+def test_tap_case_settings():
+    settings = _case_settings(CASE_TAP)
+    assert CASE_TAP in CASES
+    assert settings.scale == 20
+    assert_equal(settings.dt, 1.0 / 30.0)
+    assert_equal(settings.gravity, (0.0, -9.8, 0.0))
+    assert_equal(settings.lower_bound, (-500.0, -50.0, -500.0))
+    assert_equal(settings.upper_bound, (500.0, 500.0, 500.0))
+    assert settings.static_colliders == ()
+    assert settings.max_surface_neighbors == 768
+    assert settings.max_localmesh_neighbors == 64
+    assert settings.enable_pca_normals
+    assert settings.steps == 2000
+    assert settings.emitter is not None
+    assert settings.emitter.max_particles == 200000
+    assert_equal(settings.emitter.pos, (0.0, 5.0, 0.0))
+    assert_equal(settings.emitter.direction, (0.0, -1.0, 0.0))
+    assert_equal(settings.emitter.droplet_size, 2.0)
+    assert_equal(settings.emitter.speed, 5.0)
+    assert_equal(settings.emitter.acceleration_start, 6.0)
+    assert_equal(settings.emitter.acceleration, 0.7)
+    assert_equal(settings.emitter.nozzle_lower, (-2.0, 5.0, -2.0))
+    assert_equal(settings.emitter.nozzle_upper, (2.0, 9.0, 2.0))
+
+
+@pytest.mark.required
+@pytest.mark.parametrize("backend", [gs.cpu])
+def test_local_mesh_neighbor_capacity():
+    options = gs.options.PBSTFOptions(
+        max_surface_neighbors=128,
+    )
+    assert options.max_localmesh_neighbors == 64
+
+    options = gs.options.PBSTFOptions(
+        max_surface_neighbors=32,
+    )
+    assert options.max_localmesh_neighbors == 32
+
+    with pytest.raises(gs.GenesisException, match="must be at most"):
+        gs.options.PBSTFOptions(
+            max_surface_neighbors=32,
+            max_localmesh_neighbors=33,
+        )
+
+
+@pytest.mark.required
 @pytest.mark.parametrize("backend", [gs.cuda])
 def test_teapot_manipulator_tracks_grasp_pose(show_viewer):
     teapot_settings = _case_settings(CASE_TEAPOT).teapot
@@ -399,9 +447,7 @@ def test_teapot_manipulator_tracks_grasp_pose(show_viewer):
         qpos = kuka.get_qpos()
         qpos_array = tensor_to_array(qpos)
         hand_qpos = tensor_to_array(hand.get_qpos())
-        orientation_error = 2.0 * np.arccos(
-            np.minimum(np.abs(np.sum(end_effector_quat * target_quat)), 1.0)
-        )
+        orientation_error = 2.0 * np.arccos(np.minimum(np.abs(np.sum(end_effector_quat * target_quat)), 1.0))
 
         assert np.linalg.norm(tool_center_pos - target_pos) <= 5e-4
         assert orientation_error <= 5e-3
@@ -410,6 +456,74 @@ def test_teapot_manipulator_tracks_grasp_pose(show_viewer):
         assert (hand_qpos >= hand_limit_lower).all()
         assert (hand_qpos <= hand_limit_upper).all()
         assert_allclose(hand_qpos, manipulator.hand_qpos, atol=1e-6)
+
+
+@pytest.mark.required
+@pytest.mark.parametrize("backend", [gs.cuda])
+@pytest.mark.parametrize("n_envs", [0, 2])
+def test_emitter_build_emit_and_wrap(n_envs, show_viewer):
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=1e-3,
+            gravity=(0.0, 0.0, 0.0),
+        ),
+        pbstf_options=gs.options.PBSTFOptions(
+            particle_size=0.2,
+            lower_bound=(-2.0, -2.0, -2.0),
+            upper_bound=(2.0, 2.0, 2.0),
+            max_solver_iterations=1,
+            max_surface_neighbors=32,
+            enable_pca_normals=False,
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(3.0, 3.0, 2.0),
+            camera_lookat=(0.0, 0.5, 0.0),
+        ),
+        show_viewer=show_viewer,
+    )
+    emitter = scene.add_emitter(
+        material=gs.materials.PBSTF.Liquid(
+            sampler="regular",
+        ),
+        max_particles=20,
+    )
+    scene.build(n_envs=n_envs)
+
+    assert not tensor_to_array(emitter.entity.get_particles_active()).any()
+    emitter.emit(
+        droplet_shape="circle",
+        droplet_size=0.6,
+        droplet_length=0.2,
+        pos=(0.0, 0.5, 0.0),
+        direction=(0.0, -1.0, 0.0),
+        speed=1.0,
+    )
+    assert emitter.next_particle == 9
+    emitter.emit(
+        droplet_shape="circle",
+        droplet_size=0.8,
+        droplet_length=0.2,
+        pos=(0.0, 0.5, 0.0),
+        direction=(0.0, -1.0, 0.0),
+        speed=1.0,
+    )
+
+    active = tensor_to_array(emitter.entity.get_particles_active())
+    velocities = tensor_to_array(emitter.entity.get_particles_vel())
+    assert emitter.next_particle == 12
+    assert (active.sum(axis=-1) == 12).all()
+    assert_allclose(velocities[active], (0.0, -1.0, 0.0), atol=1e-6)
+    expected_mass = emitter.entity.material.rho * emitter.entity.particle_size**3 / math.sqrt(2.0)
+    assert_allclose(tensor_to_array(emitter.entity.get_mass()) / active.sum(axis=-1), expected_mass, rtol=1e-3)
+
+    scene.step()
+    positions = tensor_to_array(emitter.entity.get_particles_pos())
+    active = tensor_to_array(emitter.entity.get_particles_active())
+    assert np.isfinite(positions[active]).all()
+
+    scene.reset()
+    assert emitter.next_particle == 0
+    assert not tensor_to_array(emitter.entity.get_particles_active()).any()
 
 
 @pytest.mark.required
@@ -489,6 +603,9 @@ def test_pbstf_cpp_cube_converges_to_sphere(show_viewer):
     solver = scene.pbstf_solver
     assert liquid.n_particles == 1099
     assert solver._support_radius == pytest.approx(3.0 * solver.particle_size)
+    assert solver.projected_positions.shape[-1] == 128
+    assert solver.local_mesh_neighbors.shape[-1] == 64
+    assert solver._surface_gradient.shape[-1] == 64
 
     def surface_radius_cv():
         solver._kernel_reorder_particles(0)

@@ -14,8 +14,9 @@ CASE_CUBE = "cube"
 CASE_MERGE = "merge"
 CASE_BOUNCE = "bounce"
 CASE_CONE = "cone"
+CASE_TAP = "tap"
 CASE_TEAPOT = "teapot"
-CASES = (CASE_CUBE, CASE_MERGE, CASE_BOUNCE, CASE_CONE, CASE_TEAPOT)
+CASES = (CASE_CUBE, CASE_MERGE, CASE_BOUNCE, CASE_CONE, CASE_TAP, CASE_TEAPOT)
 
 DEFAULT_CASE_DT = 1.0 / 30.0
 
@@ -54,6 +55,18 @@ class TeapotSettings(NamedTuple):
     manipulator: TeapotManipulatorSettings
 
 
+class TapEmitterSettings(NamedTuple):
+    pos: tuple[float, float, float]
+    direction: tuple[float, float, float]
+    droplet_size: float
+    speed: float
+    acceleration_start: float
+    acceleration: float
+    max_particles: int
+    nozzle_lower: tuple[float, float, float]
+    nozzle_upper: tuple[float, float, float]
+
+
 class CaseSettings(NamedTuple):
     scale: int
     dt: float
@@ -64,8 +77,12 @@ class CaseSettings(NamedTuple):
     camera_lookat: tuple[float, float, float]
     static_colliders: tuple[gs.options.PBSTFStaticColliderOptions, ...]
     max_solver_iterations: int
+    max_surface_neighbors: int
+    max_localmesh_neighbors: int
+    enable_pca_normals: bool
     steps: int
     teapot: TeapotSettings | None
+    emitter: TapEmitterSettings | None
 
 
 class TeapotPose(NamedTuple):
@@ -115,8 +132,12 @@ def _case_settings(case):
             camera_lookat=(0.0, 0.0, 0.0),
             static_colliders=(),
             max_solver_iterations=100,
+            max_surface_neighbors=128,
+            max_localmesh_neighbors=64,
+            enable_pca_normals=False,
             steps=1500,
             teapot=None,
+            emitter=None,
         )
     if case == CASE_MERGE:
         return CaseSettings(
@@ -129,8 +150,12 @@ def _case_settings(case):
             camera_lookat=(0.0, -1.0, 0.0),
             static_colliders=(),
             max_solver_iterations=100,
+            max_surface_neighbors=128,
+            max_localmesh_neighbors=64,
+            enable_pca_normals=False,
             steps=300,
             teapot=None,
+            emitter=None,
         )
     if case == CASE_BOUNCE:
         return CaseSettings(
@@ -143,8 +168,12 @@ def _case_settings(case):
             camera_lookat=(0.0, -1.0, 0.0),
             static_colliders=(),
             max_solver_iterations=100,
+            max_surface_neighbors=128,
+            max_localmesh_neighbors=64,
+            enable_pca_normals=False,
             steps=300,
             teapot=None,
+            emitter=None,
         )
     if case == CASE_CONE:
         return CaseSettings(
@@ -163,8 +192,40 @@ def _case_settings(case):
                 ),
             ),
             max_solver_iterations=100,
+            max_surface_neighbors=128,
+            max_localmesh_neighbors=64,
+            enable_pca_normals=False,
             steps=300,
             teapot=None,
+            emitter=None,
+        )
+    if case == CASE_TAP:
+        return CaseSettings(
+            scale=20,
+            dt=DEFAULT_CASE_DT,
+            gravity=(0.0, -9.8, 0.0),
+            lower_bound=(-500.0, -50.0, -500.0),
+            upper_bound=(500.0, 500.0, 500.0),
+            camera_pos=(12.0, 4.0, 12.0),
+            camera_lookat=(0.0, 0.0, 0.0),
+            static_colliders=(),
+            max_solver_iterations=100,
+            max_surface_neighbors=768,
+            max_localmesh_neighbors=64,
+            enable_pca_normals=True,
+            steps=2000,
+            teapot=None,
+            emitter=TapEmitterSettings(
+                pos=(0.0, 5.0, 0.0),
+                direction=(0.0, -1.0, 0.0),
+                droplet_size=2.0,
+                speed=5.0,
+                acceleration_start=6.0,
+                acceleration=0.7,
+                max_particles=200000,
+                nozzle_lower=(-2.0, 5.0, -2.0),
+                nozzle_upper=(2.0, 9.0, 2.0),
+            ),
         )
     if case == CASE_TEAPOT:
         manipulator = TeapotManipulatorSettings(
@@ -260,8 +321,12 @@ def _case_settings(case):
                 ),
             ),
             max_solver_iterations=5,
+            max_surface_neighbors=128,
+            max_localmesh_neighbors=64,
+            enable_pca_normals=False,
             steps=10000,
             teapot=teapot,
+            emitter=None,
         )
     raise ValueError(f"Unknown PBSTF example case: {case}")
 
@@ -438,6 +503,22 @@ def _add_case_entities(scene, case, particle_size, settings):
         )
         return ((liquid, (0.0, -4.0, 0.0)),)
 
+    if case == CASE_TAP:
+        emitter_settings = settings.emitter
+        if emitter_settings is None:
+            gs.raise_exception("The tap case requires emitter settings.")
+        emitter = scene.add_emitter(
+            material=_liquid_material(
+                sampler="regular",
+                surface_tension_compliance=0.21,
+                interior_distance_compliance=90.0,
+                surface_viscosity=0.2,
+                interior_viscosity=0.2,
+            ),
+            max_particles=emitter_settings.max_particles,
+        )
+        return ((emitter.entity, None),)
+
     if case == CASE_TEAPOT:
         teapot = settings.teapot
         if teapot is None:
@@ -515,7 +596,18 @@ def _add_case_entities(scene, case, particle_size, settings):
     raise ValueError(f"Unknown PBSTF example case: {case}")
 
 
-def _draw_case_colliders(scene, case):
+def _draw_case_geometry(scene, case, settings):
+    if case == CASE_TAP:
+        emitter_settings = settings.emitter
+        if emitter_settings is None:
+            gs.raise_exception("The tap case requires emitter settings.")
+        scene.draw_debug_box(
+            bounds=(emitter_settings.nozzle_lower, emitter_settings.nozzle_upper),
+            color=(0.35, 0.38, 0.42, 1.0),
+            wireframe=False,
+        )
+        return
+
     if case != CASE_CONE:
         return
 
@@ -587,8 +679,9 @@ def build_scene(case=CASE_CUBE, scale=None, show_viewer=False, dt=None):
             upper_bound=settings.upper_bound,
             max_solver_iterations=settings.max_solver_iterations,
             topology_rebuild_interval=10,
-            max_surface_neighbors=128,
-            enable_pca_normals=False,
+            max_surface_neighbors=settings.max_surface_neighbors,
+            max_localmesh_neighbors=settings.max_localmesh_neighbors,
+            enable_pca_normals=settings.enable_pca_normals,
             static_colliders=list(settings.static_colliders),
         ),
         viewer_options=gs.options.ViewerOptions(
@@ -603,7 +696,8 @@ def build_scene(case=CASE_CUBE, scale=None, show_viewer=False, dt=None):
     entities_and_velocities = _add_case_entities(scene, case, particle_size, settings)
     scene.build()
     for entity, velocity in entities_and_velocities:
-        entity.set_particles_vel(velocity)
+        if velocity is not None:
+            entity.set_particles_vel(velocity)
     if settings.teapot is not None:
         manipulator = settings.teapot.manipulator
         kuka = scene.get_entity(name=manipulator.kuka_entity_name)
@@ -612,7 +706,7 @@ def build_scene(case=CASE_CUBE, scale=None, show_viewer=False, dt=None):
         hand.set_qpos(manipulator.hand_qpos)
         _update_teapot_manipulator(kuka, _teapot_pose(0.0, settings.teapot), settings.teapot, manipulator.kuka_qpos)
     if show_viewer:
-        _draw_case_colliders(scene, case)
+        _draw_case_geometry(scene, case, settings)
 
     return scene, tuple(entity for entity, _ in entities_and_velocities)
 
@@ -644,6 +738,8 @@ def main():
     is_viewer_shown = args.show_viewer or args.is_recording
     scene, _ = build_scene(case=args.case, scale=args.scale, show_viewer=is_viewer_shown, dt=args.dt)
     teapot_settings = settings.teapot
+    emitter_settings = settings.emitter
+    emitter = scene.emitters[0] if emitter_settings is not None else None
     teapot = scene.get_entity(name=teapot_settings.entity_name) if teapot_settings is not None else None
     if teapot_settings is None:
         kuka = None
@@ -657,7 +753,19 @@ def main():
         steps = min(steps, 2)
     start_viewer_recording(scene, args.is_recording)
     try:
-        for _ in range(steps):
+        for step_idx in range(steps):
+            if emitter is not None:
+                speed = emitter_settings.speed
+                if scene.cur_t >= emitter_settings.acceleration_start:
+                    speed += emitter_settings.acceleration * (scene.cur_t - emitter_settings.acceleration_start)
+                emitter.emit(
+                    droplet_shape="circle",
+                    droplet_size=emitter_settings.droplet_size,
+                    droplet_length=emitter.entity.particle_size if step_idx == 0 else None,
+                    pos=emitter_settings.pos,
+                    direction=emitter_settings.direction,
+                    speed=speed,
+                )
             if teapot is not None:
                 pose = _teapot_pose(scene.cur_t, teapot_settings)
                 scene.pbstf_solver.set_static_colliders_pose(

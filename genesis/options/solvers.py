@@ -795,12 +795,16 @@ PBSTFStaticColliderOptionsType = Annotated[
 
 class PBSTFOptions(Options):
     """
-    Options configuring the GPU position-based surface-tension fluid solver.
+    Options configuring the graphics processing unit (GPU) position-based surface tension flow (PBSTF) solver.
 
-    ``particle_size`` is the particle diameter. The C++ reference fixes the
-    cubic-spline support radius to ``3 * particle_size`` (six particle radii).
-    The hash-grid cell must cover that support radius so a 3x3x3 cell stencil
-    contains every kernel neighbor.
+    ``particle_size`` is the particle diameter. The cubic-spline support radius is ``3 * particle_size`` (six particle
+    radii). The hash-grid cell must cover that support radius so a 3x3x3 cell stencil contains every kernel neighbor.
+
+    ``max_surface_neighbors`` bounds the projected candidates used to construct each local mesh. A higher value
+    preserves topology in crowded regions at the cost of scene memory and topology rebuild time.
+    ``max_localmesh_neighbors`` bounds the final one-ring vertices used by surface constraints. A higher value admits
+    more irregular one-rings at the cost of constraint memory and time. Its default is the smaller of 64 and
+    ``max_surface_neighbors``.
     """
 
     dt: PositiveFloat | None = None
@@ -811,6 +815,7 @@ class PBSTFOptions(Options):
     max_solver_iterations: PositiveInt = 100
     topology_rebuild_interval: PositiveInt = 1
     max_surface_neighbors: PositiveInt = 128
+    max_localmesh_neighbors: PositiveInt | None = None
     enable_pca_normals: bool = True
     static_colliders: list[PBSTFStaticColliderOptionsType] = Field(default_factory=list)
 
@@ -833,6 +838,8 @@ class PBSTFOptions(Options):
         support_radius = 3.0 * particle_size
         if data.get("hash_grid_cell_size") is None:
             data["hash_grid_cell_size"] = support_radius
+        if data.get("max_localmesh_neighbors") is None:
+            data["max_localmesh_neighbors"] = min(data.get("max_surface_neighbors", 128), 64)
         return data
 
     def model_post_init(self, context: Any) -> None:
@@ -840,6 +847,10 @@ class PBSTFOptions(Options):
             gs.raise_exception("Invalid pair of upper_bound and lower_bound.")
         if self.max_surface_neighbors < 3:
             gs.raise_exception("`max_surface_neighbors` must be at least 3.")
+        if self.max_localmesh_neighbors < 3:
+            gs.raise_exception("`max_localmesh_neighbors` must be at least 3.")
+        if self.max_localmesh_neighbors > self.max_surface_neighbors:
+            gs.raise_exception("`max_localmesh_neighbors` must be at most `max_surface_neighbors`.")
 
         self._support_radius = 3.0 * self.particle_size
         if self.hash_grid_cell_size < self._support_radius:
