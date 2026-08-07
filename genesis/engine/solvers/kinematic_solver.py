@@ -8,26 +8,34 @@ import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
 from genesis.engine.entities.rigid_entity import KinematicEntity
 from genesis.engine.states.solvers import KinematicSolverState
-from genesis.options.solvers import RigidOptions, KinematicOptions
+from genesis.options.solvers import KinematicOptions, RigidOptions
 from genesis.utils.misc import (
+    assign_indexed_tensor,
+    broadcast_tensor,
+    indices_to_mask,
     qd_to_torch,
     qd_zero_grad,
     sanitize_indexed_tensor,
-    indices_to_mask,
-    broadcast_tensor,
-    assign_indexed_tensor,
 )
 
 from .base_solver import MutatedLinks, Solver, StateChange, mutates
-from .rigid.abd.misc import (
-    kernel_init_dof_fields,
-    kernel_init_link_fields,
-    kernel_init_joint_fields,
-    kernel_init_vvert_fields,
-    kernel_init_vgeom_fields,
-    kernel_init_entity_fields,
-    kernel_update_heterogeneous_links_vgeom,
-    kernel_update_vgeoms_render_T,
+from .rigid.abd.accessor import (
+    kernel_get_kinematic_state,
+    kernel_get_links_vel,
+    kernel_get_state_grad,
+    kernel_get_terrain_height,
+    kernel_set_dofs_force_grad,
+    kernel_set_dofs_position,
+    kernel_set_dofs_velocity,
+    kernel_set_dofs_velocity_grad,
+    kernel_set_dofs_zero_velocity,
+    kernel_set_kinematic_state,
+    kernel_set_links_pos,
+    kernel_set_links_pos_grad,
+    kernel_set_links_quat,
+    kernel_set_links_quat_grad,
+    kernel_set_qpos,
+    kernel_set_vverts,
 )
 from .rigid.abd.forward_kinematics import (
     kernel_forward_kinematics,
@@ -37,28 +45,23 @@ from .rigid.abd.forward_kinematics import (
     kernel_update_vgeoms,
     kernel_update_vverts_for_vgeoms,
 )
-from .rigid.abd.accessor import (
-    kernel_get_kinematic_state,
-    kernel_get_state_grad,
-    kernel_set_kinematic_state,
-    kernel_set_links_pos_grad,
-    kernel_set_links_quat_grad,
-    kernel_set_dofs_position,
-    kernel_set_dofs_velocity,
-    kernel_set_dofs_velocity_grad,
-    kernel_set_dofs_force_grad,
-    kernel_set_dofs_zero_velocity,
-    kernel_set_links_pos,
-    kernel_set_links_quat,
-    kernel_set_qpos,
-    kernel_set_vverts,
-    kernel_get_links_vel,
+from .rigid.abd.misc import (
+    kernel_init_dof_fields,
+    kernel_init_entity_fields,
+    kernel_init_joint_fields,
+    kernel_init_link_fields,
+    kernel_init_vgeom_fields,
+    kernel_init_vvert_fields,
+    kernel_update_heterogeneous_links_vgeom,
+    kernel_update_vgeoms_render_T,
 )
 
 if TYPE_CHECKING:
-    from genesis.engine.entities import KinematicEntity
     from genesis.engine.scene import Scene
     from genesis.engine.simulator import Simulator
+
+
+TERRAIN_HEIGHT_QUERY_TILT_TOLERANCE = 1e-3
 
 
 def _balanced_variant_mapping(n_variants, B):
@@ -166,6 +169,8 @@ class KinematicSolver(Solver):
 
         self._is_forward_pos_updated: bool = False
         self._is_forward_vel_updated: bool = False
+
+        self._vfaces_raycast_mask: torch.Tensor | None = None
 
     # ------------------------------------------------------------------------------------
     # ----------------------------------- add_entity -------------------------------------
@@ -324,6 +329,7 @@ class KinematicSolver(Solver):
         self._init_vgeom_fields()
         self._init_link_fields()
         self._init_entity_fields()
+        self._init_vfaces_raycast_mask()
 
         self._init_envs_offset()
         self._init_vverts_state()
@@ -354,6 +360,7 @@ class KinematicSolver(Solver):
             batch_joints_info=False,
             enable_mujoco_compatibility=False,
             enable_elliptic_friction=False,
+            enable_signorini_contact=False,
             enable_multi_contact=False,
             enable_collision=False,
             enable_joint_limit=False,
@@ -551,6 +558,20 @@ class KinematicSolver(Solver):
                 self.dyn_info,
                 self.rigid_config,
             )
+
+    def _init_vfaces_raycast_mask(self):
+        """Fit the static per-vface visual-raycasting opt-in mask; see the vfaces_raycast_mask property.
+
+        Sized over the padded vgeom count so the gather also covers a solver holding no vgeom at all, whose vface
+        fields still carry one padding slot: nothing opts in there, so every entry stays 0.
+        """
+        vgeom_enabled = torch.zeros(self.n_vgeoms_, dtype=gs.tc_bool, device=gs.device)
+        for entity in self.entities:
+            if not entity.material.use_visual_raycasting:
+                continue
+            for vgeom in entity.vgeoms:
+                vgeom_enabled[vgeom.idx] = 1
+        self._vfaces_raycast_mask = vgeom_enabled[qd_to_torch(self.dyn_info.vfaces.vgeom_idx)]
 
     def _init_entity_fields(self):
         if self._entities:
@@ -1039,6 +1060,45 @@ class KinematicSolver(Solver):
         self._is_forward_pos_updated = True
         self._is_forward_vel_updated = True
 
+    def get_terrain_height(self, positions, link_idx, envs_idx=None):
+        terrain = self._links[link_idx].entity
+
+        positions = torch.as_tensor(positions, dtype=gs.tc_float, device=gs.device)
+        if positions.ndim == 0 or positions.ndim > 3 or positions.shape[-1] != 2:
+            gs.raise_exception("`positions` must have shape (2,), (n_points, 2), or (n_envs, n_points, 2).")
+
+        envs_idx = self._scene._sanitize_envs_idx(envs_idx)
+        n_envs = len(envs_idx)
+        is_single_position = positions.ndim == 1
+        n_points = 1 if is_single_position else positions.shape[-2]
+        if n_points == 0:
+            gs.raise_exception("`positions` must contain at least one position.")
+
+        is_per_env = positions.ndim == 3 and positions.shape[0] != 1
+        positions = broadcast_tensor(
+            positions, gs.tc_float, (n_envs if is_per_env else 1, n_points, 2), ("envs_idx", "positions", "")
+        )
+
+        heights = torch.empty((n_envs, n_points), dtype=gs.tc_float, device=gs.device)
+        kernel_get_terrain_height(
+            envs_idx,
+            link_idx,
+            terrain._morph.horizontal_scale,
+            positions.contiguous(),
+            terrain._terrain_height_field,
+            heights,
+            self.dyn_state,
+            self.rigid_config,
+            tilt_tolerance=TERRAIN_HEIGHT_QUERY_TILT_TOLERANCE,
+            is_per_env=is_per_env,
+        )
+
+        if self.n_envs == 0:
+            heights = heights[0]
+        if is_single_position:
+            heights = heights[..., 0]
+        return heights
+
     def get_links_pos(self, links_idx=None, envs_idx=None, *, relative=False):
         if not gs.use_zerocopy:
             _, links_idx, envs_idx = self._sanitize_io_variables(
@@ -1219,6 +1279,17 @@ class KinematicSolver(Solver):
         if self.is_built:
             return self._vgeoms
         return gs.List(vgeom for entity in self._entities for vgeom in entity.vgeoms)
+
+    @property
+    def vfaces_raycast_mask(self) -> torch.Tensor:
+        """Per-vface mask, shape (n_vfaces,), selecting the vfaces opted into visual raycasting.
+
+        A vface is opted in iff its owning vgeom belongs to an entity whose material has use_visual_raycasting=True.
+        Both the entity materials and the vface-to-vgeom mapping are fixed once the scene is built, so the mask is
+        fitted at build time and shared by every visual raycast BVH (raycaster sensors, viewer plugins) to gate which
+        vfaces contribute.
+        """
+        return self._vfaces_raycast_mask
 
     @property
     def n_links(self):

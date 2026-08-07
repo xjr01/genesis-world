@@ -12,34 +12,25 @@ SCENE_POS = np.array([0.5, 0.5, 1.0])
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--solver", choices=["explicit", "implicit"], default="implicit", help="FEM solver type (default: implicit)"
-    )
-    parser.add_argument("--dt", type=float)
-    parser.add_argument("--substeps", type=int)
-    parser.add_argument("--seconds", type=float, default=5)
-    parser.add_argument("--vis", "-v", action="store_true", default=False)
-
+    parser.add_argument("--dt", type=float, default=1e-3, help="Simulation time step")
+    parser.add_argument("--substeps", type=int, default=1, help="Number of solver substeps per step")
+    parser.add_argument("-t", "--seconds", type=float, default=5, help="Seconds to simulate")
+    parser.add_argument("-v", "--vis", action="store_true", help="Show visualization GUI")
     args = parser.parse_args()
     args.seconds = 0.01 if "PYTEST_VERSION" in os.environ else args.seconds
 
-    if args.solver == "explicit":
-        dt = args.dt if args.dt is not None else 1e-4
-        substeps = args.substeps if args.substeps is not None else 5
-    else:  # implicit
-        dt = args.dt if args.dt is not None else 1e-3
-        substeps = args.substeps if args.substeps is not None else 1
-
-    gs.init(backend=gs.gpu)
+    gs.init(backend=gs.cpu)
 
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
-            dt=dt,
-            substeps=substeps,
+            dt=args.dt,
+            substeps=args.substeps,
             gravity=(0, 0, -9.81),
         ),
+        # The linear corotated model these entities use only supplies the energy derivatives the implicit solver
+        # needs, so the explicit solver cannot integrate this scene.
         fem_options=gs.options.FEMOptions(
-            use_implicit_solver=args.solver == "implicit",
+            use_implicit_solver=True,
             enable_vertex_constraints=True,
         ),
         profiling_options=gs.options.ProfilingOptions(
@@ -60,10 +51,8 @@ def main():
         material=gs.materials.FEM.Elastic(E=1.0e6, nu=0.45, rho=1000.0, model="linear_corotated"),
     )
 
-    video_fps = 1 / dt
-    max_fps = 100
-    frame_interval = max(1, int(video_fps / max_fps)) if max_fps > 0 else 1
-    print(f"video_fps: {video_fps}, frame_interval: {frame_interval}")
+    # Recording every simulation step would be far denser than any player needs, and the step size here is tiny.
+    video_fps = min(100.0, 1.0 / args.dt)
 
     cam = scene.add_camera(
         res=(640, 480),
@@ -73,13 +62,15 @@ def main():
     )
 
     scene.build()
-    cam.start_recording()
+
+    video_filename = f"out/fem_hard_soft_dt={args.dt}_substeps={args.substeps}.mp4"
+    cam.start_recording(save_to_filename=video_filename, fps=video_fps)
 
     pinned_idx = [0]
     circle_radius = 0.3
 
     circle_period = 10.0
-    angle_step = 2 * np.pi * dt / circle_period
+    angle_step = 2 * np.pi * args.dt / circle_period
     current_angle = 0.0
 
     initial_vertex_pos = cube.init_positions[pinned_idx]
@@ -101,7 +92,7 @@ def main():
         return circle_center + offset
 
     debug_circle = None
-    total_steps = int(args.seconds / dt)
+    total_steps = int(args.seconds / args.dt)
 
     try:
         target_positions = blob.init_positions[pinned_idx]
@@ -112,7 +103,7 @@ def main():
         debug_circle = scene.draw_debug_spheres(poss=target_positions, radius=0.02, color=(0, 1, 0, 0.8))
         cube.set_vertex_constraints(pinned_idx, target_positions)
 
-        for step in tqdm(range(total_steps), total=total_steps):
+        for _ in tqdm(range(total_steps), total=total_steps):
             if debug_circle is not None:
                 scene.clear_debug_object(debug_circle)
 
@@ -122,17 +113,12 @@ def main():
 
             scene.step()
 
-            if step % frame_interval == 0:
-                cam.render()
-
     except KeyboardInterrupt:
         gs.logger.info("Simulation interrupted, exiting.")
     finally:
         gs.logger.info("Simulation finished.")
 
-        actual_fps = video_fps / frame_interval
-        video_filename = f"fem_hard_soft_{args.solver}_dt={dt}_substeps={substeps}.mp4"
-        cam.stop_recording(save_to_filename=video_filename, fps=actual_fps)
+        cam.stop_recording()
         gs.logger.info(f"Saved video to {video_filename}")
 
 

@@ -1,5 +1,6 @@
 import re
 import sys
+import threading
 import time
 from threading import Lock
 from unittest.mock import MagicMock, Mock
@@ -363,15 +364,16 @@ def test_key_press(renderer_type, tmp_path, monkeypatch, renderer, png_snapshot)
 @pytest.mark.required
 @pytest.mark.skipif(not IS_INTERACTIVE_VIEWER_AVAILABLE, reason=SKIP_NO_VIEWER)
 @pytest.mark.parametrize(
-    "n_envs, env_spacing, n_envs_per_row, target_env_idx, target_offset",
+    "n_envs, env_spacing, n_envs_per_row, target_env_idx, target_offset, use_visual_geom",
     [
-        (0, (0.0, 0.0), None, None, (0.0, 0.0, 0.0)),
+        (0, (0.0, 0.0), None, None, (0.0, 0.0, 0.0), False),
         # Two envs spaced along x so envs_offset is non-zero. Camera is positioned over env 1, so a viewport-center
         # click must pick env 1 (exercising kernel_cast_ray's per-env offset transform) and leave env 0 untouched.
-        (2, (0.5, 0.0), 1, 1, (0.25, 0.0, 0.0)),
+        (2, (0.5, 0.0), 1, 1, (0.25, 0.0, 0.0), False),
+        (2, (0.5, 0.0), 1, 1, (0.25, 0.0, 0.0), True),
     ],
 )
-def test_mouse_interaction_plugin(n_envs, env_spacing, n_envs_per_row, target_env_idx, target_offset):
+def test_mouse_interaction_plugin(n_envs, env_spacing, n_envs_per_row, target_env_idx, target_offset, use_visual_geom):
     DT = 0.01
     MASS = 100.0
     BOX_LENGTH = 0.2
@@ -379,6 +381,21 @@ def test_mouse_interaction_plugin(n_envs, env_spacing, n_envs_per_row, target_en
     DRAG_DY = 8
     SPRING_CONST = 1000.0
     CAM_FOV = 30
+    # Probe lanes parked along y, clear of the drag: envs are spaced along x only, so a lane is one env's alone.
+    DECOY_SIZE = 0.4
+    DECOY_Z = 0.5
+    TARGET_SIZE = 0.2
+    TARGET_Z = 1.5
+    STACK_LANE_Y = 1.5
+    KINEMATIC_LANE_Y = 2.0
+    OPTOUT_LANE_Y = 2.5
+    EDGE_LANE_Y = 4.0
+    # Kept within half the env spacing, so that the probes below reach this env's copy alone.
+    EDGE_RADIUS = 0.15
+    EDGE_PROBE_RANGE = 0.05
+    PROBE_Z = 3.0
+    CONCURRENT_PROBES = 200
+    RAY_T = 0.35
     target_offset = np.asarray(target_offset, dtype=gs.np_float)
     CAM_POS = (target_offset[0], 0.6, 1.2)
 
@@ -408,12 +425,64 @@ def test_mouse_interaction_plugin(n_envs, env_spacing, n_envs_per_row, target_en
         ),
         material=gs.materials.Rigid(
             rho=MASS / (BOX_LENGTH**3),
+            use_visual_raycasting=True,
+        ),
+    )
+    # One lane stacks a collision-only box under a visual-only one, so the two cast modes land on different entities.
+    decoy = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(0.0, STACK_LANE_Y, DECOY_Z),
+            size=(DECOY_SIZE,) * 3,
+            fixed=True,
+            visualization=False,
+        ),
+    )
+    target = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(0.0, STACK_LANE_Y, TARGET_Z),
+            size=(TARGET_SIZE,) * 3,
+            fixed=True,
+            collision=False,
+        ),
+        material=gs.materials.Rigid(
+            use_visual_raycasting=True,
+        ),
+    )
+    # A kinematic entity carries visual meshes only, in a separate solver from the rigid entities above.
+    kinematic = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(0.0, KINEMATIC_LANE_Y, BOX_LENGTH / 2),
+            size=(BOX_LENGTH,) * 3,
+        ),
+        material=gs.materials.Kinematic(
+            use_visual_raycasting=True,
+        ),
+    )
+    # Without the opt-in material, an entity stays unpickable.
+    scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(0.0, OPTOUT_LANE_Y, TARGET_Z),
+            size=(TARGET_SIZE,) * 3,
+            fixed=True,
+            collision=False,
+        ),
+    )
+    # Rotated so that none of its triangle edges lines up with a coordinate plane, which is what puts a probe aimed at
+    # an edge within rounding of it. Parked far enough along y for the probes to reach it without crossing anything,
+    # and high enough that the ones coming from below still start above the ground.
+    edge_target = scene.add_entity(
+        morph=gs.morphs.Sphere(
+            pos=(0.0, EDGE_LANE_Y, EDGE_RADIUS + 2.0 * EDGE_PROBE_RANGE),
+            quat=(0.5, 0.5, 0.5, 0.5),
+            radius=EDGE_RADIUS,
+            fixed=True,
         ),
     )
     scene.viewer.add_plugin(
         gs.vis.viewer_plugins.MouseInteractionPlugin(
             use_force=True,
             spring_const=SPRING_CONST,
+            use_visual_geom=use_visual_geom,
         )
     )
     scene.build(
@@ -462,6 +531,7 @@ def test_mouse_interaction_plugin(n_envs, env_spacing, n_envs_per_row, target_en
 
     viewport_size = pyrender_viewer._viewport_size
     x, y = viewport_size[0] // 2, viewport_size[1] // 2
+    plugin = next(p for p in scene.viewer.plugins if isinstance(p, gs.vis.viewer_plugins.MouseInteractionPlugin))
 
     # Press mouse to grab the box
     pyrender_viewer.dispatch_event("on_mouse_press", x, y, MouseButton.LEFT, 0)
@@ -470,7 +540,6 @@ def test_mouse_interaction_plugin(n_envs, env_spacing, n_envs_per_row, target_en
 
     # Confirm the raycaster picked the expected env
     if target_env_idx is not None:
-        plugin = next(p for p in scene.viewer.plugins if isinstance(p, gs.vis.viewer_plugins.MouseInteractionPlugin))
         assert plugin._interact_env_idx == target_env_idx, (
             f"Expected mouse to pick env {target_env_idx}, got env {plugin._interact_env_idx}"
         )
@@ -545,6 +614,86 @@ def test_mouse_interaction_plugin(n_envs, env_spacing, n_envs_per_row, target_en
         rtol=0.5,
         err_msg="Final z velocity does not match expected value based on spring dynamics.",
     )
+
+    probe_dir = (0.0, 0.0, -1.0)
+    stack_probe = (target_offset[0], STACK_LANE_Y, PROBE_Z)
+    stack_entity = target if use_visual_geom else decoy
+    stack_distance = PROBE_Z - ((TARGET_Z + 0.5 * TARGET_SIZE) if use_visual_geom else (DECOY_Z + 0.5 * DECOY_SIZE))
+    stack_position = (*stack_probe[:2], PROBE_Z - stack_distance)
+    stack_hit = plugin._raycaster.cast(stack_probe, probe_dir)
+    assert stack_hit.geom.entity is stack_entity
+    assert_allclose(stack_hit.distance, stack_distance, tol=1e-6)
+    assert_allclose(stack_hit.position, stack_position, tol=1e-6)
+
+    # A hit stays the answer to its own ray once a later cast has run, both reading the same buffers.
+    plugin._raycaster.cast((target_offset[0], OPTOUT_LANE_Y, PROBE_Z), probe_dir)
+    assert_allclose(stack_hit.position, stack_position, tol=1e-6)
+    assert stack_hit.env_idx == target_env_idx
+
+    # The plugin casts a hover ray of its own on every frame the viewer draws, which overlaps a cast issued from here
+    # wherever the viewer runs in a thread. Casting the opt-out lane alongside reproduces that overlap on every
+    # platform: it answers with another entity in one cast mode and with nothing in the other, both of which the probes
+    # below report should two casts share the hit they read back.
+    is_hovering = True
+
+    def hover():
+        while is_hovering:
+            plugin._raycaster.cast((target_offset[0], OPTOUT_LANE_Y, PROBE_Z), probe_dir)
+
+    hover_thread = threading.Thread(target=hover)
+    hover_thread.start()
+    try:
+        for _ in range(CONCURRENT_PROBES):
+            stack_hit = plugin._raycaster.cast(stack_probe, probe_dir)
+            assert stack_hit.geom.entity is stack_entity
+            assert_allclose(stack_hit.distance, stack_distance, tol=1e-6)
+        # A hover cast raising would leave the probes above running alone, hence unable to catch anything.
+        assert hover_thread.is_alive()
+    finally:
+        is_hovering = False
+        hover_thread.join()
+
+    if not use_visual_geom:
+        # A ray crossing the surface exactly on an edge shared by two triangles must be reported as a hit: the two
+        # inside tests disagree there, so rounding can place the ray outside both triangles at once and let it through
+        # the surface. Every edge of a closed mesh is shared, and aiming radially at each midpoint of a convex one
+        # meets that edge first.
+        edge_geom = edge_target.geoms[0]
+        edge_verts = tensor_to_array(edge_geom.get_verts())
+        if target_env_idx is not None:
+            edge_verts = edge_verts[target_env_idx] + target_offset
+        edge_center = edge_verts.mean(axis=0)
+        for face in edge_geom.init_faces:
+            for i_v0, i_v1 in ((face[0], face[1]), (face[1], face[2]), (face[2], face[0])):
+                midpoint = 0.5 * (edge_verts[i_v0] + edge_verts[i_v1])
+                outward = midpoint - edge_center
+                outward /= np.linalg.norm(outward)
+                edge_hit = plugin._raycaster.cast(midpoint + EDGE_PROBE_RANGE * outward, -outward)
+                assert edge_hit is not None and edge_hit.geom.entity is edge_target
+                assert_allclose(edge_hit.distance, EDGE_PROBE_RANGE, tol=5e-6)
+        return
+
+    kinematic_hit = plugin._raycaster.cast((target_offset[0], KINEMATIC_LANE_Y, PROBE_Z), probe_dir)
+    assert kinematic_hit.geom.entity is kinematic
+    assert_allclose(kinematic_hit.distance, PROBE_Z - BOX_LENGTH, tol=1e-6)
+    assert plugin._raycaster.cast((target_offset[0], OPTOUT_LANE_Y, PROBE_Z), probe_dir) is None
+
+    # A kinematic entity carries no mass or inertia, so dragging it is forbidden. RAY_T places it that fraction of the
+    # way from the camera to what it looks at, which puts it on the centre ray ahead of anything the box can reach.
+    parked_pos = (0.0, CAM_POS[1] * (1.0 - RAY_T), CAM_POS[2] - RAY_T * (CAM_POS[2] - BOX_LENGTH))
+    kinematic.set_pos(parked_pos)
+    scene.step()
+    x, y = viewport_size[0] // 2, viewport_size[1] // 2
+    pyrender_viewer.dispatch_event("on_mouse_motion", x, y, 0, 0)
+    pyrender_viewer.dispatch_event("on_mouse_press", x, y, MouseButton.LEFT, 0)
+    wait_for_viewer_events(pyrender_viewer, check_event_count())
+    pyrender_viewer.dispatch_event("on_mouse_drag", x, y + DRAG_DY, 0, DRAG_DY, MouseButton.LEFT, 0)
+    wait_for_viewer_events(pyrender_viewer, check_event_count())
+    scene.step()
+
+    assert pyrender_viewer.is_active
+    assert plugin._held_link is None
+    assert_allclose(kinematic.get_pos(), parked_pos, tol=gs.EPS)
 
 
 @pytest.mark.skipif(not IS_INTERACTIVE_VIEWER_AVAILABLE, reason=SKIP_NO_VIEWER)

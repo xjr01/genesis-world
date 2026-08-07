@@ -11,16 +11,24 @@ from ..utils import assert_allclose, assert_equal
 
 
 @pytest.mark.required
-@pytest.mark.parametrize("n_envs", [0, 2])
-def test_hits(show_viewer, n_envs):
+# A raycast consumer refreshes the solver's forward kinematics before casting; under MuJoCo compatibility the
+# solver relies on redoing that itself, geoms included, so the arm below pins that a raycaster leaves the physics
+# alone - obstacle_1 falls onto the ground plane and the grid rays must still find its top face where it rests.
+@pytest.mark.parametrize("n_envs, enable_mujoco_compatibility", [(0, False), (2, True)])
+def test_hits(show_viewer, n_envs, enable_mujoco_compatibility):
     NUM_RAYS_XY = (3, 5)
     SPHERE_POS = (2.5, 0.5, 1.0)
     BOX_SIZE = 0.05
     RAYCAST_BOX_SIZE = 0.1
     RAYCAST_GRID_SIZE_X = 1.0
     RAYCAST_HEIGHT = 1.0
+    GRAZE_FACE_Z = 1.0
+    GRAZE_RANGE = 1.0
 
     scene = gs.Scene(
+        rigid_options=gs.options.RigidOptions(
+            enable_mujoco_compatibility=enable_mujoco_compatibility,
+        ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(-3.0, RAYCAST_GRID_SIZE_X * (NUM_RAYS_XY[1] / NUM_RAYS_XY[0]), 2 * RAYCAST_HEIGHT),
             camera_lookat=(1.5, RAYCAST_GRID_SIZE_X * (NUM_RAYS_XY[1] / NUM_RAYS_XY[0]), RAYCAST_HEIGHT),
@@ -102,10 +110,44 @@ def test_hits(show_viewer, n_envs):
         ),
     )
 
+    # A ray grazing a face from just below must still find it. The face sits on a power of two, so a mount one float
+    # under it starts within half an eps, and the ray rises through the face only ten hit-distances later.
+    scene.add_entity(
+        gs.morphs.Box(
+            size=(BOX_SIZE, BOX_SIZE, GRAZE_FACE_Z),
+            pos=(0.0, -RAYCAST_GRID_SIZE_X, 0.5 * GRAZE_FACE_Z),
+            fixed=True,
+        ),
+    )
+    graze_origin_z = np.nextafter(gs.np_float(GRAZE_FACE_Z), gs.np_float(0.0))
+    graze_sensor = scene.add_entity(
+        gs.morphs.Box(
+            size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
+            pos=(-(GRAZE_RANGE + 0.5 * BOX_SIZE), -RAYCAST_GRID_SIZE_X, graze_origin_z),
+            collision=False,
+            fixed=True,
+        ),
+    )
+    graze_raycaster = scene.add_sensor(
+        gs.sensors.Raycaster(
+            pattern=gs.sensors.raycaster.GridPattern(
+                resolution=1.0,
+                size=(0.0, 0.0),
+                direction=(1.0, 0.0, 0.1 * (GRAZE_FACE_Z - graze_origin_z) / GRAZE_RANGE),
+            ),
+            entity_idx=graze_sensor.idx,
+            max_range=2.0 * GRAZE_RANGE,
+            no_hit_value=-1.0,
+        )
+    )
+
     obstacle_1 = scene.add_entity(
         gs.morphs.Box(
             size=(BOX_SIZE, BOX_SIZE, BOX_SIZE),
             pos=(grid_res, grid_res, 0.5 * BOX_SIZE),
+        ),
+        material=gs.materials.Rigid(
+            use_visual_raycasting=True,
         ),
     )
     obstacle_2 = scene.add_entity(
@@ -157,6 +199,8 @@ def test_hits(show_viewer, n_envs):
         grid_distances_ref = torch.full((*batch_shape, *NUM_RAYS_XY), RAYCAST_HEIGHT)
         grid_distances_ref[(..., *hit_ij)] = RAYCAST_HEIGHT - obstacle_pos[..., 2] - 0.5 * BOX_SIZE
         assert_allclose(grid_distances, grid_distances_ref, tol=gs.EPS)
+
+    assert_allclose(graze_raycaster.read().distances, GRAZE_RANGE, tol=gs.EPS)
 
     # Validate spherical raycast
     spherical_distances = spherical_raycaster.read().distances
@@ -615,6 +659,23 @@ def test_heterogeneous_object(show_viewer, tol):
             gs.morphs.Sphere(radius=0.2, pos=(1.0, 0.0, 0.5), fixed=True),
             gs.morphs.Box(size=(0.6, 0.6, 0.6), pos=(1.0, 0.0, 0.5), fixed=True),
         ),
+        material=gs.materials.Rigid(
+            use_visual_raycasting=True,
+        ),
+    )
+    # Every link of the kinematic solver is fixed, so its visual BVH is static and groups envs by geometry. A box
+    # primitive puts its vgeom at the link origin, so these same-pos variants hold identical vgeom poses and differ
+    # only in rest-pose vverts, which are shared across envs: the active vgeom range is the sole discriminator the
+    # grouping signature can read.
+    scene.add_entity(
+        morph=(
+            gs.morphs.Box(size=(0.2, 0.2, 0.2), pos=(4.0, 0.0, 0.5), fixed=True),
+            gs.morphs.Box(size=(0.4, 0.4, 0.4), pos=(4.0, 0.0, 0.5), fixed=True),
+            gs.morphs.Box(size=(0.6, 0.6, 0.6), pos=(4.0, 0.0, 0.5), fixed=True),
+        ),
+        material=gs.materials.Kinematic(
+            use_visual_raycasting=True,
+        ),
     )
     # A movable entity parked off the ray's path: it makes the solver mixed, so the heterogeneous variants are served
     # through the static subset of the split collision BVH.
@@ -665,6 +726,12 @@ def test_heterogeneous_object(show_viewer, tol):
     movable_box.set_pos((3.0, 2.0, 0.5))
     scene.step()
     assert_allclose(lidar.read().distances[:, 0, 0], (0.9, 0.9, 0.8, 0.8, 0.7, 0.7), tol=5e-3)
+
+    # Sending the rigid variants out of range leaves the kinematic ones as the nearest hit, cast through one grouped
+    # static tree per distinct variant, so each env still reads its own.
+    het_obstacle.set_pos((10.0, 0.0, 0.5))
+    scene.step()
+    assert_allclose(lidar.read().distances[:, 0, 0], (3.9, 3.9, 3.8, 3.8, 3.7, 3.7), tol=5e-3)
 
 
 @pytest.mark.required

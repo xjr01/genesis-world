@@ -85,6 +85,8 @@ Read and retain the repository-specific context in `.agents/memory.md` when work
 - **Function-level description goes in a docstring, never a block of leading `#` comments** at the top of the body. Reserve inline comments for non-obvious implementation details at their point of use (e.g. a constraint-layout invariant a few lines rely on). A getter/method that opens with a paragraph of `#` prose is wrong; that prose is its docstring.
 - **Comments go on their own line above the code they annotate, never trailing inline, whenever possible.**
 - **No local imports** unless strictly necessary (e.g., circular dependency avoidance). All imports at module top level.
+- **Imports are grouped, blank-line separated, alphabetical within each group, in this order:** standard library; ubiquitous third-party (`numpy`, `torch`, `tqdm`, ...); other third-party; our own libraries (`quadrants`, ...); `genesis` itself, absolute then relative. Nothing enforces this, so it is done by hand.
+- **Touching one import means fixing the whole module's imports**: any addition, removal or replacement obliges regrouping and re-sorting every import in that file, and deleting the ones no longer used. Otherwise a hand-maintained order decays one edit at a time.
 - No import aliasing (`Cloth` not `ClothMaterial`).
 - No temporary variables for `isinstance` checks. Use `isinstance(...)` directly in `if` statements.
 - **Pass an anonymous literal by keyword** so its meaning shows at the call site (`_adaptive_params(verts, faces, aggressiveness=7)`, not a bare `7`). Positional is fine for self-named variables. This holds in rigid kernel and func calls too: anonymous constants (and everything after them) go by keyword; only self-named arguments are positional. Exception: numeric constants in module-local qd.func calls stay positional, keeping those internal call chains compact.
@@ -105,16 +107,22 @@ Read and retain the repository-specific context in `.agents/memory.md` when work
 
 - **Never filter or truncate test output inline** (no `pytest ... | tail` / `| grep`). Redirect the full output to a log file, then extract from the file: a filter between pytest and disk destroys the only copy of the failure names and masks the exit code.
 - **Never remove or weaken an existing assertion or measurement to silence a failure** (local or CI). Report the failure with the data and ask; a threshold that only holds on one machine is a calibration problem.
-- **Bug fix PRs** must include a regression test that fails on `main` and passes with the fix.
+- **Bug fix PRs** must include a regression test that fails on `main` and passes with the fix, added to the test already covering the capability that broke.
 - **No deprecation tests.** Do not add unit tests that verify deprecation warnings are emitted.
 - Feature tests exercise the new behavior, not the internal warning machinery.
 - **Unit tests must NOT have docstrings.** A good test name spares writing the short docstring. A code comment is acceptable only when strongly motivated, i.e. it explains something the test body cannot convey. Never state regressions or history.
 - **Tests are organized per component, then per capability.** Each component has a folder under `tests/` (`rigid/`, `deformable/`, `particles/`, `ipc/`, `coupling/`, `sensors/`, `rendering/`, `parsers/`, `core/`, `integration/`, `benchmarks/`) holding one file per capability (e.g. `tests/rigid/test_collision.py`, `tests/sensors/test_imu.py`). Add new tests to the existing capability file; a new file is only warranted for a genuinely new capability, never a fresh `test_<one_thing>.py` for a single feature. Complements "Pack tests" below.
+- **Strengthen an existing test rather than write a new one.** A test validates one capability of the public API, never a code block or an internal logic path. New coverage for a capability goes into the test already covering it, by extending its scene and its assertions or by adding a `@pytest.mark.parametrize` dimension; never a sibling function.
+- **Pack tests: one scene build per test.** Avoiding an extra build is mandatory, even at the cost of a test that is harder to write and to read. In order of preference: one comprehensive scene with diverse entities and options over many small single-option tests; differently-configured entities in the same scene; setups that must not interact placed far enough apart within that one scene; configurations swept through `n_envs`; a reference simulation folded in beside what it is compared against.
 - **Name tests after the feature they validate, never after the scene being simulated.** A test exercising off-axis contact rejection through a stacking-tower scene is `test_reject_offaxis_contact_on_authored_decomp`, not `test_stacking_tower_stability`: the scene is how, the feature is what. Names never repeat their module or folder name as a prefix (`tests/sensors/test_temperature.py::test_grid_sensor_contact_and_reset`, never `test_temperature_grid_...`).
-- **Pack tests.** Prefer one comprehensive scene with diverse entities and options over many small single-option tests. Add entities with different configurations to the same scene instead of creating separate test functions.
 - **Assert physics, not just execution.** "Simulation runs without error" is not a test. Check quantities with physical meaning: free-fall displacement (`z = z0 - 0.5*g*t^2`), no ground penetration (`min_z > -d_hat`), velocity → 0 at rest, contact stops fall.
 - **Non-regression fallback.** If no analytical expectation is available, run the simulation once to get reference values, hardcode them, and assert with a loose tolerance. Add a `FIXME` comment asking to replace with physics-informed assertions later.
 - **Use `assert_allclose` / `assert_equal` from `tests/utils.py`.** Prefer `assert_equal` for exact comparisons over framework-specific forms (`torch.equal`, `np.array_equal`).
+- **`tol=` sets both `atol` and `rtol`.** Pass `atol=` for quantities whose scale is fixed and far from 1 (pixel channels in `0..255`); reserve `tol=` for quantities of order 1.
+- **Break the implementation on purpose and watch the assertion fail** before committing a test written to catch a specific defect.
+- **Assert observables, never internals.** Validate rendered arrays (image, segmentation map, frame differences), poses, velocities, forces; never private fields, draw orders, call counts or rebuild counts. Derive the expected value analytically and design the scene so a broken mechanism moves it: two overlapping same-size semi-transparent surfaces along the view axis compose as `near + (1 - alpha) * (far - background)`.
+- **When a swept comparison has cases that legitimately differ, group them by the property responsible; never list their positions in the sweep** (`msaa_mask = [0, 1, 2, 4, 5, 6]`). Bound how far the groups may differ instead of skipping the comparison between them.
+- **A scene that needs contacts needs a movable body.** Both-fixed geom pairs are dropped at build time, so sinking a fixed entity below a surface yields no contact and permanently buries its geometry in the render.
 - **Every assertion is a specification.** Assert only behavior we genuinely want to commit to, and drop any assert already implied by a stricter one nearby.
 - **FEM entity positions:** `entity.get_state().pos` has shape `[B, n_verts, 3]`. Use `[..., 2]` to select z across all envs and vertices.
 - **Rigid entity positions:** `entity.get_pos()` returns `[B, 3]` or `[3]`. Use `np.atleast_1d(...)[..., 2]` and `.all()` for multi-env checks.
@@ -138,6 +146,28 @@ Read and retain the repository-specific context in `.agents/memory.md` when work
 - **Hide recurring boilerplate in fixtures; never add indirection without a payoff.** The test body must show only what is being validated; recurring model construction and asset resolution go into fixtures (kills duplication, eases parametrization). Scene setup stays in the test body - a unit test reads like an example script - even at the cost of duplication. A fixture that improves neither readability nor factorization is strictly harmful: indirection is harmful by default and must be justified by real benefits - otherwise stay explicit and self-contained. No premature factorization.
 - **Do not gate per-step asserts** with `float(...)` / `.item()` casts on tensor reductions. Design the scenario (e.g. a warmup loop that spins joints up) so the assertion holds unconditionally, then assert on the full tensor with `.all()`.
 - **Exact analytical dynamics checks:** force `gs.integrator.Euler` so the finite-differenced `qacc` equals the solver's, and account for both rigid-body rotational inertia and the implicit-damping first-order correction (`effective_inertia = I + damping*dt`, as in `test_position_control`) rather than loosening tolerances or distorting geometry.
+
+## Running Tests From a Git Worktree
+
+The package is installed in editable mode pointing at the PRIMARY checkout, so a worktree's `genesis/` is NOT what
+gets imported by default. This silently tests the wrong engine: the worktree's `tests/` run against the primary
+checkout's `genesis/`, so engine edits appear to have no effect and every result is void.
+
+- **Always pass `PYTHONPATH=$PWD` when invoking pytest from a worktree**, e.g.
+  `cd <worktree> && PYTHONPATH=$PWD pytest -n 8 tests/rigid`. Same for the cluster: `PYTHONPATH=$WORKTREE pytest ...`.
+- **Verify it once per session, do not assume.** `PYTHONPATH=$PWD pytest -n 0 -s -k <any test>` with a
+  `print(genesis.__file__)`, or simply check that the path printed starts with the worktree.
+- Plain `python script.py` from a worktree DOES pick up the worktree (cwd precedes the editable path), so a script and
+  a pytest run in the same directory can exercise DIFFERENT engines. Never compare their results.
+- Symptoms that mean this is happening: an engine edit changes nothing; a kernel `print()` added to the worktree emits
+  nothing; an A/B over engine variants returns bit-identical numbers for every arm. Treat all three as this trap
+  first, before any physics explanation.
+- **Give the worktree its own compile cache when running in parallel**, e.g.
+  `QD_OFFLINE_CACHE_FILE_PATH=<scratch>/quadrants GS_CACHE_FILE_PATH=<scratch>/genesis`. A worktree engine differs
+  from whatever populated the shared `~/.cache`, so every kernel is new and the xdist workers race to write the same
+  cache, which corrupts entries: hundreds of `QuadrantsNameError` on names that are plainly in scope, spread over
+  tests that pass one at a time, and getting WORSE on a second run as the bad entries persist. Redirect the cache
+  rather than deleting the shared one.
 
 ## Testing on Cluster
 
