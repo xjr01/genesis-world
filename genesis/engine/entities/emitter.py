@@ -86,6 +86,7 @@ class Emitter(RBC):
         theta=0.0,
         speed=1.0,
         p_size=None,
+        generation_speed=None,
     ):
         """
         Emit particles in a specified shape and direction from a nozzle.
@@ -97,7 +98,8 @@ class Emitter(RBC):
         droplet_size : float or tuple
             Size of the droplet. A single float for symmetric shapes, or a tuple of (width, height) for rectangles.
         droplet_length : float, optional
-            Length of the droplet in the emitting direction. If None, calculated from speed and simulation timing.
+            Length of the droplet in the emitting direction. If None, calculated from ``generation_speed`` and
+            simulation timing.
         pos : tuple of float
             World position of the nozzle from which the droplet is emitted.
         direction : tuple of float
@@ -105,9 +107,13 @@ class Emitter(RBC):
         theta : float
             Rotation angle (in radians) around the droplet axis.
         speed : float
-            Emission speed of the particles.
+            Initial speed assigned to emitted particles.
         p_size : float, optional
             Particle size used for filling the droplet. Defaults to the solver's particle size.
+        generation_speed : float, optional
+            Axial speed used to determine the generated length when ``droplet_length`` is unspecified. It defaults to
+            ``speed``. Values above ``speed`` inject particles faster than they leave the source and can increase local
+            density.
 
         Raises
         ------
@@ -132,8 +138,9 @@ class Emitter(RBC):
         p_size = self._entity.particle_size if p_size is None else p_size
 
         if droplet_length is None:
-            # Use the speed to determine the length of the droplet in the emitting direction
-            droplet_length = speed * self._solver.substep_dt * self._sim.substeps + self._acc_droplet_len
+            if generation_speed is None:
+                generation_speed = speed
+            droplet_length = generation_speed * self._solver.substep_dt * self._sim.substeps + self._acc_droplet_len
             if droplet_length < p_size:  # too short, so we should not emit
                 self._acc_droplet_len = droplet_length
                 droplet_length = 0.0

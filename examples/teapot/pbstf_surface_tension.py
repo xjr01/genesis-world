@@ -59,12 +59,9 @@ class TapEmitterSettings(NamedTuple):
     pos: tuple[float, float, float]
     direction: tuple[float, float, float]
     droplet_size: float
-    speed: float
-    acceleration_start: float
-    acceleration: float
+    generation_speed: float
+    initial_speed: float
     max_particles: int
-    nozzle_lower: tuple[float, float, float]
-    nozzle_upper: tuple[float, float, float]
 
 
 class CaseSettings(NamedTuple):
@@ -219,12 +216,9 @@ def _case_settings(case):
                 pos=(0.0, 5.0, 0.0),
                 direction=(0.0, -1.0, 0.0),
                 droplet_size=2.0,
-                speed=5.0,
-                acceleration_start=6.0,
-                acceleration=0.7,
+                generation_speed=3.0,
+                initial_speed=0.0,
                 max_particles=200000,
-                nozzle_lower=(-2.0, 5.0, -2.0),
-                nozzle_upper=(2.0, 9.0, 2.0),
             ),
         )
     if case == CASE_TEAPOT:
@@ -596,18 +590,7 @@ def _add_case_entities(scene, case, particle_size, settings):
     raise ValueError(f"Unknown PBSTF example case: {case}")
 
 
-def _draw_case_geometry(scene, case, settings):
-    if case == CASE_TAP:
-        emitter_settings = settings.emitter
-        if emitter_settings is None:
-            gs.raise_exception("The tap case requires emitter settings.")
-        scene.draw_debug_box(
-            bounds=(emitter_settings.nozzle_lower, emitter_settings.nozzle_upper),
-            color=(0.35, 0.38, 0.42, 1.0),
-            wireframe=False,
-        )
-        return
-
+def _draw_case_colliders(scene, case):
     if case != CASE_CONE:
         return
 
@@ -706,7 +689,7 @@ def build_scene(case=CASE_CUBE, scale=None, show_viewer=False, dt=None):
         hand.set_qpos(manipulator.hand_qpos)
         _update_teapot_manipulator(kuka, _teapot_pose(0.0, settings.teapot), settings.teapot, manipulator.kuka_qpos)
     if show_viewer:
-        _draw_case_geometry(scene, case, settings)
+        _draw_case_colliders(scene, case)
 
     return scene, tuple(entity for entity, _ in entities_and_velocities)
 
@@ -755,16 +738,14 @@ def main():
     try:
         for step_idx in range(steps):
             if emitter is not None:
-                speed = emitter_settings.speed
-                if scene.cur_t >= emitter_settings.acceleration_start:
-                    speed += emitter_settings.acceleration * (scene.cur_t - emitter_settings.acceleration_start)
                 emitter.emit(
                     droplet_shape="circle",
                     droplet_size=emitter_settings.droplet_size,
                     droplet_length=emitter.entity.particle_size if step_idx == 0 else None,
                     pos=emitter_settings.pos,
                     direction=emitter_settings.direction,
-                    speed=speed,
+                    speed=emitter_settings.initial_speed,
+                    generation_speed=emitter_settings.generation_speed,
                 )
             if teapot is not None:
                 pose = _teapot_pose(scene.cur_t, teapot_settings)

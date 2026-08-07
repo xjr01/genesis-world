@@ -333,11 +333,8 @@ def test_tap_case_settings():
     assert_equal(settings.emitter.pos, (0.0, 5.0, 0.0))
     assert_equal(settings.emitter.direction, (0.0, -1.0, 0.0))
     assert_equal(settings.emitter.droplet_size, 2.0)
-    assert_equal(settings.emitter.speed, 5.0)
-    assert_equal(settings.emitter.acceleration_start, 6.0)
-    assert_equal(settings.emitter.acceleration, 0.7)
-    assert_equal(settings.emitter.nozzle_lower, (-2.0, 5.0, -2.0))
-    assert_equal(settings.emitter.nozzle_upper, (2.0, 9.0, 2.0))
+    assert_equal(settings.emitter.generation_speed, 2.0)
+    assert_equal(settings.emitter.initial_speed, 1.0)
 
 
 @pytest.mark.required
@@ -493,26 +490,26 @@ def test_emitter_build_emit_and_wrap(n_envs, show_viewer):
     emitter.emit(
         droplet_shape="circle",
         droplet_size=0.6,
-        droplet_length=0.2,
         pos=(0.0, 0.5, 0.0),
         direction=(0.0, -1.0, 0.0),
-        speed=1.0,
+        speed=0.5,
+        generation_speed=200.0,
     )
     assert emitter.next_particle == 9
     emitter.emit(
         droplet_shape="circle",
         droplet_size=0.8,
-        droplet_length=0.2,
         pos=(0.0, 0.5, 0.0),
         direction=(0.0, -1.0, 0.0),
-        speed=1.0,
+        speed=0.5,
+        generation_speed=200.0,
     )
 
     active = tensor_to_array(emitter.entity.get_particles_active())
     velocities = tensor_to_array(emitter.entity.get_particles_vel())
     assert emitter.next_particle == 12
     assert (active.sum(axis=-1) == 12).all()
-    assert_allclose(velocities[active], (0.0, -1.0, 0.0), atol=1e-6)
+    assert_allclose(velocities[active], (0.0, -0.5, 0.0), atol=1e-6)
     expected_mass = emitter.entity.material.rho * emitter.entity.particle_size**3 / math.sqrt(2.0)
     assert_allclose(tensor_to_array(emitter.entity.get_mass()) / active.sum(axis=-1), expected_mass, rtol=1e-3)
 
