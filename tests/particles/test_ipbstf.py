@@ -58,25 +58,25 @@ def test_dam_break_spreads_under_gravity(n_envs, show_viewer):
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
             dt=0.005,
-            gravity=(0.0, 0.0, -9.81),
+            gravity=(0.0, -9.81, 0.0),
         ),
         ipbstf_options=gs.options.IPBSTFOptions(
             particle_size=0.1,
             max_solver_iterations=5,
-            lower_bound=(-1.0, -0.5, 0.0),
-            upper_bound=(2.0, 0.5, 2.0),
+            lower_bound=(-1.0, 0.0, -0.5),
+            upper_bound=(2.0, 2.0, 0.5),
         ),
         viewer_options=gs.options.ViewerOptions(
-            camera_pos=(3.2, -4.0, 2.2),
-            camera_lookat=(0.4, 0.0, 0.6),
-            camera_up=(0.0, 0.0, 1.0),
+            camera_pos=(3.2, 2.2, 4.0),
+            camera_lookat=(0.4, 0.6, 0.0),
+            camera_up=(0.0, 1.0, 0.0),
         ),
         show_viewer=show_viewer,
     )
     liquid = scene.add_entity(
         morph=gs.morphs.Box(
-            lower=(-0.8, -0.35, 0.1),
-            upper=(-0.1, 0.35, 1.2),
+            lower=(-0.8, 0.1, -0.35),
+            upper=(-0.1, 1.2, 0.35),
         ),
         material=gs.materials.IPBSTF.Liquid(
             sampler="staggered",
@@ -90,6 +90,6 @@ def test_dam_break_spreads_under_gravity(n_envs, show_viewer):
     pos = tensor_to_array(liquid.get_state().pos)
 
     assert np.isfinite(pos).all()
-    assert (pos[..., 2] >= 0.0).all()
-    assert (pos[..., 2].mean(axis=1) < pos_initial[..., 2].mean(axis=1) - 0.3).all()
+    assert (pos[..., 1] >= 0.0).all()
+    assert (pos[..., 1].mean(axis=1) < pos_initial[..., 1].mean(axis=1) - 0.3).all()
     assert (np.ptp(pos[..., 0], axis=1) > 1.5 * np.ptp(pos_initial[..., 0], axis=1)).all()

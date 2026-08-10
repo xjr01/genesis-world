@@ -68,7 +68,7 @@ def build_scene(
         scene = gs.Scene(
             sim_options=gs.options.SimOptions(
                 dt=dt,
-                gravity=(0.0, 0.0, -9.81),
+                gravity=(0.0, -9.81, 0.0),
             ),
             ipbstf_options=gs.options.IPBSTFOptions(
                 alpha=alpha,
@@ -79,9 +79,9 @@ def build_scene(
             ),
             viewer_options=gs.options.ViewerOptions(
                 refresh_rate=round(1.0 / dt),
-                camera_pos=(3.2, -4.0, 2.2),
-                camera_lookat=(0.4, 0.0, 0.6),
-                camera_up=(0.0, 0.0, 1.0),
+                camera_pos=(3.2, 2.2, 4.0),
+                camera_lookat=(0.4, 0.6, 0.0),
+                camera_up=(0.0, 1.0, 0.0),
                 camera_fov=40,
             ),
             show_viewer=show_viewer,
@@ -235,6 +235,7 @@ def main():
                     kuka_qpos,
                 )
             scene.step()
+            while True: pass
     finally:
         stop_viewer(scene, is_viewer_shown)
 
