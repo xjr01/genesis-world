@@ -1,0 +1,95 @@
+import numpy as np
+import pytest
+
+import genesis as gs
+from genesis.utils.misc import tensor_to_array
+from tests.utils import assert_allclose
+
+
+@pytest.mark.required
+@pytest.mark.parametrize("backend", [gs.cuda])
+@pytest.mark.parametrize("n_envs", [0, 2])
+def test_unilateral_density_energy(n_envs, show_viewer):
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=0.01,
+            gravity=(0.0, 0.0, 0.0),
+        ),
+        ipbstf_options=gs.options.IPBSTFOptions(
+            particle_size=0.1,
+            lower_bound=(-2.0, -2.0, -2.0),
+            upper_bound=(2.0, 2.0, 2.0),
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(2.2, 2.2, 1.8),
+            camera_lookat=(0.0, 0.0, 0.0),
+        ),
+        show_viewer=show_viewer,
+    )
+    liquid = scene.add_entity(
+        morph=gs.morphs.Box(
+            lower=(-0.25, -0.25, -0.25),
+            upper=(0.25, 0.25, 0.25),
+        ),
+        material=gs.materials.IPBSTF.Liquid(
+            sampler="staggered",
+        ),
+    )
+    scene.build(n_envs=n_envs)
+
+    pos_initial = tensor_to_array(liquid.get_state().pos)
+    scene.step()
+    assert_allclose(tensor_to_array(liquid.get_state().pos), pos_initial, atol=1e-6)
+
+    center = pos_initial.mean(axis=1, keepdims=True)
+    pos_compressed = center + 0.65 * (pos_initial - center)
+    liquid.set_particles_pos(pos_compressed)
+    scene.step()
+    pos_expanded = tensor_to_array(liquid.get_state().pos)
+
+    assert_allclose(pos_expanded.mean(axis=1), center[..., 0, :], atol=1e-5)
+    assert (np.ptp(pos_expanded, axis=1) > 1.1 * np.ptp(pos_compressed, axis=1)).all()
+
+
+@pytest.mark.required
+@pytest.mark.parametrize("backend", [gs.cuda])
+@pytest.mark.parametrize("n_envs", [0, 2])
+def test_dam_break_spreads_under_gravity(n_envs, show_viewer):
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=0.005,
+            gravity=(0.0, 0.0, -9.81),
+        ),
+        ipbstf_options=gs.options.IPBSTFOptions(
+            particle_size=0.1,
+            max_solver_iterations=5,
+            lower_bound=(-1.0, -0.5, 0.0),
+            upper_bound=(2.0, 0.5, 2.0),
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(3.2, -4.0, 2.2),
+            camera_lookat=(0.4, 0.0, 0.6),
+            camera_up=(0.0, 0.0, 1.0),
+        ),
+        show_viewer=show_viewer,
+    )
+    liquid = scene.add_entity(
+        morph=gs.morphs.Box(
+            lower=(-0.8, -0.35, 0.1),
+            upper=(-0.1, 0.35, 1.2),
+        ),
+        material=gs.materials.IPBSTF.Liquid(
+            sampler="staggered",
+        ),
+    )
+    scene.build(n_envs=n_envs)
+
+    pos_initial = tensor_to_array(liquid.get_state().pos)
+    for _ in range(60):
+        scene.step()
+    pos = tensor_to_array(liquid.get_state().pos)
+
+    assert np.isfinite(pos).all()
+    assert (pos[..., 2] >= 0.0).all()
+    assert (pos[..., 2].mean(axis=1) < pos_initial[..., 2].mean(axis=1) - 0.3).all()
+    assert (np.ptp(pos[..., 0], axis=1) > 1.5 * np.ptp(pos_initial[..., 0], axis=1)).all()

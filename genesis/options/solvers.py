@@ -803,6 +803,56 @@ PBSTFStaticColliderOptionsType = Annotated[
 ]
 
 
+class IPBSTFOptions(Options):
+    """Options for the implicit position-based surface-tension fluid (IPBSTF) solver's density energy.
+
+    ``alpha`` weights inertia against the density energy. Larger values keep particles closer to their unconstrained
+    predictions and produce a softer density response; smaller values enforce incompressibility more strongly at the
+    cost of larger Newton updates. ``max_solver_iterations`` controls convergence work without changing that energy.
+    """
+
+    dt: PositiveFloat | None = None
+    gravity: Vec3FType | None = None
+
+    alpha: PositiveFloat = 1e-6
+    particle_size: PositiveFloat = 0.02
+    max_solver_iterations: PositiveInt = 10
+    static_colliders: list[PBSTFStaticColliderOptionsType] = Field(default_factory=list)
+
+    hash_grid_res: Vec3FType | None = None
+    hash_grid_cell_size: PositiveFloat | None = None
+
+    lower_bound: Vec3FType = (-100.0, -100.0, 0.0)
+    upper_bound: Vec3FType = (100.0, 100.0, 100.0)
+
+    _support_radius: float = PrivateAttr(default=0.0)
+    _hash_grid_res: np.ndarray = PrivateAttr(default=None)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _resolve_defaults(cls, data: dict) -> dict:
+        particle_size = data.get("particle_size", 0.02)
+        if data.get("hash_grid_cell_size") is None:
+            data["hash_grid_cell_size"] = 3.0 * particle_size
+        return data
+
+    def model_post_init(self, context: Any) -> None:
+        if not np.all(np.array(self.upper_bound) > np.array(self.lower_bound)):
+            gs.raise_exception("Invalid pair of upper_bound and lower_bound.")
+
+        self._support_radius = 3.0 * self.particle_size
+        if self.hash_grid_cell_size < self._support_radius:
+            gs.raise_exception("`hash_grid_cell_size` must not be smaller than the IPBSTF cubic-spline support radius.")
+
+        if self.hash_grid_res is None:
+            max_hash_grid_res = np.ceil(
+                (np.array(self.upper_bound) - np.array(self.lower_bound)) / self.hash_grid_cell_size
+            ).astype(gs.np_int)
+            self._hash_grid_res = np.minimum(max_hash_grid_res, np.array([150, 150, 150], dtype=gs.np_int))
+        else:
+            self._hash_grid_res = np.ceil(np.array(self.hash_grid_res) / self.hash_grid_cell_size).astype(gs.np_int)
+
+
 class PBSTFOptions(Options):
     """
     Options configuring the graphics processing unit (GPU) position-based surface tension flow (PBSTF) solver.

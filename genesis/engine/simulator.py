@@ -5,27 +5,31 @@ import numpy as np
 import genesis as gs
 from genesis.options.morphs import Morph
 from genesis.options.solvers import (
-    KinematicOptions,
     BaseCouplerOptions,
-    IPCCouplerOptions,
-    LegacyCouplerOptions,
-    SAPCouplerOptions,
     FEMOptions,
+    IPBSTFOptions,
+    IPCCouplerOptions,
+    KinematicOptions,
+    LegacyCouplerOptions,
     MPMOptions,
     PBDOptions,
     PBSTFOptions,
     RigidOptions,
+    SAPCouplerOptions,
     SFOptions,
-    SPHOptions,
     SimOptions,
+    SPHOptions,
     ToolOptions,
 )
 from genesis.repr_base import RBC
 
+from .couplers import IPCCoupler, LegacyCoupler, SAPCoupler
 from .entities import HybridEntity
+from .sensors import SensorManager
 from .solvers import (
-    KinematicSolver,
     FEMSolver,
+    IPBSTFSolver,
+    KinematicSolver,
     MPMSolver,
     PBDSolver,
     PBSTFSolver,
@@ -34,14 +38,12 @@ from .solvers import (
     SPHSolver,
     ToolSolver,
 )
-from .couplers import IPCCoupler, LegacyCoupler, SAPCoupler
 from .states.cache import QueriedStates
 from .states.solvers import SimState
-from .sensors import SensorManager
 
 if TYPE_CHECKING:
-    from genesis.engine.scene import Scene
     from genesis.engine.entities.base_entity import Entity
+    from genesis.engine.scene import Scene
 
     from .solvers.base_solver import Solver
 
@@ -75,6 +77,8 @@ class Simulator(RBC):
         An SFOptions object that contains all the options for the SFSolver.
     pbd_options : gs.PBDOptions
         A PBDOptions object that contains all the options for the PBDSolver.
+    ipbstf_options : gs.IPBSTFOptions
+        Options for the implicit position-based surface-tension fluid (IPBSTF) solver.
     pbstf_options : gs.PBSTFOptions
         A PBSTFOptions object that contains all the options for the PBSTFSolver.
     """
@@ -92,6 +96,7 @@ class Simulator(RBC):
         fem_options: FEMOptions,
         sf_options: SFOptions,
         pbd_options: PBDOptions,
+        ipbstf_options: IPBSTFOptions,
         pbstf_options: PBSTFOptions,
     ):
         self._scene = scene
@@ -107,6 +112,7 @@ class Simulator(RBC):
         self.fem_options = fem_options
         self.sf_options = sf_options
         self.pbd_options = pbd_options
+        self.ipbstf_options = ipbstf_options
         self.pbstf_options = pbstf_options
 
         self._dt: float = options.dt
@@ -126,6 +132,7 @@ class Simulator(RBC):
         self.mpm_solver = MPMSolver(self.scene, self, self.mpm_options)
         self.sph_solver = SPHSolver(self.scene, self, self.sph_options)
         self.pbd_solver = PBDSolver(self.scene, self, self.pbd_options)
+        self.ipbstf_solver = IPBSTFSolver(self.scene, self, self.ipbstf_options)
         self.pbstf_solver = PBSTFSolver(self.scene, self, self.pbstf_options)
         self.fem_solver = FEMSolver(self.scene, self, self.fem_options)
         self.sf_solver = SFSolver(self.scene, self, self.sf_options)
@@ -138,6 +145,7 @@ class Simulator(RBC):
                 self.mpm_solver,
                 self.sph_solver,
                 self.pbd_solver,
+                self.ipbstf_solver,
                 self.pbstf_solver,
                 self.fem_solver,
                 self.sf_solver,
@@ -184,6 +192,8 @@ class Simulator(RBC):
             entity = self.sph_solver.add_entity(self.n_entities, material, morph, surface, name=name)
         elif isinstance(material, gs.materials.PBD.Base):
             entity = self.pbd_solver.add_entity(self.n_entities, material, morph, surface, name=name)
+        elif isinstance(material, gs.materials.IPBSTF.Base):
+            entity = self.ipbstf_solver.add_entity(self.n_entities, material, morph, surface, name=name)
         elif isinstance(material, gs.materials.PBSTF.Base):
             entity = self.pbstf_solver.add_entity(self.n_entities, material, morph, surface, name=name)
         elif isinstance(material, gs.materials.FEM.Base):
@@ -286,6 +296,8 @@ class Simulator(RBC):
         # continue growing endlessly, which will not make the simulation faster either.
         if self.rigid_solver.is_active and self._cur_substep_global % RATE_CHECK_ERRNO == 0:
             self.rigid_solver.check_errno()
+        if self.ipbstf_solver.is_active and self._cur_substep_global % RATE_CHECK_ERRNO == 0:
+            self.ipbstf_solver.check_errno()
 
         if self._rigid_only and not self._requires_grad:  # "Only Advance!" --Thomas Wade :P
             for _ in range(self._substeps):

@@ -9,13 +9,13 @@ editor.
 from __future__ import annotations
 
 import argparse
-import json
-import os
-import tkinter
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
+import json
+import os
 from pathlib import Path
+import tkinter
 from tkinter import ttk
 from typing import NamedTuple
 
@@ -24,12 +24,13 @@ import numpy as np
 import genesis as gs
 import genesis.utils.geom as geom_utils
 from genesis.utils.misc import tensor_to_array
+
 from pbstf_surface_tension import (
     CASE_TEAPOT,
     TeapotSettings,
-    _case_settings,
-    _teapot_pose,
-    _update_teapot_manipulator,
+    case_settings,
+    teapot_pose,
+    update_teapot_manipulator,
 )
 
 SLIDER_LENGTH = 720
@@ -189,7 +190,7 @@ def write_grasp_snapshot(snapshot: GraspSnapshot, output_path: Path) -> Path:
 
 def build_grasp_scene(is_viewer_shown: bool) -> GraspScene:
     """Build the teapot and attached manipulator in the case's post-IK frame-0 state."""
-    settings = _case_settings(CASE_TEAPOT)
+    settings = case_settings(CASE_TEAPOT)
     if settings.teapot is None:
         gs.raise_exception("The teapot grasp editor requires teapot settings.")
     teapot_settings = settings.teapot
@@ -263,7 +264,7 @@ def build_grasp_scene(is_viewer_shown: bool) -> GraspScene:
     )
     scene.build()
 
-    pose = _teapot_pose(0.0, teapot_settings)
+    pose = teapot_pose(0.0, teapot_settings)
     teapot.set_pos(
         pose.pos,
         relative=False,
@@ -275,7 +276,7 @@ def build_grasp_scene(is_viewer_shown: bool) -> GraspScene:
     )
     kuka.set_qpos(manipulator.kuka_qpos)
     hand.set_qpos(manipulator.hand_qpos)
-    _update_teapot_manipulator(kuka, pose, teapot_settings, manipulator.kuka_qpos)
+    update_teapot_manipulator(kuka, pose, teapot_settings, manipulator.kuka_qpos)
     scene.visualizer.update(force=True)
     return GraspScene(scene, teapot, kuka, hand, teapot_settings)
 
@@ -294,7 +295,7 @@ class GraspEditor:
         self.has_pose_update_pending = False
         self.is_closed = False
 
-        pose = _teapot_pose(0.0, grasp_scene.settings)
+        pose = teapot_pose(0.0, grasp_scene.settings)
         manipulator = grasp_scene.settings.manipulator
         tool_world_pos, end_effector_world_quat = geom_utils.transform_pos_quat_by_trans_quat(
             np.array(manipulator.grasp_pos) * grasp_scene.settings.mesh_scale,
@@ -474,7 +475,7 @@ class GraspEditor:
         with self.grasp_scene.scene.viewer.lock:
             self.grasp_scene.hand.set_qpos(qpos)
             if self.has_pose_update_pending:
-                pose = _teapot_pose(0.0, self.grasp_scene.settings)
+                pose = teapot_pose(0.0, self.grasp_scene.settings)
                 manipulator = self.grasp_scene.settings.manipulator
                 hand_world_pos = np.array([control.variable.get() for control in self.position_controls])
                 hand_world_delta = hand_world_pos - np.array(self.initial_hand_world_pos)
@@ -510,7 +511,7 @@ class GraspEditor:
                     grasp_quat=self.current_grasp_quat,
                 )
                 settings = self.grasp_scene.settings._replace(manipulator=current_manipulator)
-                _update_teapot_manipulator(self.grasp_scene.kuka, pose, settings, self.grasp_scene.kuka.get_qpos())
+                update_teapot_manipulator(self.grasp_scene.kuka, pose, settings, self.grasp_scene.kuka.get_qpos())
                 self.has_pose_update_pending = False
             self.grasp_scene.scene.visualizer.update(force=True)
 

@@ -766,39 +766,42 @@ class RasterizerContext:
                         self.jit.update_buffer(node, "model", tfs.transpose((0, 2, 1)))
 
     def on_pbstf(self):
-        if self.sim.pbstf_solver.is_active:
-            for entity in self.sim.pbstf_solver.entities:
+        for solver in (self.sim.pbstf_solver, self.sim.ipbstf_solver):
+            if not solver.is_active:
+                continue
+            for entity in solver.entities:
                 if entity.surface.vis_mode == "recon":
                     self.add_dynamic_node(entity, None)
                 elif entity.surface.vis_mode == "particle":
                     for idx in self.rendered_envs_idx:
-                        mesh = mu.create_sphere(
-                            self.sim.pbstf_solver.particle_radius * self.particle_size_scale, subdivisions=1
-                        )
+                        mesh = mu.create_sphere(solver.particle_radius * self.particle_size_scale, subdivisions=1)
                         mesh.visual = mu.surface_uvs_to_trimesh_visual(entity.surface, n_verts=len(mesh.vertices))
                         tfs = np.tile(np.eye(4), (entity.n_particles, 1, 1))
                         tfs[:, :3, 3] = entity.init_particles
                         self.add_static_node(entity, pyrender.Mesh.from_trimesh(mesh, smooth=True, poses=tfs), i_b=idx)
 
     def update_pbstf(self):
-        if self.sim.pbstf_solver.is_active:
-            particles_all = qd_to_numpy(self.sim.pbstf_solver.particles_render.pos) + self.scene.envs_offset
-            active_all = qd_to_numpy(self.sim.pbstf_solver.particles_render.active).astype(dtype=np.bool_, copy=False)
-            for entity in self.sim.pbstf_solver.entities:
+        for solver in (self.sim.pbstf_solver, self.sim.ipbstf_solver):
+            if not solver.is_active:
+                continue
+            particles_all = qd_to_numpy(solver.particles_render.pos, transpose=True)
+            particles_all = particles_all + self.scene.envs_offset[:, None, :]
+            active_all = qd_to_numpy(solver.particles_render.active, transpose=True)
+            for entity in solver.entities:
                 for idx in self.rendered_envs_idx:
                     if entity.surface.vis_mode == "recon":
                         mesh = pu.particles_to_mesh(
-                            positions=particles_all[entity.particle_start : entity.particle_end, idx][
-                                active_all[entity.particle_start : entity.particle_end, idx]
+                            positions=particles_all[idx, entity.particle_start : entity.particle_end][
+                                active_all[idx, entity.particle_start : entity.particle_end]
                             ],
-                            radius=self.sim.pbstf_solver.particle_radius,
+                            radius=solver.particle_radius,
                             backend=entity.surface.recon_backend,
                         )
                         mesh.visual = mu.surface_uvs_to_trimesh_visual(entity.surface, n_verts=len(mesh.vertices))
                         self.add_dynamic_node(entity, pyrender.Mesh.from_trimesh(mesh, smooth=True))
                     elif entity.surface.vis_mode == "particle":
                         tfs = np.tile(np.eye(4), (entity.n_particles, 1, 1))
-                        tfs[:, :3, 3] = particles_all[entity.particle_start : entity.particle_end, idx]
+                        tfs[:, :3, 3] = particles_all[idx, entity.particle_start : entity.particle_end]
                         node = self.static_nodes[(idx, entity.uid)]
                         self.jit.update_buffer(node, "model", tfs.transpose((0, 2, 1)))
 

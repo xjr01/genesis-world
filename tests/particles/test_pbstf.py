@@ -1,25 +1,12 @@
 import math
 import os
 
-import igl
 import numpy as np
 import pytest
+
+import igl
 import quadrants as qd
 import trimesh
-
-import genesis as gs
-import genesis.utils.geom as geom_utils
-import genesis.utils.mesh as mesh_utils
-import genesis.utils.particle as particle_utils
-from genesis.engine.boundaries import (
-    ConeStaticCollider,
-    StaticCollider,
-    project_out_static_collider,
-    query_static_collider,
-    static_collider_separates,
-)
-from genesis.utils.misc import qd_to_numpy, tensor_to_array
-from tests.utils import assert_allclose, assert_equal
 
 from examples.teapot.pbstf_surface_tension import (
     CASE_BOUNCE,
@@ -28,11 +15,24 @@ from examples.teapot.pbstf_surface_tension import (
     CASE_TAP,
     CASE_TEAPOT,
     CASES,
-    _case_settings,
-    _teapot_pose,
-    _update_teapot_manipulator,
     build_scene,
+    case_settings,
+    teapot_pose,
+    update_teapot_manipulator,
 )
+import genesis as gs
+from genesis.engine.boundaries import (
+    ConeStaticCollider,
+    StaticCollider,
+    project_out_static_collider,
+    query_static_collider,
+    static_collider_separates,
+)
+import genesis.utils.geom as geom_utils
+import genesis.utils.mesh as mesh_utils
+import genesis.utils.particle as particle_utils
+from genesis.utils.misc import qd_to_numpy, tensor_to_array
+from tests.utils import assert_allclose, assert_equal
 
 
 @pytest.mark.required
@@ -260,7 +260,7 @@ def test_static_collider_adhesion_and_friction(show_viewer):
 @pytest.mark.required
 @pytest.mark.parametrize("backend", [gs.cpu])
 def test_teapot_initial_particles_pose_and_case_time_steps():
-    teapot_settings = _case_settings(CASE_TEAPOT).teapot
+    teapot_settings = case_settings(CASE_TEAPOT).teapot
     particle_size = 0.1
     teapot_mesh = mesh_utils.load_mesh(os.path.join(gs.utils.get_assets_dir(), teapot_settings.asset)).copy()
     teapot_mesh.merge_vertices(merge_tex=True, merge_norm=True)
@@ -289,13 +289,13 @@ def test_teapot_initial_particles_pose_and_case_time_steps():
     assert_allclose(particles[:, 1].max(), expected_max_height, atol=1e-12)
     assert particles[:, 2].max() > 5.0
     for case in CASES:
-        settings = _case_settings(case)
+        settings = case_settings(case)
         expected_scale = 20 if case in (CASE_TAP, CASE_TEAPOT) else 10
         expected_dt = 0.01 if case == CASE_TEAPOT else 1.0 / 30.0
         assert_equal(settings.scale, expected_scale)
         assert_equal(settings.dt, expected_dt)
     for time, angle_degrees in ((0.0, 0.0), (18.0, 27.0), (28.0, 27.0), (29.6, 19.0), (35.0, 19.0)):
-        pose = _teapot_pose(time, teapot_settings)
+        pose = teapot_pose(time, teapot_settings)
         angle = math.radians(angle_degrees)
         assert_allclose(
             pose.pos,
@@ -320,7 +320,7 @@ def test_teapot_initial_particles_pose_and_case_time_steps():
 @pytest.mark.required
 @pytest.mark.parametrize("backend", [gs.cpu])
 def test_tap_case_settings():
-    settings = _case_settings(CASE_TAP)
+    settings = case_settings(CASE_TAP)
     assert CASE_TAP in CASES
     assert settings.scale == 20
     assert_equal(settings.dt, 1.0 / 30.0)
@@ -364,7 +364,7 @@ def test_local_mesh_neighbor_capacity():
 @pytest.mark.required
 @pytest.mark.parametrize("backend", [gs.cuda])
 def test_teapot_manipulator_tracks_grasp_pose(show_viewer):
-    teapot_settings = _case_settings(CASE_TEAPOT).teapot
+    teapot_settings = case_settings(CASE_TEAPOT).teapot
     manipulator = teapot_settings.manipulator
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
@@ -431,8 +431,8 @@ def test_teapot_manipulator_tracks_grasp_pose(show_viewer):
         28.0 + (54 - angle_twice) / 10.0 for angle_twice in range(53, 37, -1)
     )
     for time in times:
-        pose = _teapot_pose(time, teapot_settings)
-        qpos = _update_teapot_manipulator(kuka, pose, teapot_settings, qpos)
+        pose = teapot_pose(time, teapot_settings)
+        qpos = update_teapot_manipulator(kuka, pose, teapot_settings, qpos)
         scene.step()
 
         target_pos, target_quat = geom_utils.transform_pos_quat_by_trans_quat(

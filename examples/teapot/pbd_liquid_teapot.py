@@ -5,7 +5,7 @@ import genesis as gs
 
 from pbstf_surface_tension import (
     CASE_TEAPOT,
-    _case_settings,
+    case_settings,
     sample_teapot_particles,
     start_viewer_recording,
     stop_viewer,
@@ -14,7 +14,7 @@ from pbstf_surface_tension import (
 
 
 def build_scene(scale=None, show_viewer=False, dt=None):
-    settings = _case_settings(CASE_TEAPOT)
+    settings = case_settings(CASE_TEAPOT)
     teapot_settings = settings.teapot
     if teapot_settings is None:
         gs.raise_exception("The teapot case requires teapot settings.")
@@ -108,7 +108,7 @@ def main():
         help="Record the viewer and prompt for the output path on exit",
     )
     args = parser.parse_args()
-    settings = _case_settings(CASE_TEAPOT)
+    settings = case_settings(CASE_TEAPOT)
     if args.scale is not None and args.scale < settings.scale:
         parser.error(f"--scale must be at least {settings.scale}")
     if args.dt is not None and args.dt <= 0.0:

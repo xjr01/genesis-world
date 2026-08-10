@@ -242,20 +242,24 @@ class SPHSolverState:
         return self._active
 
 
-class PBSTFSolverState:
-    """Dynamic state queried from a PBSTFSolver."""
-
-    def __init__(self, scene):
+class _ParticleFluidSolverState:
+    def __init__(self, scene, solver):
         self._scene = scene
         args = {
             "dtype": gs.tc_float,
             "requires_grad": False,
             "scene": scene,
         }
-        self._pos = gs.zeros((scene.sim._B, scene.sim.pbstf_solver.n_particles, 3), **args)
-        self._vel = gs.zeros((scene.sim._B, scene.sim.pbstf_solver.n_particles, 3), **args)
+        self._pos = gs.zeros((scene.sim._B, solver.n_particles, 3), **args)
+        self._vel = gs.zeros((scene.sim._B, solver.n_particles, 3), **args)
         args["dtype"] = gs.tc_bool
-        self._active = gs.zeros((scene.sim._B, scene.sim.pbstf_solver.n_particles), **args)
+        self._active = gs.zeros((scene.sim._B, solver.n_particles), **args)
+
+    def serializable(self):
+        self._scene = None
+        self._pos = self._pos.detach()
+        self._vel = self._vel.detach()
+        self._active = self._active.detach()
 
     @property
     def scene(self):
@@ -272,6 +276,20 @@ class PBSTFSolverState:
     @property
     def active(self):
         return self._active
+
+
+class IPBSTFSolverState(_ParticleFluidSolverState):
+    """Dynamic state queried from an implicit position-based surface-tension fluid (IPBSTF) solver."""
+
+    def __init__(self, scene):
+        super().__init__(scene, scene.sim.ipbstf_solver)
+
+
+class PBSTFSolverState(_ParticleFluidSolverState):
+    """Dynamic state queried from a PBSTFSolver."""
+
+    def __init__(self, scene):
+        super().__init__(scene, scene.sim.pbstf_solver)
 
 
 class PBDSolverState:
