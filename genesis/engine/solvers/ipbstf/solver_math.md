@@ -64,6 +64,18 @@ $$
 
 其中关于约束的一阶梯度和二阶海瑟矩阵都可以分别通过核函数的一阶导和二阶导求得，但对于约束的海瑟矩阵我们会采用一种对角近似：将矩阵每一列的二范数作为该列矩阵的对角元素；经过这样的近似后，求得一个近似的 $\boldsymbol H_i$ 再代入上述求解 $\Delta\boldsymbol x_i$ 的线性系统。
 
+当密度约束已经满足或接近满足，且 $\alpha$ 较小时，$\boldsymbol H_i$ 可能接近奇异。直接计算其逆矩阵会放大浮点舍入误差，因此用 `IPBSTFOptions.hessian_determinant_epsilon` 配置的非零阈值 $\varepsilon$ 保护局部求解，其默认值为 $10^{-7}$：
+
+$$
+\Delta\boldsymbol x_i=
+\begin{cases}
+\boldsymbol H_i^{-1}\boldsymbol f_i, & \det(\boldsymbol H_i)\geq\varepsilon,\\
+\boldsymbol 0, & \det(\boldsymbol H_i)<\varepsilon.
+\end{cases}
+$$
+
+第二种情况下仅跳过粒子 $i$ 在当前 iteration 的局部更新；下一个 iteration 会根据更新后的邻域状态重新组装并判断 $\boldsymbol H_i$。
+
 ### 强调：一些细节
 
 局部优化问题的每一步牛顿迭代都只需要求解一个 $3\times 3$ 的小线性系统，因此直接用解析的方法计算 $\boldsymbol H_i^{-1}$ 即可。

@@ -808,13 +808,17 @@ class IPBSTFOptions(Options):
 
     ``alpha`` weights inertia against the density energy. Larger values keep particles closer to their unconstrained
     predictions and produce a softer density response; smaller values enforce incompressibility more strongly at the
-    cost of larger Newton updates. ``max_solver_iterations`` controls convergence work without changing that energy.
+    cost of larger Newton updates. ``hessian_determinant_epsilon`` skips local updates with smaller Hessian
+    determinants. Larger values reject more numerically weak solves but may suppress valid updates; smaller values
+    preserve more updates with less protection from roundoff amplification. ``max_solver_iterations`` controls
+    convergence work without changing that energy.
     """
 
     dt: PositiveFloat | None = None
     gravity: Vec3FType | None = None
 
     alpha: PositiveFloat = 1e-6
+    hessian_determinant_epsilon: PositiveFloat = 1e-7
     particle_size: PositiveFloat = 0.02
     max_solver_iterations: PositiveInt = 10
     static_colliders: list[PBSTFStaticColliderOptionsType] = Field(default_factory=list)
@@ -833,14 +837,14 @@ class IPBSTFOptions(Options):
     def _resolve_defaults(cls, data: dict) -> dict:
         particle_size = data.get("particle_size", 0.02)
         if data.get("hash_grid_cell_size") is None:
-            data["hash_grid_cell_size"] = 3.0 * particle_size
+            data["hash_grid_cell_size"] = 2.0 * particle_size
         return data
 
     def model_post_init(self, context: Any) -> None:
         if not np.all(np.array(self.upper_bound) > np.array(self.lower_bound)):
             gs.raise_exception("Invalid pair of upper_bound and lower_bound.")
 
-        self._support_radius = 3.0 * self.particle_size
+        self._support_radius = 2.0 * self.particle_size
         if self.hash_grid_cell_size < self._support_radius:
             gs.raise_exception("`hash_grid_cell_size` must not be smaller than the IPBSTF cubic-spline support radius.")
 

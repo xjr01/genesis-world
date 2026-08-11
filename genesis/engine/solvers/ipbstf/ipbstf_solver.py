@@ -298,8 +298,8 @@ def _kernel_copy_from_reordered(
 @qd.kernel
 def _kernel_compute_density_constraints(
     n_particles: qd.i32,
-    particle_radius: qd.f32,
-    support_radius: qd.f32,
+    particle_radius: float,
+    support_radius: float,
     particles: qd.template(),
     particles_status: qd.template(),
     particles_info: qd.template(),
@@ -338,7 +338,7 @@ def _kernel_reduce_max_density(
 
 
 @qd.kernel
-def _kernel_set_particle_mass(n_particles: qd.i32, mass: qd.f32, particles_info: qd.template()):
+def _kernel_set_particle_mass(n_particles: qd.i32, mass: float, particles_info: qd.template()):
     for particle_idx in range(n_particles):
         particles_info[particle_idx].mass = mass
 
@@ -346,7 +346,7 @@ def _kernel_set_particle_mass(n_particles: qd.i32, mass: qd.f32, particles_info:
 @qd.kernel
 def _kernel_predict_positions(
     n_particles: qd.i32,
-    substep_dt: qd.f32,
+    substep_dt: float,
     gravity: qd.Tensor,
     particles: qd.template(),
     particles_status: qd.template(),
@@ -364,10 +364,10 @@ def _kernel_predict_positions(
 @qd.kernel
 def _kernel_assemble_density_local_systems(
     n_particles: qd.i32,
-    substep_dt: qd.f32,
-    alpha: qd.f32,
-    particle_radius: qd.f32,
-    support_radius: qd.f32,
+    substep_dt: float,
+    alpha: float,
+    particle_radius: float,
+    support_radius: float,
     particles: qd.template(),
     particles_status: qd.template(),
     particles_info: qd.template(),
@@ -412,15 +412,19 @@ def _kernel_assemble_density_local_systems(
 @qd.kernel
 def _kernel_solve_local_systems(
     n_particles: qd.i32,
+    hessian_determinant_epsilon: float,
     particles: qd.template(),
     particles_status: qd.template(),
     errno: qd.Tensor,
 ):
     for particle_idx, env_idx in qd.ndrange(n_particles, particles.shape[1]):
         if particles_status[particle_idx, env_idx].active:
-            inverse_hessian = particles[particle_idx, env_idx].local_hessian.inverse()
-            delta_pos = inverse_hessian @ particles[particle_idx, env_idx].local_force
-            is_valid = True
+            hessian = particles[particle_idx, env_idx].local_hessian
+            determinant = hessian.determinant()
+            delta_pos = qd.Vector.zero(gs.qd_float, 3)
+            is_valid = not qd.math.isnan(determinant) and not qd.math.isinf(determinant)
+            if is_valid and determinant >= hessian_determinant_epsilon:
+                delta_pos = hessian.inverse() @ particles[particle_idx, env_idx].local_force
             for axis in qd.static(range(3)):
                 is_valid = is_valid and not qd.math.isnan(delta_pos[axis]) and not qd.math.isinf(delta_pos[axis])
             if is_valid:
@@ -461,7 +465,7 @@ def _kernel_apply_position_updates(
 @qd.kernel
 def _kernel_update_velocities(
     n_particles: qd.i32,
-    substep_dt: qd.f32,
+    substep_dt: float,
     particles: qd.template(),
     particles_status: qd.template(),
     errno: qd.Tensor,
@@ -501,8 +505,8 @@ def _kernel_add_particles(
     particle_start: qd.i32,
     n_particles: qd.i32,
     active: qd.i32,
-    rho_rest: qd.f32,
-    mass: qd.f32,
+    rho_rest: float,
+    mass: float,
     pos: qd.types.ndarray(),
     particles: qd.template(),
     particles_status: qd.template(),
@@ -683,6 +687,7 @@ class IPBSTFSolver(Solver):
         super().__init__(scene, sim, options)
 
         self._alpha = options.alpha
+        self._hessian_determinant_epsilon = options.hessian_determinant_epsilon
         self._particle_size = options.particle_size
         self._particle_radius = 0.5 * options.particle_size
         self._support_radius = options._support_radius
@@ -932,7 +937,11 @@ class IPBSTFSolver(Solver):
                 self._static_colliders,
             )
             _kernel_solve_local_systems(
-                self._n_particles, self.particles_reordered, self.particles_status_reordered, self._errno
+                self._n_particles,
+                self._hessian_determinant_epsilon,
+                self.particles_reordered,
+                self.particles_status_reordered,
+                self._errno,
             )
             _kernel_apply_position_updates(
                 self._n_particles,

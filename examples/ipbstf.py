@@ -182,7 +182,7 @@ def main():
     if args.iterations <= 0:
         parser.error("--iterations must be positive")
 
-    gs.init(backend=gs.cuda, precision="32", logging_level="info")
+    gs.init(backend=gs.cuda, precision="64", logging_level="info")
     scene, _ = build_scene(
         case=args.case,
         scale=args.scale,
@@ -235,7 +235,7 @@ def main():
                     kuka_qpos,
                 )
             scene.step()
-            while True: pass
+            # while True: pass
     finally:
         stop_viewer(scene, is_viewer_shown)
 
