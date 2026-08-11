@@ -3,7 +3,7 @@ import pytest
 
 import genesis as gs
 from genesis.utils.misc import tensor_to_array
-from tests.utils import assert_allclose
+from tests.utils import assert_allclose, assert_equal
 
 
 @pytest.mark.required
@@ -63,7 +63,7 @@ def test_dam_break_spreads_under_gravity(n_envs, show_viewer):
         ipbstf_options=gs.options.IPBSTFOptions(
             particle_size=0.1,
             max_solver_iterations=5,
-            lower_bound=(-1.0, 0.0, -0.5),
+            lower_bound=(-1.0, -0.5, -0.5),
             upper_bound=(2.0, 2.0, 0.5),
         ),
         viewer_options=gs.options.ViewerOptions(
@@ -82,14 +82,25 @@ def test_dam_break_spreads_under_gravity(n_envs, show_viewer):
             sampler="staggered",
         ),
     )
+    floor_entity = scene.add_entity(
+        morph=gs.morphs.Box(
+            lower=(-1.0, -0.2, -0.5),
+            upper=(2.0, 0.0, 0.5),
+        ),
+        material=gs.materials.IPBSTF.Solid(
+            sampler="staggered",
+        ),
+    )
     scene.build(n_envs=n_envs)
 
     pos_initial = tensor_to_array(liquid.get_state().pos)
+    floor_pos_initial = tensor_to_array(floor_entity.get_state().pos)
     for _ in range(60):
         scene.step()
     pos = tensor_to_array(liquid.get_state().pos)
 
     assert np.isfinite(pos).all()
+    assert_equal(tensor_to_array(floor_entity.get_state().pos), floor_pos_initial)
     assert (pos[..., 1] >= 0.0).all()
     assert (pos[..., 1].mean(axis=1) < pos_initial[..., 1].mean(axis=1) - 0.3).all()
     assert (np.ptp(pos[..., 0], axis=1) > 1.5 * np.ptp(pos_initial[..., 0], axis=1)).all()

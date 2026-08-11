@@ -161,6 +161,7 @@ def _accumulate_density_constraint(
     static_colliders_quat,
     spatial_hasher: qd.template(),
     static_colliders: _StaticColliderConfig,
+    is_fixed_influence_enabled: qd.template(),
 ):
     pos_i = particles[particle_idx, env_idx].pos
     mass_i = particles_info[particle_idx, env_idx].mass
@@ -174,7 +175,11 @@ def _accumulate_density_constraint(
         slot_start = spatial_hasher.slot_start[slot_idx, env_idx]
         slot_end = slot_start + spatial_hasher.slot_size[slot_idx, env_idx]
         for neighbor_idx in range(slot_start, slot_end):
-            if neighbor_idx != particle_idx and particles_status[neighbor_idx, env_idx].active:
+            if (
+                neighbor_idx != particle_idx
+                and particles_status[neighbor_idx, env_idx].active
+                and (is_fixed_influence_enabled or not particles_info[neighbor_idx, env_idx].is_fixed)
+            ):
                 pos_j = particles[neighbor_idx, env_idx].pos
                 delta = pos_i - pos_j
                 distance = delta.norm()
@@ -307,9 +312,10 @@ def _kernel_compute_density_constraints(
     static_colliders_quat: qd.Tensor,
     spatial_hasher: qd.template(),
     static_colliders: _StaticColliderConfig,
+    is_fixed_influence_enabled: qd.template(),
 ):
     for particle_idx, env_idx in qd.ndrange(n_particles, particles.shape[1]):
-        if particles_status[particle_idx, env_idx].active:
+        if particles_status[particle_idx, env_idx].active and not particles_info[particle_idx, env_idx].is_fixed:
             _accumulate_density_constraint(
                 particle_idx,
                 env_idx,
@@ -322,6 +328,7 @@ def _kernel_compute_density_constraints(
                 static_colliders_quat,
                 spatial_hasher,
                 static_colliders,
+                is_fixed_influence_enabled,
             )
 
 
@@ -330,10 +337,11 @@ def _kernel_reduce_max_density(
     n_particles: qd.i32,
     particles: qd.template(),
     particles_status: qd.template(),
+    particles_info: qd.template(),
     max_density: qd.Tensor,
 ):
     for particle_idx in range(n_particles):
-        if particles_status[particle_idx, 0].active:
+        if particles_status[particle_idx, 0].active and not particles_info[particle_idx, 0].is_fixed:
             qd.atomic_max(max_density[None], particles[particle_idx, 0].density)
 
 
@@ -350,9 +358,10 @@ def _kernel_predict_positions(
     gravity: qd.Tensor,
     particles: qd.template(),
     particles_status: qd.template(),
+    particles_info: qd.template(),
 ):
     for particle_idx, env_idx in qd.ndrange(n_particles, particles.shape[1]):
-        if particles_status[particle_idx, env_idx].active:
+        if particles_status[particle_idx, env_idx].active and not particles_info[particle_idx, env_idx].is_fixed:
             pos = particles[particle_idx, env_idx].pos
             pos_predicted = pos + substep_dt * particles[particle_idx, env_idx].vel
             pos_predicted += substep_dt * substep_dt * gravity[env_idx]
@@ -377,7 +386,7 @@ def _kernel_assemble_density_local_systems(
     static_colliders: _StaticColliderConfig,
 ):
     for particle_idx, env_idx in qd.ndrange(n_particles, particles.shape[1]):
-        if particles_status[particle_idx, env_idx].active:
+        if particles_status[particle_idx, env_idx].active and not particles_info[particle_idx, env_idx].is_fixed:
             particle = particles[particle_idx, env_idx]
             inertia = alpha * particles_info[particle_idx, env_idx].mass / (substep_dt * substep_dt)
             force = -inertia * (particle.pos - particle.pos_predicted)
@@ -415,10 +424,11 @@ def _kernel_solve_local_systems(
     hessian_determinant_epsilon: float,
     particles: qd.template(),
     particles_status: qd.template(),
+    particles_info: qd.template(),
     errno: qd.Tensor,
 ):
     for particle_idx, env_idx in qd.ndrange(n_particles, particles.shape[1]):
-        if particles_status[particle_idx, env_idx].active:
+        if particles_status[particle_idx, env_idx].active and not particles_info[particle_idx, env_idx].is_fixed:
             hessian = particles[particle_idx, env_idx].local_hessian
             determinant = hessian.determinant()
             delta_pos = qd.Vector.zero(gs.qd_float, 3)
@@ -439,6 +449,7 @@ def _kernel_apply_position_updates(
     n_particles: qd.i32,
     particles: qd.template(),
     particles_status: qd.template(),
+    particles_info: qd.template(),
     static_colliders_pos: qd.Tensor,
     static_colliders_quat: qd.Tensor,
     boundary: qd.template(),
@@ -446,7 +457,7 @@ def _kernel_apply_position_updates(
     errno: qd.Tensor,
 ):
     for particle_idx, env_idx in qd.ndrange(n_particles, particles.shape[1]):
-        if particles_status[particle_idx, env_idx].active:
+        if particles_status[particle_idx, env_idx].active and not particles_info[particle_idx, env_idx].is_fixed:
             pos = boundary.impose_pos(
                 particles[particle_idx, env_idx].pos + 0.5 * particles[particle_idx, env_idx].delta_pos
             )
@@ -468,10 +479,11 @@ def _kernel_update_velocities(
     substep_dt: float,
     particles: qd.template(),
     particles_status: qd.template(),
+    particles_info: qd.template(),
     errno: qd.Tensor,
 ):
     for particle_idx, env_idx in qd.ndrange(n_particles, particles.shape[1]):
-        if particles_status[particle_idx, env_idx].active:
+        if particles_status[particle_idx, env_idx].active and not particles_info[particle_idx, env_idx].is_fixed:
             velocity = (particles[particle_idx, env_idx].pos - particles[particle_idx, env_idx].pos_prev) / substep_dt
             is_valid = True
             for axis in qd.static(range(3)):
@@ -505,6 +517,7 @@ def _kernel_add_particles(
     particle_start: qd.i32,
     n_particles: qd.i32,
     active: qd.i32,
+    is_fixed: qd.i32,
     rho_rest: float,
     mass: float,
     pos: qd.types.ndarray(),
@@ -525,6 +538,7 @@ def _kernel_add_particles(
         particle_idx = particle_idx_local + particle_start
         particles_info[particle_idx].mass = mass
         particles_info[particle_idx].rho_rest = rho_rest
+        particles_info[particle_idx].is_fixed = qd.cast(is_fixed, gs.qd_bool)
 
 
 @qd.kernel
@@ -759,8 +773,13 @@ class IPBSTFSolver(Solver):
         if self.sim.requires_grad:
             gs.raise_exception("IPBSTFSolver does not support differentiable simulation.")
 
-        self._material = self.entities[0].material
-        for entity in self.entities[1:]:
+        liquid_entities = [
+            entity for entity in self.entities if isinstance(entity.material, gs.materials.IPBSTF.Liquid)
+        ]
+        if not liquid_entities:
+            gs.raise_exception("IPBSTFSolver requires at least one liquid entity.")
+        self._material = liquid_entities[0].material
+        for entity in liquid_entities[1:]:
             if entity.material.rho != self._material.rho:
                 gs.raise_exception(
                     "All entities in one IPBSTFSolver must use the same rest density because the current solver is "
@@ -782,7 +801,7 @@ class IPBSTFSolver(Solver):
             local_hessian=gs.qd_mat3,
         )
         particle_status = qd.types.struct(reordered_idx=gs.qd_int, active=gs.qd_bool)
-        particle_info = qd.types.struct(mass=gs.qd_float, rho_rest=gs.qd_float)
+        particle_info = qd.types.struct(mass=gs.qd_float, rho_rest=gs.qd_float, is_fixed=gs.qd_bool)
         particle_render = qd.types.struct(pos=gs.qd_vec3, vel=gs.qd_vec3, active=gs.qd_bool)
 
         shape = (self._n_particles, self._B)
@@ -802,12 +821,16 @@ class IPBSTFSolver(Solver):
         for entity in self.entities:
             entity._add_to_solver()
 
-        if any(entity.active for entity in self.entities):
+        if any(entity.active for entity in liquid_entities):
             self._reorder_particles()
-            self._compute_density_constraints()
+            self._compute_density_constraints(is_fixed_influence_enabled=False)
             self._max_density.fill(0.0)
             _kernel_reduce_max_density(
-                self._n_particles, self.particles_reordered, self.particles_status_reordered, self._max_density
+                self._n_particles,
+                self.particles_reordered,
+                self.particles_status_reordered,
+                self.particles_info_reordered,
+                self._max_density,
             )
             max_density = qd_to_numpy(self._max_density, transpose=True)[()]
         else:
@@ -847,7 +870,7 @@ class IPBSTFSolver(Solver):
             self.sh,
         )
 
-    def _compute_density_constraints(self):
+    def _compute_density_constraints(self, is_fixed_influence_enabled=True):
         _kernel_compute_density_constraints(
             self._n_particles,
             self._particle_radius,
@@ -859,6 +882,7 @@ class IPBSTFSolver(Solver):
             self._kernel_static_colliders_quat,
             self.sh,
             self._static_colliders,
+            is_fixed_influence_enabled,
         )
 
     @gs.assert_built
@@ -916,6 +940,7 @@ class IPBSTFSolver(Solver):
             self._gravity,
             self.particles_reordered,
             self.particles_status_reordered,
+            self.particles_info_reordered,
         )
         _kernel_copy_from_reordered(self._n_particles, self.particles, self.particles_status, self.particles_reordered)
 
@@ -941,12 +966,14 @@ class IPBSTFSolver(Solver):
                 self._hessian_determinant_epsilon,
                 self.particles_reordered,
                 self.particles_status_reordered,
+                self.particles_info_reordered,
                 self._errno,
             )
             _kernel_apply_position_updates(
                 self._n_particles,
                 self.particles_reordered,
                 self.particles_status_reordered,
+                self.particles_info_reordered,
                 self._kernel_static_colliders_pos,
                 self._kernel_static_colliders_quat,
                 self.boundary,
@@ -963,6 +990,7 @@ class IPBSTFSolver(Solver):
             self._substep_dt,
             self.particles_reordered,
             self.particles_status_reordered,
+            self.particles_info_reordered,
             self._errno,
         )
 
@@ -1017,12 +1045,13 @@ class IPBSTFSolver(Solver):
     def update_render_fields(self):
         _kernel_update_render_fields(self._n_particles, self.particles, self.particles_status, self.particles_render)
 
-    def _kernel_add_particles(self, f, active, particle_start, n_particles, rho_rest, pos):
+    def _kernel_add_particles(self, f, active, particle_start, n_particles, is_fixed, pos):
         _kernel_add_particles(
             particle_start,
             n_particles,
             active,
-            rho_rest,
+            is_fixed,
+            self._material.rho,
             self._default_mass,
             pos,
             self.particles,

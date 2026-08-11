@@ -837,14 +837,14 @@ class IPBSTFOptions(Options):
     def _resolve_defaults(cls, data: dict) -> dict:
         particle_size = data.get("particle_size", 0.02)
         if data.get("hash_grid_cell_size") is None:
-            data["hash_grid_cell_size"] = 2.0 * particle_size
+            data["hash_grid_cell_size"] = 1.5 * particle_size
         return data
 
     def model_post_init(self, context: Any) -> None:
         if not np.all(np.array(self.upper_bound) > np.array(self.lower_bound)):
             gs.raise_exception("Invalid pair of upper_bound and lower_bound.")
 
-        self._support_radius = 2.0 * self.particle_size
+        self._support_radius = 1.5 * self.particle_size
         if self.hash_grid_cell_size < self._support_radius:
             gs.raise_exception("`hash_grid_cell_size` must not be smaller than the IPBSTF cubic-spline support radius.")
 

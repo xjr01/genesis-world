@@ -65,6 +65,9 @@ def build_scene(
             raise ValueError("IPBSTF time step must be positive")
 
         particle_size = 2.0 / scale
+        boundary_thickness = 2.0 * particle_size
+        # The padded hash-grid domain keeps its projection boundary beyond the solid particle layers.
+        domain_padding = 3.0 * boundary_thickness
         scene = gs.Scene(
             sim_options=gs.options.SimOptions(
                 dt=dt,
@@ -74,8 +77,16 @@ def build_scene(
                 alpha=alpha,
                 particle_size=particle_size,
                 max_solver_iterations=max_solver_iterations,
-                lower_bound=(-2.0, 0.0, -2.0),
-                upper_bound=(2.0, 4.0, 2.0),
+                lower_bound=(
+                    -2.0 - domain_padding,
+                    -domain_padding,
+                    -2.0 - domain_padding,
+                ),
+                upper_bound=(
+                    2.0 + domain_padding,
+                    4.0 + domain_padding,
+                    2.0 + domain_padding,
+                ),
             ),
             viewer_options=gs.options.ViewerOptions(
                 refresh_rate=round(1.0 / dt),
@@ -93,6 +104,44 @@ def build_scene(
             ),
             material=_liquid_material(CASE_DAM_BREAK),
         )
+        solid_material = gs.materials.IPBSTF.Solid(
+            sampler="staggered",
+        )
+        solid_surface = gs.surfaces.Default(
+            color=(0.7, 0.75, 0.8, 0.35),
+            vis_mode="particle",
+        )
+        solid_bounds = (
+            (
+                (-2.0 - boundary_thickness, -boundary_thickness, -2.0 - boundary_thickness),
+                (2.0 + boundary_thickness, 0.0, 2.0 + boundary_thickness),
+            ),
+            (
+                (-2.0 - boundary_thickness, 0.0, -2.0 - boundary_thickness),
+                (-2.0, 4.0, 2.0 + boundary_thickness),
+            ),
+            (
+                (2.0, 0.0, -2.0 - boundary_thickness),
+                (2.0 + boundary_thickness, 4.0, 2.0 + boundary_thickness),
+            ),
+            (
+                (-2.0, 0.0, -2.0 - boundary_thickness),
+                (2.0, 4.0, -2.0),
+            ),
+            (
+                (-2.0, 0.0, 2.0),
+                (2.0, 4.0, 2.0 + boundary_thickness),
+            ),
+        )
+        for lower, upper in solid_bounds:
+            scene.add_entity(
+                morph=gs.morphs.Box(
+                    lower=lower,
+                    upper=upper,
+                ),
+                material=solid_material,
+                surface=solid_surface,
+            )
         scene.build()
         return scene, (liquid,)
 
