@@ -2,6 +2,7 @@ import argparse
 import os
 
 import genesis as gs
+import genesis.utils.mesh as mesh_utils
 
 if __package__:
     from .teapot.fluid_helper import initialize_teapot_manipulator, update_teapot_case
@@ -66,8 +67,12 @@ def build_scene(
 
         particle_size = 2.0 / scale
         boundary_thickness = 2.0 * particle_size
-        # The padded hash-grid domain keeps its projection boundary beyond the solid particle layers.
+        # The padded hash-grid domain keeps its projection boundary beyond the container geometry.
         domain_padding = 3.0 * boundary_thickness
+        floor_collider = gs.options.PBSTFBoxStaticColliderOptions(
+            lower=(-2.0 - boundary_thickness, -boundary_thickness, -2.0 - boundary_thickness),
+            upper=(2.0 + boundary_thickness, 0.0, 2.0 + boundary_thickness),
+        )
         scene = gs.Scene(
             sim_options=gs.options.SimOptions(
                 dt=dt,
@@ -77,6 +82,7 @@ def build_scene(
                 alpha=alpha,
                 particle_size=particle_size,
                 max_solver_iterations=max_solver_iterations,
+                static_colliders=[floor_collider],
                 lower_bound=(
                     -2.0 - domain_padding,
                     -domain_padding,
@@ -107,15 +113,12 @@ def build_scene(
         solid_material = gs.materials.IPBSTF.Solid(
             sampler="staggered",
         )
+        solid_color = (0.7, 0.75, 0.8, 0.35)
         solid_surface = gs.surfaces.Default(
-            color=(0.7, 0.75, 0.8, 0.35),
+            color=solid_color,
             vis_mode="particle",
         )
         solid_bounds = (
-            (
-                (-2.0 - boundary_thickness, -boundary_thickness, -2.0 - boundary_thickness),
-                (2.0 + boundary_thickness, 0.0, 2.0 + boundary_thickness),
-            ),
             (
                 (-2.0 - boundary_thickness, 0.0, -2.0 - boundary_thickness),
                 (-2.0, 4.0, 2.0 + boundary_thickness),
@@ -143,6 +146,12 @@ def build_scene(
                 surface=solid_surface,
             )
         scene.build()
+        if show_viewer:
+            floor_mesh = mesh_utils.create_box(
+                bounds=(floor_collider.lower, floor_collider.upper),
+                color=solid_color,
+            )
+            scene.draw_debug_mesh(floor_mesh)
         return scene, (liquid,)
 
     settings = case_settings(case)
@@ -284,7 +293,6 @@ def main():
                     kuka_qpos,
                 )
             scene.step()
-            # while True: pass
     finally:
         stop_viewer(scene, is_viewer_shown)
 

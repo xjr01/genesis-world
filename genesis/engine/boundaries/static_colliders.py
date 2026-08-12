@@ -15,6 +15,7 @@ from genesis.utils.misc import get_assets_dir, get_gsd_cache_dir
 
 _COLLIDER_CONE = 0
 _COLLIDER_MESH = 1
+_COLLIDER_BOX = 2
 _SDF_CACHE_SCHEMA = "pbstf-static-collider-v1"
 
 
@@ -38,6 +39,37 @@ class StaticCollider(ABC):
     @abstractmethod
     def from_options(cls, options):
         """Construct a collider from its solver-facing options object."""
+
+
+class BoxStaticCollider(StaticCollider):
+    """Finite analytic box whose geometry is fixed in the collider's local frame."""
+
+    kind = _COLLIDER_BOX
+    type = "box"
+
+    def __init__(self, lower, upper, pos=(0.0, 0.0, 0.0), quat=(1.0, 0.0, 0.0, 0.0)):
+        super().__init__(pos, quat)
+        self.lower = np.array(lower)
+        self.upper = np.array(upper)
+
+        if self.lower.shape != (3,):
+            gs.raise_exception("Box static collider `lower` must have shape (3,).")
+        if self.upper.shape != (3,):
+            gs.raise_exception("Box static collider `upper` must have shape (3,).")
+        if not np.all(self.upper > self.lower):
+            gs.raise_exception("Box static collider `upper` must be greater than `lower` along every axis.")
+
+        self.lower_qd = qd.Vector(self.lower, dt=gs.qd_float)
+        self.upper_qd = qd.Vector(self.upper, dt=gs.qd_float)
+
+    @classmethod
+    def from_options(cls, options):
+        return cls(
+            lower=options.lower,
+            upper=options.upper,
+            pos=options.pos,
+            quat=options.quat,
+        )
 
 
 class ConeStaticCollider(StaticCollider):
@@ -178,6 +210,45 @@ def _cone_radial_direction(pos, collider: qd.template()):
 
 
 @qd.func
+def _query_box_local(pos, collider: qd.template()):
+    closest_position = pos
+    closest_normal = qd.Vector([1.0, 0.0, 0.0], dt=gs.qd_float)
+    is_inside = True
+    for axis in qd.static(range(3)):
+        if pos[axis] < collider.lower_qd[axis]:
+            closest_position[axis] = collider.lower_qd[axis]
+            is_inside = False
+        elif pos[axis] > collider.upper_qd[axis]:
+            closest_position[axis] = collider.upper_qd[axis]
+            is_inside = False
+
+    delta = pos - closest_position
+    surface_distance = delta.norm()
+    if is_inside:
+        surface_distance = gs.qd_float(1.0e20)
+        for axis in qd.static(range(3)):
+            lower_distance = pos[axis] - collider.lower_qd[axis]
+            if lower_distance < surface_distance:
+                closest_position = pos
+                closest_position[axis] = collider.lower_qd[axis]
+                closest_normal = qd.Vector.zero(gs.qd_float, 3)
+                closest_normal[axis] = -1.0
+                surface_distance = lower_distance
+
+            upper_distance = collider.upper_qd[axis] - pos[axis]
+            if upper_distance < surface_distance:
+                closest_position = pos
+                closest_position[axis] = collider.upper_qd[axis]
+                closest_normal = qd.Vector.zero(gs.qd_float, 3)
+                closest_normal[axis] = 1.0
+                surface_distance = upper_distance
+    elif surface_distance > gs.EPS:
+        closest_normal = delta / surface_distance
+
+    return closest_position, closest_normal, is_inside, surface_distance
+
+
+@qd.func
 def _query_cone_local(pos, collider: qd.template()):
     axis = collider.height_qd.normalized()
     axial_distance = (pos - collider.center_qd).dot(axis)
@@ -297,7 +368,9 @@ def query_static_collider(collider_idx, env_idx, pos, colliders_pos, colliders_q
     normal_local = qd.Vector([1.0, 0.0, 0.0], dt=gs.qd_float)
     is_inside = False
     surface_distance = gs.qd_float(1.0e20)
-    if qd.static(collider.kind == _COLLIDER_CONE):
+    if qd.static(collider.kind == _COLLIDER_BOX):
+        closest_local, normal_local, is_inside, surface_distance = _query_box_local(pos_local, collider)
+    elif qd.static(collider.kind == _COLLIDER_CONE):
         closest_local, normal_local, is_inside, surface_distance = _query_cone_local(pos_local, collider)
     elif qd.static(collider.kind == _COLLIDER_MESH):
         closest_local, normal_local, is_inside, surface_distance = _query_mesh_local(pos_local, collider)
@@ -356,6 +429,7 @@ def static_collider_separates(
 
 
 _STATIC_COLLIDER_TYPES = {
+    BoxStaticCollider.type: BoxStaticCollider,
     ConeStaticCollider.type: ConeStaticCollider,
     MeshStaticCollider.type: MeshStaticCollider,
 }
@@ -371,6 +445,7 @@ def create_static_collider(options) -> StaticCollider:
 
 __all__ = [
     "StaticCollider",
+    "BoxStaticCollider",
     "ConeStaticCollider",
     "MeshStaticCollider",
     "create_static_collider",

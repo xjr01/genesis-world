@@ -765,6 +765,24 @@ class PBSTFStaticColliderOptions(Options):
     quat: UnitVec4FType = (1.0, 0.0, 0.0, 0.0)
 
 
+class PBSTFBoxStaticColliderOptions(PBSTFStaticColliderOptions):
+    """Finite analytic box collider.
+
+    ``lower`` and ``upper`` are opposite corners in the collider's local frame. Analytic queries keep rectangular
+    geometry exact and inexpensive; a mesh collider supports arbitrary geometry at preprocessing and field-memory cost.
+    """
+
+    type: Literal["box"] = "box"
+    lower: Vec3FType
+    upper: Vec3FType
+
+    @model_validator(mode="after")
+    def _validate_geometry(self):
+        if not np.all(np.array(self.upper) > np.array(self.lower)):
+            gs.raise_exception("PBSTF box collider `upper` must be greater than `lower` along every axis.")
+        return self
+
+
 class PBSTFConeStaticColliderOptions(PBSTFStaticColliderOptions):
     """Finite analytic cone collider.
 
@@ -798,7 +816,7 @@ class PBSTFMeshStaticColliderOptions(PBSTFStaticColliderOptions):
 
 
 PBSTFStaticColliderOptionsType = Annotated[
-    PBSTFConeStaticColliderOptions | PBSTFMeshStaticColliderOptions,
+    PBSTFBoxStaticColliderOptions | PBSTFConeStaticColliderOptions | PBSTFMeshStaticColliderOptions,
     Field(discriminator="type"),
 ]
 

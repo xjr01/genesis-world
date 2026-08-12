@@ -1,7 +1,6 @@
 import argparse
 import math
 import os
-import tempfile
 from typing import NamedTuple
 
 import numpy as np
@@ -84,6 +83,8 @@ class TapEmitterSettings(NamedTuple):
 class MopSettings(NamedTuple):
     asset: str
     collider_idx: int
+    collider_lower: tuple[float, float, float]
+    collider_upper: tuple[float, float, float]
     table_pos: tuple[float, float, float]
     table_size: tuple[float, float, float]
     liquid_lower: tuple[float, float, float]
@@ -188,7 +189,7 @@ def _case_liquid_material(case):
             interior_viscosity=0.5,
             is_collider_adhesion_friction_enabled=True,
             collider_adhesion_compliance=20.0,
-            collider_friction=0.1,
+            collider_friction=0.5,
         )
     return _liquid_material()
 
@@ -276,14 +277,16 @@ def case_settings(case):
         mop = MopSettings(
             asset="meshes/mop.obj",
             collider_idx=1,
+            collider_lower=(-0.6, 0.02, -1.2),
+            collider_upper=(0.6, 0.85, 1.2),
             table_pos=(0.0, -0.25, 0.0),
             table_size=(12.0, 0.5, 8.0),
-            liquid_lower=(-2.5, 0.05, -2.0),
-            liquid_upper=(2.5, 0.35, 2.0),
+            liquid_lower=(-2.5, 0.05, -0.7),
+            liquid_upper=(-0.5, 0.35, 0.7),
             start_pos=(-3.5, 0.0, 0.0),
             end_pos=(3.5, 0.0, 0.0),
             quat=(1.0, 0.0, 0.0, 0.0),
-            settle_time=2.5,
+            settle_time=1.0,
             wipe_time=5.0,
         )
         return CaseSettings(
@@ -295,15 +298,20 @@ def case_settings(case):
             camera_pos=(8.0, 6.0, 9.0),
             camera_lookat=(0.0, 0.4, 0.0),
             static_colliders=(
-                gs.options.PBSTFMeshStaticColliderOptions(
+                gs.options.PBSTFBoxStaticColliderOptions(
+                    pos=mop.table_pos,
+                    quat=mop.quat,
+                    lower=tuple(-0.5 * size for size in mop.table_size),
+                    upper=tuple(0.5 * size for size in mop.table_size),
+                ),
+                gs.options.PBSTFBoxStaticColliderOptions(
                     pos=mop.start_pos,
                     quat=mop.quat,
-                    file=mop.asset,
-                    scale=1.0,
-                    sdf_res=128,
+                    lower=mop.collider_lower,
+                    upper=mop.collider_upper,
                 ),
             ),
-            max_solver_iterations=20,
+            max_solver_iterations=10,
             max_surface_neighbors=128,
             max_localmesh_neighbors=64,
             enable_pca_normals=False,
@@ -499,9 +507,9 @@ def draw_case_colliders(scene, case):
         table_mesh = mesh_utils.create_box(extents=mop.table_size, color=(0.36, 0.24, 0.14, 1.0))
         table_transform = geom_utils.trans_quat_to_T(np.array(mop.table_pos), np.array(mop.quat))
         scene.draw_debug_mesh(table_mesh, T=table_transform)
-        mop_mesh = mesh_utils.load_mesh(os.path.join(gs.utils.get_assets_dir(), mop.asset)).copy()
-        mop_mesh.visual.vertex_colors = np.tile(
-            mesh_utils.color_f32_to_u8((0.85, 0.2, 0.08, 0.35)), (len(mop_mesh.vertices), 1)
+        mop_mesh = mesh_utils.create_box(
+            bounds=(mop.collider_lower, mop.collider_upper),
+            color=(0.85, 0.2, 0.08, 0.35),
         )
         mop_transform = geom_utils.trans_quat_to_T(np.array(mop_pose(0.0, mop)), np.array(mop.quat))
         return scene.draw_debug_mesh(mop_mesh, T=mop_transform)
@@ -540,71 +548,51 @@ def build_scene(case=CASE_CUBE, scale=None, show_viewer=False, dt=None):
         raise ValueError("PBSTF time step must be positive")
     particle_size = 2.0 / scale
     static_colliders = list(settings.static_colliders)
-    table_mesh_path = None
-    try:
-        if settings.mop is not None:
-            table_mesh = mesh_utils.create_box(extents=settings.mop.table_size)
-            with tempfile.NamedTemporaryFile(suffix=".obj", delete=False) as table_mesh_file:
-                table_mesh_path = table_mesh_file.name
-            table_mesh.export(table_mesh_path)
-            static_colliders.insert(
-                0,
-                gs.options.PBSTFMeshStaticColliderOptions(
-                    pos=settings.mop.table_pos,
-                    quat=settings.mop.quat,
-                    file=table_mesh_path,
-                    scale=1.0,
-                    sdf_res=64,
-                ),
+
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=dt,
+            gravity=settings.gravity,
+        ),
+        rigid_options=(
+            gs.options.RigidOptions(
+                enable_collision=False,
+                disable_constraint=True,
             )
+            if case == CASE_TEAPOT
+            else None
+        ),
+        pbstf_options=gs.options.PBSTFOptions(
+            particle_size=particle_size,
+            lower_bound=settings.lower_bound,
+            upper_bound=settings.upper_bound,
+            max_solver_iterations=settings.max_solver_iterations,
+            topology_rebuild_interval=10,
+            max_surface_neighbors=settings.max_surface_neighbors,
+            max_localmesh_neighbors=settings.max_localmesh_neighbors,
+            enable_pca_normals=settings.enable_pca_normals,
+            static_colliders=static_colliders,
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            refresh_rate=round(1.0 / dt),
+            camera_pos=settings.camera_pos,
+            camera_lookat=settings.camera_lookat,
+            camera_up=(0.0, 1.0, 0.0),
+            camera_fov=40,
+        ),
+        show_viewer=show_viewer,
+    )
+    entities_and_velocities = add_case_entities(scene, case, particle_size, settings, _case_liquid_material)
+    scene.build()
+    for entity, velocity in entities_and_velocities:
+        if velocity is not None:
+            entity.set_particles_vel(velocity)
+    if settings.teapot is not None:
+        initialize_teapot_manipulator(scene, settings.teapot)
+    if show_viewer:
+        draw_case_colliders(scene, case)
 
-        scene = gs.Scene(
-            sim_options=gs.options.SimOptions(
-                dt=dt,
-                gravity=settings.gravity,
-            ),
-            rigid_options=(
-                gs.options.RigidOptions(
-                    enable_collision=False,
-                    disable_constraint=True,
-                )
-                if case == CASE_TEAPOT
-                else None
-            ),
-            pbstf_options=gs.options.PBSTFOptions(
-                particle_size=particle_size,
-                lower_bound=settings.lower_bound,
-                upper_bound=settings.upper_bound,
-                max_solver_iterations=settings.max_solver_iterations,
-                topology_rebuild_interval=10,
-                max_surface_neighbors=settings.max_surface_neighbors,
-                max_localmesh_neighbors=settings.max_localmesh_neighbors,
-                enable_pca_normals=settings.enable_pca_normals,
-                static_colliders=static_colliders,
-            ),
-            viewer_options=gs.options.ViewerOptions(
-                refresh_rate=round(1.0 / dt),
-                camera_pos=settings.camera_pos,
-                camera_lookat=settings.camera_lookat,
-                camera_up=(0.0, 1.0, 0.0),
-                camera_fov=40,
-            ),
-            show_viewer=show_viewer,
-        )
-        entities_and_velocities = add_case_entities(scene, case, particle_size, settings, _case_liquid_material)
-        scene.build()
-        for entity, velocity in entities_and_velocities:
-            if velocity is not None:
-                entity.set_particles_vel(velocity)
-        if settings.teapot is not None:
-            initialize_teapot_manipulator(scene, settings.teapot)
-        if show_viewer:
-            draw_case_colliders(scene, case)
-
-        return scene, tuple(entity for entity, _ in entities_and_velocities)
-    finally:
-        if table_mesh_path is not None:
-            os.remove(table_mesh_path)
+    return scene, tuple(entity for entity, _ in entities_and_velocities)
 
 
 def main():

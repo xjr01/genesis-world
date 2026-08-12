@@ -26,6 +26,7 @@ from examples.teapot.pbstf_surface_tension import (
 )
 import genesis as gs
 from genesis.engine.boundaries import (
+    BoxStaticCollider,
     ConeStaticCollider,
     StaticCollider,
     project_out_static_collider,
@@ -41,7 +42,7 @@ from tests.utils import assert_allclose, assert_equal
 
 @pytest.mark.required
 @pytest.mark.parametrize("backend", [gs.cuda])
-def test_cone_static_collider_geometry():
+def test_analytic_static_collider_geometry():
     collider = ConeStaticCollider(center=(0.0, 0.0, 0.0), height=(0.0, 2.0, 0.0), radius=2.0)
     particle_radius = 0.2
     points = np.array(
@@ -127,6 +128,54 @@ def test_cone_static_collider_geometry():
     assert_allclose(projected[3:] - closest[3:], particle_radius * normals[3:], atol=1e-5)
     assert_equal(inside, (True, False, False, False, False, False))
     assert_equal(separated, (True, False))
+
+    box = BoxStaticCollider(lower=(-1.0, -2.0, -3.0), upper=(1.0, 2.0, 3.0))
+    box_points = np.array(
+        [
+            (0.9, 0.0, 0.0),
+            (1.1, 0.0, 0.0),
+            (1.5, 0.0, 0.0),
+            (-1.05, 0.0, 0.0),
+            (1.05, 0.0, 0.0),
+            (1.1, 2.1, 3.1),
+        ],
+        dtype=gs.np_float,
+    )
+    points_qd.from_numpy(box_points)
+    run(
+        particle_radius,
+        points_qd,
+        closest_qd,
+        normals_qd,
+        projected_qd,
+        inside_qd,
+        separated_qd,
+        colliders_pos_qd,
+        colliders_quat_qd,
+        box,
+    )
+
+    closest = qd_to_numpy(closest_qd, transpose=True)
+    normals = qd_to_numpy(normals_qd, transpose=True)
+    projected = qd_to_numpy(projected_qd, transpose=True)
+    inside = qd_to_numpy(inside_qd, transpose=True)
+    separated = qd_to_numpy(separated_qd, transpose=True)
+
+    assert_allclose(closest[:3], ((1.0, 0.0, 0.0), (1.0, 0.0, 0.0), (1.0, 0.0, 0.0)), atol=1e-6)
+    assert_allclose(normals[:3], ((1.0, 0.0, 0.0), (1.0, 0.0, 0.0), (1.0, 0.0, 0.0)), atol=1e-6)
+    assert_allclose(projected[:2], ((1.2, 0.0, 0.0), (1.2, 0.0, 0.0)), atol=1e-6)
+    assert_allclose(projected[2], box_points[2], atol=1e-6)
+    assert_allclose(closest[5], (1.0, 2.0, 3.0), atol=1e-6)
+    assert_allclose(normals[5], np.sqrt(1.0 / 3.0) * np.ones(3), atol=1e-6)
+    assert_allclose(projected[5] - closest[5], particle_radius * normals[5], atol=1e-6)
+    assert_equal(inside, (True, False, False, False, False, False))
+    assert_equal(separated, (True, False))
+
+    with pytest.raises(gs.GenesisException, match="greater than"):
+        gs.options.PBSTFBoxStaticColliderOptions(
+            lower=(-1.0, -1.0, -1.0),
+            upper=(1.0, -1.0, 1.0),
+        )
 
     with pytest.raises(TypeError):
         StaticCollider()
@@ -743,7 +792,7 @@ def test_pbstf_cpp_drop_hits_cone_tip(show_viewer):
 
 @pytest.mark.required
 @pytest.mark.parametrize("backend", [gs.cuda])
-def test_mop_pushes_water_and_leaves_wave_traces(show_viewer):
+def test_mop_box_pushes_water(show_viewer):
     settings = case_settings(CASE_MOP)
     assert settings.mop is not None
     mop = settings.mop
@@ -753,6 +802,12 @@ def test_mop_pushes_water_and_leaves_wave_traces(show_viewer):
     assert mop_mesh.is_winding_consistent
     assert mop_mesh.volume > 0.0
     assert_allclose(mop_mesh.bounds, ((-0.6, 0.02, -2.2), (0.6, 0.85, 2.2)), atol=1e-8)
+    assert_allclose(mop_mesh.bounds, (mop.collider_lower, mop.collider_upper), atol=1e-8)
+    assert len(settings.static_colliders) == 2
+    assert all(
+        isinstance(collider_options, gs.options.PBSTFBoxStaticColliderOptions)
+        for collider_options in settings.static_colliders
+    )
 
     scene, (liquid,) = build_scene(case=CASE_MOP, show_viewer=show_viewer)
     mop_debug_object = draw_case_colliders(scene, CASE_MOP)
@@ -770,19 +825,14 @@ def test_mop_pushes_water_and_leaves_wave_traces(show_viewer):
         scene.step()
 
     positions = tensor_to_array(liquid.get_particles_pos())
-    bottom_height = 0.02 + 0.5 * (0.25 - 0.02) * (
-        1.0 + np.cos(2.0 * math.pi * 4 * (positions_initial[:, 2] / 4.4 + 0.5))
-    )
-    is_low_wave = bottom_height < 0.06
-    is_high_clearance = bottom_height > 0.21
-    displacement_x = np.abs(positions[:, 0] - positions_initial[:, 0])
-    is_in_initial_x_range = (positions[:, 0] >= mop.liquid_lower[0]) & (positions[:, 0] <= mop.liquid_upper[0])
+    displacement_x = positions[:, 0] - positions_initial[:, 0]
+    is_ahead_of_initial_water = positions[:, 0] > mop.liquid_upper[0]
 
     assert np.isfinite(positions).all()
     assert positions[:, 1].min() >= -1e-5
-    assert displacement_x[is_low_wave].mean() > displacement_x[is_high_clearance].mean() + 0.25
-    assert is_in_initial_x_range[is_high_clearance].mean() > is_in_initial_x_range[is_low_wave].mean() + 0.02
-    assert is_in_initial_x_range.sum() > liquid.n_particles // 2
+    assert displacement_x.mean() > 3.0
+    assert (displacement_x > 0.1).mean() > 0.99
+    assert is_ahead_of_initial_water.mean() > 2.0 / 3.0
 
 
 @pytest.mark.required

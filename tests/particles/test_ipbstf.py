@@ -18,10 +18,9 @@ def test_unilateral_density_energy(n_envs, show_viewer):
         ipbstf_options=gs.options.IPBSTFOptions(
             particle_size=0.1,
             static_colliders=[
-                gs.options.PBSTFConeStaticColliderOptions(
-                    center=(1.0, 0.0, 0.0),
-                    height=(0.0, 1.0, 0.0),
-                    radius=0.5,
+                gs.options.PBSTFBoxStaticColliderOptions(
+                    lower=(0.5, 0.0, -0.5),
+                    upper=(1.5, 1.0, 0.5),
                 ),
             ],
             lower_bound=(-2.0, -2.0, -2.0),
@@ -44,7 +43,7 @@ def test_unilateral_density_energy(n_envs, show_viewer):
     )
     collider_liquid = scene.add_entity(
         morph=gs.morphs.Particles(
-            positions=((1.0, -0.02, 0.0),),
+            positions=((1.0, 0.02, 0.0),),
         ),
         material=gs.materials.IPBSTF.Liquid(
             sampler="staggered",
