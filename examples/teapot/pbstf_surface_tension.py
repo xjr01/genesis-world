@@ -1,11 +1,13 @@
 import argparse
 import math
 import os
+import tempfile
 from typing import NamedTuple
 
 import numpy as np
 
 import genesis as gs
+import genesis.utils.geom as geom_utils
 import genesis.utils.mesh as mesh_utils
 
 if __package__:
@@ -39,17 +41,21 @@ __all__ = (
     "CASE_CONE",
     "CASE_CUBE",
     "CASE_MERGE",
+    "CASE_MOP",
     "CASE_TAP",
     "CASE_TEAPOT",
+    "MopSettings",
     "TeapotSettings",
     "add_case_entities",
     "build_scene",
     "case_settings",
     "draw_case_colliders",
+    "mop_pose",
     "sample_teapot_particles",
     "start_viewer_recording",
     "stop_viewer",
     "teapot_pose",
+    "update_mop_case",
     "update_rigid_teapot",
     "update_teapot_manipulator",
 )
@@ -58,9 +64,10 @@ CASE_CUBE = "cube"
 CASE_MERGE = "merge"
 CASE_BOUNCE = "bounce"
 CASE_CONE = "cone"
+CASE_MOP = "mop"
 CASE_TAP = "tap"
 CASE_TEAPOT = "teapot"
-CASES = (CASE_CUBE, CASE_MERGE, CASE_BOUNCE, CASE_CONE, CASE_TAP, CASE_TEAPOT)
+CASES = (CASE_CUBE, CASE_MERGE, CASE_BOUNCE, CASE_CONE, CASE_MOP, CASE_TAP, CASE_TEAPOT)
 
 DEFAULT_CASE_DT = 1.0 / 30.0
 
@@ -72,6 +79,20 @@ class TapEmitterSettings(NamedTuple):
     generation_speed: float
     initial_speed: float
     max_particles: int
+
+
+class MopSettings(NamedTuple):
+    asset: str
+    collider_idx: int
+    table_pos: tuple[float, float, float]
+    table_size: tuple[float, float, float]
+    liquid_lower: tuple[float, float, float]
+    liquid_upper: tuple[float, float, float]
+    start_pos: tuple[float, float, float]
+    end_pos: tuple[float, float, float]
+    quat: tuple[float, float, float, float]
+    settle_time: float
+    wipe_time: float
 
 
 class CaseSettings(NamedTuple):
@@ -90,6 +111,7 @@ class CaseSettings(NamedTuple):
     steps: int
     teapot: TeapotSettings | None
     emitter: TapEmitterSettings | None
+    mop: MopSettings | None = None
 
 
 def _liquid_material(
@@ -154,6 +176,19 @@ def _case_liquid_material(case):
             is_collider_adhesion_friction_enabled=True,
             collider_adhesion_compliance=20.0,
             collider_friction=0.01,
+        )
+    if case == CASE_MOP:
+        return _liquid_material(
+            sampler="regular",
+            density_compliance=150.0,
+            surface_tension_compliance=1.0,
+            surface_distance_compliance=40.0,
+            interior_distance_compliance=180.0,
+            surface_viscosity=0.5,
+            interior_viscosity=0.5,
+            is_collider_adhesion_friction_enabled=True,
+            collider_adhesion_compliance=3.0,
+            collider_friction=0.1,
         )
     return _liquid_material()
 
@@ -236,6 +271,46 @@ def case_settings(case):
             steps=300,
             teapot=None,
             emitter=None,
+        )
+    if case == CASE_MOP:
+        mop = MopSettings(
+            asset="meshes/mop.obj",
+            collider_idx=1,
+            table_pos=(0.0, -0.25, 0.0),
+            table_size=(12.0, 0.5, 8.0),
+            liquid_lower=(-2.5, 0.05, -2.0),
+            liquid_upper=(2.5, 0.35, 2.0),
+            start_pos=(-3.5, 0.0, 0.0),
+            end_pos=(3.5, 0.0, 0.0),
+            quat=(1.0, 0.0, 0.0, 0.0),
+            settle_time=2.5,
+            wipe_time=5.0,
+        )
+        return CaseSettings(
+            scale=20,
+            dt=0.01,
+            gravity=(0.0, -9.8, 0.0),
+            lower_bound=(-6.0, -1.0, -4.0),
+            upper_bound=(6.0, 4.0, 4.0),
+            camera_pos=(8.0, 6.0, 9.0),
+            camera_lookat=(0.0, 0.4, 0.0),
+            static_colliders=(
+                gs.options.PBSTFMeshStaticColliderOptions(
+                    pos=mop.start_pos,
+                    quat=mop.quat,
+                    file=mop.asset,
+                    scale=1.0,
+                    sdf_res=128,
+                ),
+            ),
+            max_solver_iterations=20,
+            max_surface_neighbors=128,
+            max_localmesh_neighbors=64,
+            enable_pca_normals=False,
+            steps=1000,
+            teapot=None,
+            emitter=None,
+            mop=mop,
         )
     if case == CASE_TAP:
         return CaseSettings(
@@ -343,6 +418,19 @@ def add_case_entities(scene, case, particle_size, settings, material_factory):
         )
         return ((liquid, (0.0, -4.0, 0.0)),)
 
+    if case == CASE_MOP:
+        mop = settings.mop
+        if mop is None:
+            gs.raise_exception("The mop case requires mop settings.")
+        liquid = scene.add_entity(
+            morph=gs.morphs.Box(
+                lower=mop.liquid_lower,
+                upper=mop.liquid_upper,
+            ),
+            material=material_factory(case),
+        )
+        return ((liquid, None),)
+
     if case == CASE_TAP:
         emitter_settings = settings.emitter
         if emitter_settings is None:
@@ -368,27 +456,57 @@ def add_case_entities(scene, case, particle_size, settings, material_factory):
     raise ValueError(f"Unknown PBSTF example case: {case}")
 
 
-def draw_case_colliders(scene, case):
-    if case != CASE_CONE:
-        return
+def mop_pose(time, settings):
+    """Return the mop translation along its single wiping stroke."""
+    progress = min(max((time - settings.settle_time) / settings.wipe_time, 0.0), 1.0)
+    return tuple(
+        settings.start_pos[axis] + progress * (settings.end_pos[axis] - settings.start_pos[axis]) for axis in range(3)
+    )
 
-    cone = mesh_utils.create_cone(
-        radius=5.0 * math.sqrt(3.0),
-        height=5.0,
-        sections=96,
-        color=(0.35, 0.38, 0.42, 1.0),
-    )
-    transform = np.eye(4, dtype=np.float32)
-    transform[:3, :3] = np.array(
-        (
-            (1.0, 0.0, 0.0),
-            (0.0, 0.0, 1.0),
-            (0.0, -1.0, 0.0),
-        ),
-        dtype=np.float32,
-    )
-    transform[:3, 3] = (0.0, -7.0, 0.0)
-    scene.draw_debug_mesh(cone, T=transform)
+
+def update_mop_case(solver, time, settings):
+    """Move the one-way mop collider and return its current position."""
+    pos = mop_pose(time, settings)
+    solver.set_static_colliders_pose(pos=pos, quat=settings.quat, colliders_idx=settings.collider_idx)
+    return pos
+
+
+def draw_case_colliders(scene, case):
+    if case == CASE_CONE:
+        cone = mesh_utils.create_cone(
+            radius=5.0 * math.sqrt(3.0),
+            height=5.0,
+            sections=96,
+            color=(0.35, 0.38, 0.42, 1.0),
+        )
+        transform = np.eye(4, dtype=np.float32)
+        transform[:3, :3] = np.array(
+            (
+                (1.0, 0.0, 0.0),
+                (0.0, 0.0, 1.0),
+                (0.0, -1.0, 0.0),
+            ),
+            dtype=np.float32,
+        )
+        transform[:3, 3] = (0.0, -7.0, 0.0)
+        scene.draw_debug_mesh(cone, T=transform)
+        return None
+
+    if case == CASE_MOP:
+        mop = case_settings(case).mop
+        if mop is None:
+            gs.raise_exception("The mop case requires mop settings.")
+        table_mesh = mesh_utils.create_box(extents=mop.table_size, color=(0.36, 0.24, 0.14, 1.0))
+        table_transform = geom_utils.trans_quat_to_T(np.array(mop.table_pos), np.array(mop.quat))
+        scene.draw_debug_mesh(table_mesh, T=table_transform)
+        mop_mesh = mesh_utils.load_mesh(os.path.join(gs.utils.get_assets_dir(), mop.asset)).copy()
+        mop_mesh.visual.vertex_colors = np.tile(
+            mesh_utils.color_f32_to_u8((0.85, 0.2, 0.08, 0.35)), (len(mop_mesh.vertices), 1)
+        )
+        mop_transform = geom_utils.trans_quat_to_T(np.array(mop_pose(0.0, mop)), np.array(mop.quat))
+        return scene.draw_debug_mesh(mop_mesh, T=mop_transform)
+
+    return None
 
 
 def start_viewer_recording(scene, is_recording):
@@ -405,7 +523,7 @@ def stop_viewer(scene, is_viewer_shown):
 
 
 def build_scene(case=CASE_CUBE, scale=None, show_viewer=False, dt=None):
-    """Build one of the C++ position-based surface-tension flow reference cases."""
+    """Build a position-based surface-tension flow example scene."""
     settings = case_settings(case)
     if scale is None:
         scale = settings.scale
@@ -421,50 +539,72 @@ def build_scene(case=CASE_CUBE, scale=None, show_viewer=False, dt=None):
     if dt <= 0.0:
         raise ValueError("PBSTF time step must be positive")
     particle_size = 2.0 / scale
-    scene = gs.Scene(
-        sim_options=gs.options.SimOptions(
-            dt=dt,
-            gravity=settings.gravity,
-        ),
-        rigid_options=(
-            gs.options.RigidOptions(
-                enable_collision=False,
-                disable_constraint=True,
+    static_colliders = list(settings.static_colliders)
+    table_mesh_path = None
+    try:
+        if settings.mop is not None:
+            table_mesh = mesh_utils.create_box(extents=settings.mop.table_size)
+            with tempfile.NamedTemporaryFile(suffix=".obj", delete=False) as table_mesh_file:
+                table_mesh_path = table_mesh_file.name
+            table_mesh.export(table_mesh_path)
+            static_colliders.insert(
+                0,
+                gs.options.PBSTFMeshStaticColliderOptions(
+                    pos=settings.mop.table_pos,
+                    quat=settings.mop.quat,
+                    file=table_mesh_path,
+                    scale=1.0,
+                    sdf_res=64,
+                ),
             )
-            if case == CASE_TEAPOT
-            else None
-        ),
-        pbstf_options=gs.options.PBSTFOptions(
-            particle_size=particle_size,
-            lower_bound=settings.lower_bound,
-            upper_bound=settings.upper_bound,
-            max_solver_iterations=settings.max_solver_iterations,
-            topology_rebuild_interval=10,
-            max_surface_neighbors=settings.max_surface_neighbors,
-            max_localmesh_neighbors=settings.max_localmesh_neighbors,
-            enable_pca_normals=settings.enable_pca_normals,
-            static_colliders=list(settings.static_colliders),
-        ),
-        viewer_options=gs.options.ViewerOptions(
-            refresh_rate=round(1.0 / dt),
-            camera_pos=settings.camera_pos,
-            camera_lookat=settings.camera_lookat,
-            camera_up=(0.0, 1.0, 0.0),
-            camera_fov=40,
-        ),
-        show_viewer=show_viewer,
-    )
-    entities_and_velocities = add_case_entities(scene, case, particle_size, settings, _case_liquid_material)
-    scene.build()
-    for entity, velocity in entities_and_velocities:
-        if velocity is not None:
-            entity.set_particles_vel(velocity)
-    if settings.teapot is not None:
-        initialize_teapot_manipulator(scene, settings.teapot)
-    if show_viewer:
-        draw_case_colliders(scene, case)
 
-    return scene, tuple(entity for entity, _ in entities_and_velocities)
+        scene = gs.Scene(
+            sim_options=gs.options.SimOptions(
+                dt=dt,
+                gravity=settings.gravity,
+            ),
+            rigid_options=(
+                gs.options.RigidOptions(
+                    enable_collision=False,
+                    disable_constraint=True,
+                )
+                if case == CASE_TEAPOT
+                else None
+            ),
+            pbstf_options=gs.options.PBSTFOptions(
+                particle_size=particle_size,
+                lower_bound=settings.lower_bound,
+                upper_bound=settings.upper_bound,
+                max_solver_iterations=settings.max_solver_iterations,
+                topology_rebuild_interval=10,
+                max_surface_neighbors=settings.max_surface_neighbors,
+                max_localmesh_neighbors=settings.max_localmesh_neighbors,
+                enable_pca_normals=settings.enable_pca_normals,
+                static_colliders=static_colliders,
+            ),
+            viewer_options=gs.options.ViewerOptions(
+                refresh_rate=round(1.0 / dt),
+                camera_pos=settings.camera_pos,
+                camera_lookat=settings.camera_lookat,
+                camera_up=(0.0, 1.0, 0.0),
+                camera_fov=40,
+            ),
+            show_viewer=show_viewer,
+        )
+        entities_and_velocities = add_case_entities(scene, case, particle_size, settings, _case_liquid_material)
+        scene.build()
+        for entity, velocity in entities_and_velocities:
+            if velocity is not None:
+                entity.set_particles_vel(velocity)
+        if settings.teapot is not None:
+            initialize_teapot_manipulator(scene, settings.teapot)
+        if show_viewer:
+            draw_case_colliders(scene, case)
+
+        return scene, tuple(entity for entity, _ in entities_and_velocities)
+    finally:
+        if table_mesh_path is not None:
+            os.remove(table_mesh_path)
 
 
 def main():
@@ -495,8 +635,16 @@ def main():
     scene, _ = build_scene(case=args.case, scale=args.scale, show_viewer=is_viewer_shown, dt=args.dt)
     teapot_settings = settings.teapot
     emitter_settings = settings.emitter
+    mop_settings = settings.mop
     emitter = scene.emitters[0] if emitter_settings is not None else None
     teapot = scene.get_entity(name=teapot_settings.entity_name) if teapot_settings is not None else None
+    if mop_settings is not None and is_viewer_shown:
+        scene.clear_debug_objects()
+        mop_debug_object = draw_case_colliders(scene, args.case)
+        mop_debug_transform = geom_utils.trans_quat_to_T(np.zeros(3), np.array(mop_settings.quat))
+    else:
+        mop_debug_object = None
+        mop_debug_transform = None
     if teapot_settings is None:
         kuka = None
         kuka_qpos = None
@@ -529,6 +677,11 @@ def main():
                     teapot_settings,
                     kuka_qpos,
                 )
+            if mop_settings is not None:
+                mop_pos = update_mop_case(scene.pbstf_solver, scene.cur_t, mop_settings)
+                if mop_debug_object is not None:
+                    mop_debug_transform[:3, 3] = mop_pos
+                    scene.update_debug_objects((mop_debug_object,), (mop_debug_transform,))
             scene.step()
     finally:
         stop_viewer(scene, is_viewer_shown)

@@ -5,19 +5,23 @@ import numpy as np
 import pytest
 
 import igl
-import quadrants as qd
 import trimesh
+
+import quadrants as qd
 
 from examples.teapot.pbstf_surface_tension import (
     CASE_BOUNCE,
     CASE_CONE,
     CASE_MERGE,
+    CASE_MOP,
     CASE_TAP,
     CASE_TEAPOT,
     CASES,
     build_scene,
     case_settings,
+    draw_case_colliders,
     teapot_pose,
+    update_mop_case,
     update_teapot_manipulator,
 )
 import genesis as gs
@@ -290,8 +294,8 @@ def test_teapot_initial_particles_pose_and_case_time_steps():
     assert particles[:, 2].max() > 5.0
     for case in CASES:
         settings = case_settings(case)
-        expected_scale = 20 if case in (CASE_TAP, CASE_TEAPOT) else 10
-        expected_dt = 0.01 if case == CASE_TEAPOT else 1.0 / 30.0
+        expected_scale = 20 if case in (CASE_MOP, CASE_TAP, CASE_TEAPOT) else 10
+        expected_dt = 0.01 if case in (CASE_MOP, CASE_TEAPOT) else 1.0 / 30.0
         assert_equal(settings.scale, expected_scale)
         assert_equal(settings.dt, expected_dt)
     for time, angle_degrees in ((0.0, 0.0), (18.0, 27.0), (28.0, 27.0), (29.6, 19.0), (35.0, 19.0)):
@@ -723,6 +727,50 @@ def test_pbstf_cpp_drop_hits_cone_tip(show_viewer):
     assert hit_cone
     assert rebounded
     assert topology_valid[on_surface].all()
+
+
+@pytest.mark.required
+@pytest.mark.parametrize("backend", [gs.cuda])
+def test_mop_pushes_water_and_leaves_wave_traces(show_viewer):
+    settings = case_settings(CASE_MOP)
+    assert settings.mop is not None
+    mop = settings.mop
+    mop_mesh = mesh_utils.load_mesh(os.path.join(gs.utils.get_assets_dir(), mop.asset))
+
+    assert mop_mesh.is_watertight
+    assert mop_mesh.is_winding_consistent
+    assert mop_mesh.volume > 0.0
+    assert_allclose(mop_mesh.bounds, ((-0.6, 0.02, -2.2), (0.6, 0.85, 2.2)), atol=1e-8)
+
+    scene, (liquid,) = build_scene(case=CASE_MOP, show_viewer=show_viewer)
+    mop_debug_object = draw_case_colliders(scene, CASE_MOP)
+    mop_debug_transform = geom_utils.trans_quat_to_T(np.array(mop.start_pos), np.array(mop.quat))
+    scene.update_debug_objects((mop_debug_object,), (mop_debug_transform,))
+    positions_initial = tensor_to_array(liquid.get_particles_pos())
+    assert liquid.n_particles == 6000
+    assert liquid.material.collider_friction == 0.1
+
+    for _ in range(5):
+        scene.step()
+    for step_idx in range(70):
+        time = mop.settle_time + mop.wipe_time * step_idx / 69
+        update_mop_case(scene.pbstf_solver, time, mop)
+        scene.step()
+
+    positions = tensor_to_array(liquid.get_particles_pos())
+    bottom_height = 0.02 + 0.5 * (0.25 - 0.02) * (
+        1.0 + np.cos(2.0 * math.pi * 4 * (positions_initial[:, 2] / 4.4 + 0.5))
+    )
+    is_low_wave = bottom_height < 0.06
+    is_high_clearance = bottom_height > 0.21
+    displacement_x = np.abs(positions[:, 0] - positions_initial[:, 0])
+    is_in_initial_x_range = (positions[:, 0] >= mop.liquid_lower[0]) & (positions[:, 0] <= mop.liquid_upper[0])
+
+    assert np.isfinite(positions).all()
+    assert positions[:, 1].min() >= -1e-5
+    assert displacement_x[is_low_wave].mean() > displacement_x[is_high_clearance].mean() + 0.25
+    assert is_in_initial_x_range[is_high_clearance].mean() > is_in_initial_x_range[is_low_wave].mean() + 0.02
+    assert is_in_initial_x_range.sum() > liquid.n_particles // 2
 
 
 @pytest.mark.required
