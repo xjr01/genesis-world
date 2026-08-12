@@ -187,7 +187,7 @@ def _case_liquid_material(case):
             surface_viscosity=0.5,
             interior_viscosity=0.5,
             is_collider_adhesion_friction_enabled=True,
-            collider_adhesion_compliance=3.0,
+            collider_adhesion_compliance=20.0,
             collider_friction=0.1,
         )
     return _liquid_material()

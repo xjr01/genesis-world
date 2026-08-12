@@ -307,12 +307,38 @@ def query_static_collider(collider_idx, env_idx, pos, colliders_pos, colliders_q
 
 
 @qd.func
-def project_out_static_collider(collider_idx, env_idx, pos, colliders_pos, colliders_quat, collider: qd.template()):
-    closest, _, is_inside, _ = query_static_collider(
+def query_static_collider_contact(
+    collider_idx,
+    env_idx,
+    pos,
+    particle_radius,
+    colliders_pos,
+    colliders_quat,
+    collider: qd.template(),
+):
+    closest, normal, is_inside, surface_distance = query_static_collider(
         collider_idx, env_idx, pos, colliders_pos, colliders_quat, collider
     )
-    if is_inside:
-        pos = closest
+    anchor = closest + particle_radius * normal
+    is_penetrating = is_inside or surface_distance < particle_radius
+    return anchor, normal, is_penetrating, surface_distance
+
+
+@qd.func
+def project_out_static_collider(
+    collider_idx,
+    env_idx,
+    pos,
+    particle_radius,
+    colliders_pos,
+    colliders_quat,
+    collider: qd.template(),
+):
+    anchor, _, is_penetrating, _ = query_static_collider_contact(
+        collider_idx, env_idx, pos, particle_radius, colliders_pos, colliders_quat, collider
+    )
+    if is_penetrating:
+        pos = anchor
     return pos
 
 
@@ -350,5 +376,6 @@ __all__ = [
     "create_static_collider",
     "project_out_static_collider",
     "query_static_collider",
+    "query_static_collider_contact",
     "static_collider_separates",
 ]

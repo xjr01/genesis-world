@@ -12,6 +12,7 @@ from genesis.engine.boundaries import (
     create_static_collider,
     project_out_static_collider,
     query_static_collider,
+    query_static_collider_contact,
     static_collider_separates,
 )
 from genesis.engine.entities import PBSTFEntity
@@ -314,6 +315,7 @@ class PBSTFSolver(Solver):
                 collider_idx,
                 env_idx,
                 pos,
+                self._particle_radius,
                 self._static_colliders_pos,
                 self._static_colliders_quat,
                 self._static_colliders[collider_idx],
@@ -998,19 +1000,22 @@ class PBSTFSolver(Solver):
                 pos = self.particles_reordered[i, i_b].pos
                 mass = self.particles_info_reordered[i, i_b].mass
                 for collider_idx in qd.static(range(self._n_static_colliders)):
-                    closest, normal, _, surface_distance = query_static_collider(
+                    anchor, normal, _, surface_distance = query_static_collider_contact(
                         collider_idx,
                         i_b,
                         pos,
+                        self._particle_radius,
                         self._static_colliders_pos,
                         self._static_colliders_quat,
                         self._static_colliders[collider_idx],
                     )
-                    if surface_distance <= self._particle_radius:
-                        constraint = (pos - closest).dot(normal)
-                        denominator = self._material.collider_adhesion_compliance / self._default_mass + 1.0 / mass
-                        if denominator > gs.EPS:
-                            self.particles_reordered[i, i_b].dpos += -constraint / denominator / mass * normal
+                    if surface_distance <= 2.0 * self._particle_radius:
+                        anchor_delta = pos - anchor
+                        if anchor_delta.dot(anchor_delta) <= self._particle_radius * self._particle_radius:
+                            constraint = anchor_delta.dot(normal)
+                            denominator = self._material.collider_adhesion_compliance / self._default_mass + 1.0 / mass
+                            if denominator > gs.EPS:
+                                self.particles_reordered[i, i_b].dpos += -constraint / denominator / mass * normal
 
     @qd.kernel
     def _kernel_apply_position_delta(self):

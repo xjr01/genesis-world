@@ -43,6 +43,7 @@ from tests.utils import assert_allclose, assert_equal
 @pytest.mark.parametrize("backend", [gs.cuda])
 def test_cone_static_collider_geometry():
     collider = ConeStaticCollider(center=(0.0, 0.0, 0.0), height=(0.0, 2.0, 0.0), radius=2.0)
+    particle_radius = 0.2
     points = np.array(
         [
             (0.5, 1.0, 0.0),
@@ -69,6 +70,7 @@ def test_cone_static_collider_geometry():
 
     @qd.kernel
     def run(
+        particle_radius: float,
         points_field: qd.template(),
         closest_field: qd.template(),
         normals_field: qd.template(),
@@ -86,17 +88,18 @@ def test_cone_static_collider_geometry():
             closest_field[i] = closest
             normals_field[i] = normal
             projected_field[i] = project_out_static_collider(
-                0, 0, points_field[i], colliders_pos, colliders_quat, collider_geometry
+                0, 0, points_field[i], particle_radius, colliders_pos, colliders_quat, collider_geometry
             )
             inside_field[i] = is_inside
         separated_field[0] = static_collider_separates(
-            0, 0, points_field[3], points_field[4], 0.2, colliders_pos, colliders_quat, collider_geometry
+            0, 0, points_field[3], points_field[4], particle_radius, colliders_pos, colliders_quat, collider_geometry
         )
         separated_field[1] = static_collider_separates(
-            0, 0, points_field[4], points_field[5], 0.2, colliders_pos, colliders_quat, collider_geometry
+            0, 0, points_field[4], points_field[5], particle_radius, colliders_pos, colliders_quat, collider_geometry
         )
 
     run(
+        particle_radius,
         points_qd,
         closest_qd,
         normals_qd,
@@ -119,8 +122,9 @@ def test_cone_static_collider_geometry():
     assert_allclose(closest[2], (0.25, 0.0, 0.0), atol=1e-5)
     assert_allclose(normals[0], np.sqrt(0.5) * np.array((1.0, 1.0, 0.0)), atol=1e-5)
     assert_allclose(normals[2], (0.0, -1.0, 0.0), atol=1e-5)
-    assert_allclose(projected[0], closest[0], atol=1e-5)
-    assert_allclose(projected[1:], points[1:], atol=1e-5)
+    assert_allclose(projected[0] - closest[0], particle_radius * normals[0], atol=1e-5)
+    assert_allclose(projected[1:3], points[1:3], atol=1e-5)
+    assert_allclose(projected[3:] - closest[3:], particle_radius * normals[3:], atol=1e-5)
     assert_equal(inside, (True, False, False, False, False, False))
     assert_equal(separated, (True, False))
 
@@ -206,7 +210,9 @@ def test_mesh_static_collider_pose(asset_tmp_path, n_envs, show_viewer):
 
 @pytest.mark.required
 @pytest.mark.parametrize("backend", [gs.cuda])
-def test_static_collider_adhesion_and_friction(show_viewer):
+def test_static_collider_adhesion_and_friction(asset_tmp_path, show_viewer):
+    mesh_path = asset_tmp_path / "pbstf_adhesion_remote_box.obj"
+    trimesh.creation.box().export(mesh_path)
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
             dt=1e-3,
@@ -224,13 +230,18 @@ def test_static_collider_adhesion_and_friction(show_viewer):
                     height=(0.0, 2.0, 0.0),
                     radius=2.0,
                 ),
+                gs.options.PBSTFMeshStaticColliderOptions(
+                    pos=(3.0, 0.0, 0.0),
+                    file=str(mesh_path),
+                    sdf_res=16,
+                ),
             ],
         ),
         show_viewer=show_viewer,
     )
     liquid = scene.add_entity(
         morph=gs.morphs.Particles(
-            positions=((0.0, -0.05, 0.0),),
+            positions=((0.0, -0.05, 0.0), (0.0, -0.15, 0.0)),
         ),
         material=gs.materials.PBSTF.Liquid(
             sampler="regular",
@@ -246,10 +257,11 @@ def test_static_collider_adhesion_and_friction(show_viewer):
     solver.particles_reordered.dpos.fill(0.0)
     solver.on_surface.fill(True)
     solver._kernel_apply_static_collider_adhesion()
-    adhesion_delta = qd_to_numpy(solver.particles_reordered.dpos, transpose=True)[0, 0]
-    mass = qd_to_numpy(solver.particles_info_reordered.mass, transpose=True)[0, 0]
+    adhesion_delta = qd_to_numpy(solver.particles_reordered.dpos, transpose=True)[0]
+    mass = qd_to_numpy(solver.particles_info_reordered.mass, transpose=True)[0]
     denominator = liquid.material.collider_adhesion_compliance / solver._default_mass + 1.0 / mass
-    expected_adhesion_delta = np.array((0.0, 0.05 / denominator / mass, 0.0))
+    expected_adhesion_delta = np.zeros_like(adhesion_delta)
+    expected_adhesion_delta[:, 1] = np.array((-0.05, 0.05)) / denominator / mass
     assert_allclose(adhesion_delta, expected_adhesion_delta, atol=1e-6)
 
     liquid.set_particles_vel((1.0, 1.0, 0.0))
@@ -257,8 +269,8 @@ def test_static_collider_adhesion_and_friction(show_viewer):
     solver.particles_reordered.dpos.fill(0.0)
     solver.particles_reordered.surface.fill(True)
     solver._kernel_apply_viscosity()
-    velocity = qd_to_numpy(solver.particles_reordered.vel, transpose=True)[0, 0]
-    assert_allclose(velocity, (0.75, 1.0, 0.0), atol=1e-6)
+    velocity = qd_to_numpy(solver.particles_reordered.vel, transpose=True)[0]
+    assert_allclose(velocity, ((0.75, 1.0, 0.0), (1.0, 1.0, 0.0)), atol=1e-6)
 
 
 @pytest.mark.required
