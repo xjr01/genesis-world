@@ -757,8 +757,8 @@ class PBSTFStaticColliderOptions(Options):
     """Base pose options for one-way PBSTF colliders.
 
     The pose can change after scene construction through
-    :meth:`PBSTFSolver.set_static_colliders_pose`. The collider remains one-way: it affects the liquid and receives no
-    force or velocity response from it.
+    :meth:`PBSTFSolver.set_static_colliders_pose`. The collider remains one-way: it affects simulated particles and
+    receives no force or velocity response from them.
     """
 
     pos: Vec3FType = (0.0, 0.0, 0.0)

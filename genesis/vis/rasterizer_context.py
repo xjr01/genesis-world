@@ -779,6 +779,24 @@ class RasterizerContext:
                         tfs = np.tile(np.eye(4), (entity.n_particles, 1, 1))
                         tfs[:, :3, 3] = entity.init_particles
                         self.add_static_node(entity, pyrender.Mesh.from_trimesh(mesh, smooth=True, poses=tfs), i_b=idx)
+                elif entity.surface.vis_mode == "visual" and isinstance(
+                    entity.material, gs.materials.PBSTF.PorousElastic
+                ):
+                    entity.vmesh.trimesh.visual = mu.surface_uvs_to_trimesh_visual(
+                        entity.surface,
+                        uvs=entity.vmesh.uvs,
+                        n_verts=len(entity.vmesh.trimesh.vertices),
+                    )
+                    for idx in self.rendered_envs_idx:
+                        self.add_static_node(
+                            entity,
+                            pyrender.Mesh.from_trimesh(
+                                entity.vmesh.trimesh,
+                                smooth=entity.surface.smooth,
+                                double_sided=entity.surface.double_sided,
+                            ),
+                            i_b=idx,
+                        )
 
     def update_pbstf(self):
         for solver in (self.sim.pbstf_solver, self.sim.ipbstf_solver):
@@ -787,6 +805,11 @@ class RasterizerContext:
             particles_all = qd_to_numpy(solver.particles_render.pos, transpose=True)
             particles_all = particles_all + self.scene.envs_offset[:, None, :]
             active_all = qd_to_numpy(solver.particles_render.active, transpose=True)
+            if solver is self.sim.pbstf_solver and solver.n_vverts > 0:
+                vverts_all = qd_to_numpy(solver.vverts_render.pos, transpose=True)
+                vverts_all = vverts_all + self.scene.envs_offset[:, None, :]
+            else:
+                vverts_all = None
             for entity in solver.entities:
                 for idx in self.rendered_envs_idx:
                     if entity.surface.vis_mode == "recon":
@@ -804,6 +827,16 @@ class RasterizerContext:
                         tfs[:, :3, 3] = particles_all[idx, entity.particle_start : entity.particle_end]
                         node = self.static_nodes[(idx, entity.uid)]
                         self.jit.update_buffer(node, "model", tfs.transpose((0, 2, 1)))
+                    elif entity.surface.vis_mode == "visual" and isinstance(
+                        entity.material, gs.materials.PBSTF.PorousElastic
+                    ):
+                        vverts = vverts_all[idx, entity.vvert_start : entity.vvert_end]
+                        node = self.static_nodes[(idx, entity.uid)]
+                        update_data = self._scene.reorder_vertices(node, vverts.astype(np.float32))
+                        self.jit.update_buffer(node, "pos", update_data)
+                        normal_data = self.jit.update_normal(node, update_data)
+                        if normal_data is not None:
+                            self.jit.update_buffer(node, "normal", normal_data)
 
     def on_pbd(self):
         if self.sim.pbd_solver.is_active:

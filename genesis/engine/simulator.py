@@ -298,6 +298,8 @@ class Simulator(RBC):
             self.rigid_solver.check_errno()
         if self.ipbstf_solver.is_active and self._cur_substep_global % RATE_CHECK_ERRNO == 0:
             self.ipbstf_solver.check_errno()
+        if self.pbstf_solver.is_active and self._cur_substep_global % RATE_CHECK_ERRNO == 0:
+            self.pbstf_solver.check_errno()
 
         if self._rigid_only and not self._requires_grad:  # "Only Advance!" --Thomas Wade :P
             for _ in range(self._substeps):

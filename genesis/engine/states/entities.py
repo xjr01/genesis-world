@@ -148,6 +148,40 @@ class PBSTFEntityState(SPHEntityState):
     """Dynamic state queried from a genesis PBSTFEntity."""
 
 
+class PBSTFPorousEntityState(SPHEntityState):
+    """Dynamic state queried from a position-based surface-tension fluid (PBSTF) porous elastic entity."""
+
+    def __init__(self, entity, s_global):
+        super().__init__(entity, s_global)
+        self._active = gs.zeros(
+            (self.entity.sim._B, self._entity.n_particles),
+            dtype=gs.tc_bool,
+            requires_grad=False,
+            scene=self._entity.scene,
+        )
+        self._is_fixed = gs.zeros(
+            (self.entity.sim._B, self._entity.n_particles),
+            dtype=gs.tc_bool,
+            requires_grad=False,
+            scene=self._entity.scene,
+        )
+
+    def serializable(self):
+        self._entity = None
+        self._pos = self._pos.detach()
+        self._vel = self._vel.detach()
+        self._active = self._active.detach()
+        self._is_fixed = self._is_fixed.detach()
+
+    @property
+    def active(self):
+        return self._active
+
+    @property
+    def is_fixed(self):
+        return self._is_fixed
+
+
 class FEMEntityState:
     """
     Dynamic state queried from a genesis FEMEntity.

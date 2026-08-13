@@ -243,17 +243,19 @@ class SPHSolverState:
 
 
 class _ParticleFluidSolverState:
-    def __init__(self, scene, solver):
+    def __init__(self, scene, solver, n_particles=None):
         self._scene = scene
+        if n_particles is None:
+            n_particles = solver.n_particles
         args = {
             "dtype": gs.tc_float,
             "requires_grad": False,
             "scene": scene,
         }
-        self._pos = gs.zeros((scene.sim._B, solver.n_particles, 3), **args)
-        self._vel = gs.zeros((scene.sim._B, solver.n_particles, 3), **args)
+        self._pos = gs.zeros((scene.sim._B, n_particles, 3), **args)
+        self._vel = gs.zeros((scene.sim._B, n_particles, 3), **args)
         args["dtype"] = gs.tc_bool
-        self._active = gs.zeros((scene.sim._B, solver.n_particles), **args)
+        self._active = gs.zeros((scene.sim._B, n_particles), **args)
 
     def serializable(self):
         self._scene = None
@@ -289,7 +291,55 @@ class PBSTFSolverState(_ParticleFluidSolverState):
     """Dynamic state queried from a PBSTFSolver."""
 
     def __init__(self, scene):
-        super().__init__(scene, scene.sim.pbstf_solver)
+        solver = scene.sim.pbstf_solver
+        super().__init__(scene, solver, solver.n_fluid_particles)
+        self._porous_pos = gs.zeros(
+            (scene.sim._B, solver.n_porous_particles, 3),
+            dtype=gs.tc_float,
+            requires_grad=False,
+            scene=scene,
+        )
+        self._porous_vel = gs.zeros(
+            (scene.sim._B, solver.n_porous_particles, 3),
+            dtype=gs.tc_float,
+            requires_grad=False,
+            scene=scene,
+        )
+        self._porous_active = gs.zeros(
+            (scene.sim._B, solver.n_porous_particles),
+            dtype=gs.tc_bool,
+            requires_grad=False,
+            scene=scene,
+        )
+        self._porous_is_fixed = gs.zeros(
+            (scene.sim._B, solver.n_porous_particles),
+            dtype=gs.tc_bool,
+            requires_grad=False,
+            scene=scene,
+        )
+
+    def serializable(self):
+        super().serializable()
+        self._porous_pos = self._porous_pos.detach()
+        self._porous_vel = self._porous_vel.detach()
+        self._porous_active = self._porous_active.detach()
+        self._porous_is_fixed = self._porous_is_fixed.detach()
+
+    @property
+    def porous_pos(self):
+        return self._porous_pos
+
+    @property
+    def porous_vel(self):
+        return self._porous_vel
+
+    @property
+    def porous_active(self):
+        return self._porous_active
+
+    @property
+    def porous_is_fixed(self):
+        return self._porous_is_fixed
 
 
 class PBDSolverState:
