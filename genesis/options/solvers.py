@@ -806,21 +806,54 @@ PBSTFStaticColliderOptionsType = Annotated[
 class IPBSTFOptions(Options):
     """Options for the implicit position-based surface-tension fluid (IPBSTF) solver's density energy.
 
-    ``alpha`` weights inertia against the density energy. Larger values keep particles closer to their unconstrained
-    predictions and produce a softer density response; smaller values enforce incompressibility more strongly at the
-    cost of larger Newton updates. ``hessian_determinant_epsilon`` skips local updates with smaller Hessian
-    determinants. Larger values reject more numerically weak solves but may suppress valid updates; smaller values
-    preserve more updates with less protection from roundoff amplification. ``max_solver_iterations`` controls
-    convergence work without changing that energy.
+    ``alpha`` weights inertia against the density energy. Zero gives the stiffest density response and permits pressure
+    corrections to inject kinetic energy; larger values keep particles closer to their unconstrained predictions but
+    allow more compression. ``is_damping_enabled`` removes excess kinetic energy using one additional softer local
+    solve on the final iteration. This costs another local solve per substep and helps stiff fluids settle while
+    preserving inertial motion; disabling it exposes the raw pressure-correction energy. ``damping_alpha`` controls
+    that reference solve: larger values reject more pressure-created motion, while smaller values retain more energetic
+    splashes.
+    ``damping_beta`` controls how far the stiff and reference positions may differ before damping is withheld. Larger
+    values damp a wider range of corrections, while smaller values preserve more impacts at the cost of residual energy.
+    ``damping_velocity_scale`` enables damping when the fluid's mass-weighted root-mean-square one-step travel is below
+    this fraction of the support radius. Larger values settle motion sooner but weaken energetic splashes; smaller
+    values retain motion longer at the cost of residual jitter.
+    ``density_update_fraction`` controls how quickly compressed regions recover volume. Larger values converge faster
+    but can create energetic expansion when neighboring particles move together; smaller values keep pressure motion
+    coherent at the cost of more residual compression per iteration. ``surface_update_scale`` controls the correction
+    limit for particles without local compression. Larger values preserve fine splashes and interface response but can
+    create isolated high-speed particles; smaller values suppress spray at the cost of sluggish thin flows.
+
+    ``particle_size`` is the particle diameter and nominal nearest-neighbor spacing. ``support_radius`` defaults to
+    twice that size. Larger radii use more neighbors for a smoother, more coherent density estimate at higher runtime
+    cost; smaller radii preserve local detail but sparse neighborhoods can produce uneven pressure corrections.
+    ``hessian_determinant_epsilon`` controls when numerically weak corrections are skipped. Larger values reject more
+    weak solves but may suppress valid updates; smaller values retain more updates with less protection from roundoff
+    amplification. Every iteration backtracks the relaxed parallel update until the complete variational energy
+    strictly decreases, which costs up to 24 density evaluations but prevents a local solve from increasing the
+    global objective. More ``max_solver_iterations`` reduce compression at additional runtime cost, while limited
+    stiff solves retain more density error and pressure-correction energy.
+
+    ``lower_bound`` and ``upper_bound`` define the domain used for sampling and neighborhood queries.
+    ``collision_lower_bound`` and ``collision_upper_bound`` default to that domain and may define a tighter axis-aligned
+    container, allowing fixed boundary particles to occupy padding outside its walls while liquid positions remain
+    inside the container.
     """
 
     dt: PositiveFloat | None = None
     gravity: Vec3FType | None = None
 
-    alpha: PositiveFloat = 1e-6
+    alpha: NonNegativeFloat = 0.0
+    is_damping_enabled: StrictBool = True
+    damping_alpha: PositiveFloat = 1e-3
+    damping_beta: PositiveFloat = 60.0
+    damping_velocity_scale: PositiveFloat = 0.001
+    density_update_fraction: PositiveFloat = Field(default=0.25, le=1.0)
+    surface_update_scale: PositiveFloat = 0.002
     hessian_determinant_epsilon: PositiveFloat = 1e-7
     particle_size: PositiveFloat = 0.02
-    max_solver_iterations: PositiveInt = 10
+    support_radius: PositiveFloat | None = None
+    max_solver_iterations: PositiveInt = 4
     static_colliders: list[PBSTFStaticColliderOptionsType] = Field(default_factory=list)
 
     hash_grid_res: Vec3FType | None = None
@@ -828,24 +861,37 @@ class IPBSTFOptions(Options):
 
     lower_bound: Vec3FType = (-100.0, -100.0, 0.0)
     upper_bound: Vec3FType = (100.0, 100.0, 100.0)
+    collision_lower_bound: Vec3FType | None = None
+    collision_upper_bound: Vec3FType | None = None
 
-    _support_radius: float = PrivateAttr(default=0.0)
     _hash_grid_res: np.ndarray = PrivateAttr(default=None)
 
     @model_validator(mode="before")
     @classmethod
     def _resolve_defaults(cls, data: dict) -> dict:
         particle_size = data.get("particle_size", 0.02)
+        if data.get("support_radius") is None:
+            data["support_radius"] = 2.0 * particle_size
         if data.get("hash_grid_cell_size") is None:
-            data["hash_grid_cell_size"] = 1.5 * particle_size
+            data["hash_grid_cell_size"] = data["support_radius"]
+        if data.get("collision_lower_bound") is None:
+            data["collision_lower_bound"] = data.get("lower_bound", (-100.0, -100.0, 0.0))
+        if data.get("collision_upper_bound") is None:
+            data["collision_upper_bound"] = data.get("upper_bound", (100.0, 100.0, 100.0))
         return data
 
     def model_post_init(self, context: Any) -> None:
         if not np.all(np.array(self.upper_bound) > np.array(self.lower_bound)):
             gs.raise_exception("Invalid pair of upper_bound and lower_bound.")
+        if not np.all(np.array(self.collision_upper_bound) > np.array(self.collision_lower_bound)):
+            gs.raise_exception("Invalid pair of collision_upper_bound and collision_lower_bound.")
+        if (
+            not np.all(np.array(self.collision_lower_bound) >= np.array(self.lower_bound))
+            or not np.all(np.array(self.collision_upper_bound) <= np.array(self.upper_bound))
+        ):
+            gs.raise_exception("IPBSTF collision bounds must lie inside its sampling and hash-grid domain.")
 
-        self._support_radius = 1.5 * self.particle_size
-        if self.hash_grid_cell_size < self._support_radius:
+        if self.hash_grid_cell_size < self.support_radius:
             gs.raise_exception("`hash_grid_cell_size` must not be smaller than the IPBSTF cubic-spline support radius.")
 
         if self.hash_grid_res is None:

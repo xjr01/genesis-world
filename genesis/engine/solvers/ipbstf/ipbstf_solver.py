@@ -7,6 +7,7 @@ import torch
 import quadrants as qd
 
 import genesis as gs
+import genesis.utils.geom as gu
 from genesis.engine.boundaries import (
     CubeBoundary,
     StaticCollider,
@@ -19,7 +20,6 @@ from genesis.engine.solvers.base_solver import Solver
 from genesis.engine.states.solvers import IPBSTFSolverState
 from genesis.utils import particle
 from genesis.utils.array_class import ErrorCode
-import genesis.utils.geom as gu
 from genesis.utils.misc import (
     assign_indexed_tensor,
     broadcast_tensor,
@@ -152,6 +152,7 @@ def _project_out_static_colliders(
 def _accumulate_density_constraint(
     particle_idx,
     env_idx,
+    density_constraint_tolerance,
     particle_radius,
     support_radius,
     particles,
@@ -162,6 +163,7 @@ def _accumulate_density_constraint(
     spatial_hasher: qd.template(),
     static_colliders: _StaticColliderConfig,
     is_fixed_influence_enabled: qd.template(),
+    is_line_search: qd.template(),
 ):
     pos_i = particles[particle_idx, env_idx].pos
     mass_i = particles_info[particle_idx, env_idx].mass
@@ -169,8 +171,19 @@ def _accumulate_density_constraint(
     density = mass_i * _cubic_kernel(0.0, support_radius)
     gradient = qd.Vector.zero(gs.qd_float, 3)
     hessian = qd.Matrix.zero(gs.qd_float, 3, 3)
-    grid = spatial_hasher.pos_to_grid(pos_i)
-    for offset in qd.grouped(qd.ndrange((-1, 2), (-1, 2), (-1, 2))):
+    grid_pos = pos_i
+    search_radius = 1
+    if qd.static(is_line_search):
+        grid_pos = particles[particle_idx, env_idx].pos_iteration
+        search_radius = 2
+    grid = spatial_hasher.pos_to_grid(grid_pos)
+    for offset in qd.grouped(
+        qd.ndrange(
+            (-search_radius, search_radius + 1),
+            (-search_radius, search_radius + 1),
+            (-search_radius, search_radius + 1),
+        )
+    ):
         slot_idx = spatial_hasher.grid_to_slot(grid + offset)
         slot_start = spatial_hasher.slot_start[slot_idx, env_idx]
         slot_end = slot_start + spatial_hasher.slot_size[slot_idx, env_idx]
@@ -199,7 +212,8 @@ def _accumulate_density_constraint(
                     hessian += mass_j / rho_rest * kernel_hessian
 
     constraint = density / rho_rest - 1.0
-    if constraint > 0.0:
+    # Roundoff-scale residuals remain inactive so rigid translations preserve the zero-energy state.
+    if constraint > density_constraint_tolerance:
         particles[particle_idx, env_idx].density_constraint = constraint
         particles[particle_idx, env_idx].density_gradient = gradient
         particles[particle_idx, env_idx].density_hessian_diag = _hessian_column_norms(hessian)
@@ -264,6 +278,94 @@ def _accumulate_neighbor_density_energy(
     return force, hessian
 
 
+@qd.func
+def _assemble_density_local_system(
+    particle_idx,
+    env_idx,
+    substep_dt,
+    alpha,
+    particle_radius,
+    support_radius,
+    particles,
+    particles_status,
+    particles_info,
+    static_colliders_pos,
+    static_colliders_quat,
+    spatial_hasher: qd.template(),
+    static_colliders: _StaticColliderConfig,
+):
+    particle = particles[particle_idx, env_idx]
+    inertia = alpha * particles_info[particle_idx, env_idx].mass / (substep_dt * substep_dt)
+    force = -inertia * (particle.pos - particle.pos_predicted)
+    hessian = inertia * qd.Matrix.identity(gs.qd_float, 3)
+
+    constraint = particle.density_constraint
+    gradient = particle.density_gradient
+    force -= constraint * gradient
+    hessian += gradient.outer_product(gradient)
+    for axis in qd.static(range(3)):
+        hessian[axis, axis] += constraint * particle.density_hessian_diag[axis]
+
+    return _accumulate_neighbor_density_energy(
+        particle_idx,
+        env_idx,
+        particle_radius,
+        support_radius,
+        force,
+        hessian,
+        particles,
+        particles_status,
+        particles_info,
+        static_colliders_pos,
+        static_colliders_quat,
+        spatial_hasher,
+        static_colliders,
+    )
+
+
+@qd.func
+def _solve_local_system(hessian_determinant_epsilon, force, hessian):
+    delta_pos = qd.Vector.zero(gs.qd_float, 3)
+    hessian_scale = gs.qd_float(0.0)
+    for axis in qd.static(range(3)):
+        hessian_scale = qd.max(hessian_scale, qd.abs(hessian[axis, axis]))
+    is_valid = not qd.math.isnan(hessian_scale) and not qd.math.isinf(hessian_scale)
+    if is_valid and hessian_scale > 0.0:
+        delta_pos = force / hessian_scale
+        hessian_normalized = hessian / hessian_scale
+        determinant_normalized = hessian_normalized.determinant()
+        is_valid = not qd.math.isnan(determinant_normalized) and not qd.math.isinf(determinant_normalized)
+        if is_valid and determinant_normalized >= hessian_determinant_epsilon:
+            delta_pos = hessian_normalized.inverse() @ (force / hessian_scale)
+    for axis in qd.static(range(3)):
+        is_valid = is_valid and not qd.math.isnan(delta_pos[axis]) and not qd.math.isinf(delta_pos[axis])
+    return delta_pos, is_valid
+
+
+@qd.func
+def _limit_density_position_update(
+    density_update_fraction,
+    density_update_limit,
+    surface_update_limit,
+    density_constraint,
+    delta_pos,
+    density_gradient,
+):
+    distance = delta_pos.norm()
+    max_distance = surface_update_limit
+    constraint_change = density_gradient.dot(delta_pos)
+    if density_constraint > 0.0 and constraint_change < 0.0:
+        # Parallel neighbor corrections share the remaining compression budget.
+        max_distance = qd.max(
+            max_distance,
+            density_update_fraction * density_constraint / -constraint_change * distance,
+        )
+    max_distance = qd.min(max_distance, density_update_limit)
+    if distance > max_distance:
+        delta_pos *= max_distance / distance
+    return delta_pos
+
+
 @qd.kernel
 def _kernel_reorder_particles(
     n_particles: qd.i32,
@@ -303,6 +405,7 @@ def _kernel_copy_from_reordered(
 @qd.kernel
 def _kernel_compute_density_constraints(
     n_particles: qd.i32,
+    density_constraint_tolerance: float,
     particle_radius: float,
     support_radius: float,
     particles: qd.template(),
@@ -319,6 +422,7 @@ def _kernel_compute_density_constraints(
             _accumulate_density_constraint(
                 particle_idx,
                 env_idx,
+                density_constraint_tolerance,
                 particle_radius,
                 support_radius,
                 particles,
@@ -329,6 +433,46 @@ def _kernel_compute_density_constraints(
                 spatial_hasher,
                 static_colliders,
                 is_fixed_influence_enabled,
+                False,
+            )
+
+
+@qd.kernel
+def _kernel_compute_line_search_density_constraints(
+    n_particles: qd.i32,
+    density_constraint_tolerance: float,
+    particle_radius: float,
+    support_radius: float,
+    particles: qd.template(),
+    particles_status: qd.template(),
+    particles_info: qd.template(),
+    static_colliders_pos: qd.Tensor,
+    static_colliders_quat: qd.Tensor,
+    line_search_state: qd.template(),
+    spatial_hasher: qd.template(),
+    static_colliders: _StaticColliderConfig,
+):
+    for particle_idx, env_idx in qd.ndrange(n_particles, particles.shape[1]):
+        if (
+            line_search_state[env_idx].is_active
+            and particles_status[particle_idx, env_idx].active
+            and not particles_info[particle_idx, env_idx].is_fixed
+        ):
+            _accumulate_density_constraint(
+                particle_idx,
+                env_idx,
+                density_constraint_tolerance,
+                particle_radius,
+                support_radius,
+                particles,
+                particles_status,
+                particles_info,
+                static_colliders_pos,
+                static_colliders_quat,
+                spatial_hasher,
+                static_colliders,
+                True,
+                True,
             )
 
 
@@ -371,6 +515,72 @@ def _kernel_predict_positions(
 
 
 @qd.kernel
+def _kernel_project_positions(
+    n_particles: qd.i32,
+    particles: qd.template(),
+    particles_status: qd.template(),
+    particles_info: qd.template(),
+    static_colliders_pos: qd.Tensor,
+    static_colliders_quat: qd.Tensor,
+    boundary: qd.template(),
+    static_colliders: _StaticColliderConfig,
+    errno: qd.Tensor,
+):
+    for particle_idx, env_idx in qd.ndrange(n_particles, particles.shape[1]):
+        if particles_status[particle_idx, env_idx].active and not particles_info[particle_idx, env_idx].is_fixed:
+            pos = boundary.impose_pos(particles[particle_idx, env_idx].pos)
+            pos = _project_out_static_colliders(
+                env_idx, pos, static_colliders_pos, static_colliders_quat, static_colliders
+            )
+            is_valid = True
+            for axis in qd.static(range(3)):
+                is_valid = is_valid and not qd.math.isnan(pos[axis]) and not qd.math.isinf(pos[axis])
+            if is_valid:
+                particles[particle_idx, env_idx].pos = pos
+            else:
+                errno[env_idx] = ErrorCode.INVALID_IPBSTF_STATE_NAN
+
+
+@qd.kernel
+def _kernel_initialize_line_search(
+    n_particles: qd.i32,
+    iteration_idx: qd.i32,
+    substep_dt: float,
+    alpha: float,
+    particles: qd.template(),
+    particles_status: qd.template(),
+    particles_info: qd.template(),
+    line_search_state: qd.template(),
+    solver_iteration_energy: qd.template(),
+):
+    for env_idx in range(particles.shape[1]):
+        line_search_state[env_idx].initial_energy = 0.0
+        line_search_state[env_idx].candidate_energy = 0.0
+        line_search_state[env_idx].accepted_energy = 0.0
+        line_search_state[env_idx].directional_decrease = 0.0
+        line_search_state[env_idx].step_size = 1.0
+        line_search_state[env_idx].is_active = False
+
+    for particle_idx, env_idx in qd.ndrange(n_particles, particles.shape[1]):
+        if particles_status[particle_idx, env_idx].active and not particles_info[particle_idx, env_idx].is_fixed:
+            particle = particles[particle_idx, env_idx]
+            particles[particle_idx, env_idx].pos_iteration = particle.pos
+            displacement = particle.pos - particle.pos_predicted
+            inertia = alpha * particles_info[particle_idx, env_idx].mass / (substep_dt * substep_dt)
+            line_search_state[env_idx].initial_energy += 0.5 * (
+                inertia * displacement.norm_sqr() + particle.density_constraint * particle.density_constraint
+            )
+
+    for env_idx in range(particles.shape[1]):
+        line_search_state[env_idx].accepted_energy = line_search_state[env_idx].initial_energy
+        if iteration_idx == 0:
+            solver_iteration_energy[0, env_idx] = line_search_state[env_idx].initial_energy
+        else:
+            line_search_state[env_idx].accepted_energy = solver_iteration_energy[iteration_idx, env_idx]
+        line_search_state[env_idx].is_active = line_search_state[env_idx].initial_energy > 0.0
+
+
+@qd.kernel
 def _kernel_assemble_density_local_systems(
     n_particles: qd.i32,
     substep_dt: float,
@@ -387,25 +597,13 @@ def _kernel_assemble_density_local_systems(
 ):
     for particle_idx, env_idx in qd.ndrange(n_particles, particles.shape[1]):
         if particles_status[particle_idx, env_idx].active and not particles_info[particle_idx, env_idx].is_fixed:
-            particle = particles[particle_idx, env_idx]
-            inertia = alpha * particles_info[particle_idx, env_idx].mass / (substep_dt * substep_dt)
-            force = -inertia * (particle.pos - particle.pos_predicted)
-            hessian = inertia * qd.Matrix.identity(gs.qd_float, 3)
-
-            constraint = particle.density_constraint
-            gradient = particle.density_gradient
-            force -= constraint * gradient
-            hessian += gradient.outer_product(gradient)
-            for axis in qd.static(range(3)):
-                hessian[axis, axis] += constraint * particle.density_hessian_diag[axis]
-
-            force, hessian = _accumulate_neighbor_density_energy(
+            force, hessian = _assemble_density_local_system(
                 particle_idx,
                 env_idx,
+                substep_dt,
+                alpha,
                 particle_radius,
                 support_radius,
-                force,
-                hessian,
                 particles,
                 particles_status,
                 particles_info,
@@ -421,26 +619,99 @@ def _kernel_assemble_density_local_systems(
 @qd.kernel
 def _kernel_solve_local_systems(
     n_particles: qd.i32,
+    density_update_fraction: float,
+    density_update_limit: float,
+    surface_update_limit: float,
     hessian_determinant_epsilon: float,
     particles: qd.template(),
     particles_status: qd.template(),
     particles_info: qd.template(),
+    line_search_state: qd.template(),
     errno: qd.Tensor,
 ):
     for particle_idx, env_idx in qd.ndrange(n_particles, particles.shape[1]):
         if particles_status[particle_idx, env_idx].active and not particles_info[particle_idx, env_idx].is_fixed:
-            hessian = particles[particle_idx, env_idx].local_hessian
-            determinant = hessian.determinant()
-            delta_pos = qd.Vector.zero(gs.qd_float, 3)
-            is_valid = not qd.math.isnan(determinant) and not qd.math.isinf(determinant)
-            if is_valid and determinant >= hessian_determinant_epsilon:
-                delta_pos = hessian.inverse() @ particles[particle_idx, env_idx].local_force
-            for axis in qd.static(range(3)):
-                is_valid = is_valid and not qd.math.isnan(delta_pos[axis]) and not qd.math.isinf(delta_pos[axis])
+            delta_pos, is_valid = _solve_local_system(
+                hessian_determinant_epsilon,
+                particles[particle_idx, env_idx].local_force,
+                particles[particle_idx, env_idx].local_hessian,
+            )
+            delta_pos = _limit_density_position_update(
+                density_update_fraction,
+                density_update_limit,
+                surface_update_limit,
+                particles[particle_idx, env_idx].density_constraint,
+                0.5 * delta_pos,
+                particles[particle_idx, env_idx].density_gradient,
+            )
             if is_valid:
                 particles[particle_idx, env_idx].delta_pos = delta_pos
+                line_search_state[env_idx].directional_decrease += qd.max(
+                    0.0,
+                    particles[particle_idx, env_idx].local_force.dot(delta_pos),
+                )
             else:
                 particles[particle_idx, env_idx].delta_pos = qd.Vector.zero(gs.qd_float, 3)
+                errno[env_idx] = ErrorCode.INVALID_IPBSTF_STATE_NAN
+
+
+@qd.kernel
+def _kernel_compute_damping_positions(
+    n_particles: qd.i32,
+    substep_dt: float,
+    damping_alpha: float,
+    density_update_fraction: float,
+    density_update_limit: float,
+    surface_update_limit: float,
+    hessian_determinant_epsilon: float,
+    particle_radius: float,
+    support_radius: float,
+    particles: qd.template(),
+    particles_status: qd.template(),
+    particles_info: qd.template(),
+    static_colliders_pos: qd.Tensor,
+    static_colliders_quat: qd.Tensor,
+    spatial_hasher: qd.template(),
+    boundary: qd.template(),
+    static_colliders: _StaticColliderConfig,
+    errno: qd.Tensor,
+):
+    for particle_idx, env_idx in qd.ndrange(n_particles, particles.shape[1]):
+        if particles_status[particle_idx, env_idx].active and not particles_info[particle_idx, env_idx].is_fixed:
+            force, hessian = _assemble_density_local_system(
+                particle_idx,
+                env_idx,
+                substep_dt,
+                damping_alpha,
+                particle_radius,
+                support_radius,
+                particles,
+                particles_status,
+                particles_info,
+                static_colliders_pos,
+                static_colliders_quat,
+                spatial_hasher,
+                static_colliders,
+            )
+            delta_pos, is_valid = _solve_local_system(hessian_determinant_epsilon, force, hessian)
+            delta_pos = _limit_density_position_update(
+                density_update_fraction,
+                density_update_limit,
+                surface_update_limit,
+                particles[particle_idx, env_idx].density_constraint,
+                0.5 * delta_pos,
+                particles[particle_idx, env_idx].density_gradient,
+            )
+            pos_damping = boundary.impose_pos(particles[particle_idx, env_idx].pos + delta_pos)
+            pos_damping = _project_out_static_colliders(
+                env_idx, pos_damping, static_colliders_pos, static_colliders_quat, static_colliders
+            )
+            for axis in qd.static(range(3)):
+                is_valid = is_valid and not qd.math.isnan(pos_damping[axis]) and not qd.math.isinf(pos_damping[axis])
+            if is_valid:
+                particles[particle_idx, env_idx].pos_damping = pos_damping
+            else:
+                particles[particle_idx, env_idx].pos_damping = particles[particle_idx, env_idx].pos
                 errno[env_idx] = ErrorCode.INVALID_IPBSTF_STATE_NAN
 
 
@@ -452,14 +723,20 @@ def _kernel_apply_position_updates(
     particles_info: qd.template(),
     static_colliders_pos: qd.Tensor,
     static_colliders_quat: qd.Tensor,
+    line_search_state: qd.template(),
     boundary: qd.template(),
     static_colliders: _StaticColliderConfig,
     errno: qd.Tensor,
 ):
     for particle_idx, env_idx in qd.ndrange(n_particles, particles.shape[1]):
-        if particles_status[particle_idx, env_idx].active and not particles_info[particle_idx, env_idx].is_fixed:
+        if (
+            line_search_state[env_idx].is_active
+            and particles_status[particle_idx, env_idx].active
+            and not particles_info[particle_idx, env_idx].is_fixed
+        ):
             pos = boundary.impose_pos(
-                particles[particle_idx, env_idx].pos + 0.5 * particles[particle_idx, env_idx].delta_pos
+                particles[particle_idx, env_idx].pos_iteration
+                + line_search_state[env_idx].step_size * particles[particle_idx, env_idx].delta_pos
             )
             pos = _project_out_static_colliders(
                 env_idx, pos, static_colliders_pos, static_colliders_quat, static_colliders
@@ -474,9 +751,183 @@ def _kernel_apply_position_updates(
 
 
 @qd.kernel
+def _kernel_update_line_search(
+    n_particles: qd.i32,
+    substep_dt: float,
+    alpha: float,
+    reduction: float,
+    energy_decrease_fraction: float,
+    particles: qd.template(),
+    particles_status: qd.template(),
+    particles_info: qd.template(),
+    line_search_state: qd.template(),
+):
+    for env_idx in range(particles.shape[1]):
+        if line_search_state[env_idx].is_active:
+            line_search_state[env_idx].candidate_energy = 0.0
+
+    for particle_idx, env_idx in qd.ndrange(n_particles, particles.shape[1]):
+        if (
+            line_search_state[env_idx].is_active
+            and particles_status[particle_idx, env_idx].active
+            and not particles_info[particle_idx, env_idx].is_fixed
+        ):
+            particle = particles[particle_idx, env_idx]
+            displacement = particle.pos - particle.pos_predicted
+            inertia = alpha * particles_info[particle_idx, env_idx].mass / (substep_dt * substep_dt)
+            line_search_state[env_idx].candidate_energy += 0.5 * (
+                inertia * displacement.norm_sqr() + particle.density_constraint * particle.density_constraint
+            )
+
+    for env_idx in range(particles.shape[1]):
+        if line_search_state[env_idx].is_active:
+            if line_search_state[env_idx].candidate_energy < line_search_state[env_idx].accepted_energy - (
+                energy_decrease_fraction
+                * line_search_state[env_idx].step_size
+                * line_search_state[env_idx].directional_decrease
+            ):
+                line_search_state[env_idx].accepted_energy = line_search_state[env_idx].candidate_energy
+                line_search_state[env_idx].is_active = False
+            else:
+                line_search_state[env_idx].step_size *= reduction
+
+
+@qd.kernel
+def _kernel_restore_failed_line_search(
+    n_particles: qd.i32,
+    iteration_idx: qd.i32,
+    particles: qd.template(),
+    particles_status: qd.template(),
+    particles_info: qd.template(),
+    line_search_state: qd.template(),
+    solver_iteration_energy: qd.template(),
+):
+    for particle_idx, env_idx in qd.ndrange(n_particles, particles.shape[1]):
+        if (
+            line_search_state[env_idx].is_active
+            and particles_status[particle_idx, env_idx].active
+            and not particles_info[particle_idx, env_idx].is_fixed
+        ):
+            particles[particle_idx, env_idx].pos = particles[particle_idx, env_idx].pos_iteration
+
+    for env_idx in range(particles.shape[1]):
+        solver_iteration_energy[iteration_idx + 1, env_idx] = line_search_state[env_idx].accepted_energy
+
+
+@qd.kernel
 def _kernel_update_velocities(
     n_particles: qd.i32,
     substep_dt: float,
+    damping_beta: float,
+    support_radius: float,
+    particles: qd.template(),
+    particles_status: qd.template(),
+    particles_info: qd.template(),
+    damping_state: qd.template(),
+    is_damping_enabled: qd.template(),
+    errno: qd.Tensor,
+):
+    for particle_idx, env_idx in qd.ndrange(n_particles, particles.shape[1]):
+        if particles_status[particle_idx, env_idx].active and not particles_info[particle_idx, env_idx].is_fixed:
+            velocity = (particles[particle_idx, env_idx].pos - particles[particle_idx, env_idx].pos_prev) / substep_dt
+            if qd.static(is_damping_enabled) and damping_state[env_idx].is_active:
+                velocity_damping = (
+                    particles[particle_idx, env_idx].pos_damping - particles[particle_idx, env_idx].pos_prev
+                ) / substep_dt
+                speed_sq = velocity.norm_sqr()
+                speed_damping_sq = velocity_damping.norm_sqr()
+                position_delta = (
+                    particles[particle_idx, env_idx].pos - particles[particle_idx, env_idx].pos_damping
+                ).norm()
+                if (
+                    position_delta < damping_beta * support_radius
+                    and speed_damping_sq < speed_sq
+                    and speed_sq > gs.EPS
+                ):
+                    damping_weight = 1.0 - position_delta / (damping_beta * support_radius)
+                    velocity *= qd.sqrt(
+                        qd.max(0.0, 1.0 - damping_weight * (speed_sq - speed_damping_sq) / speed_sq)
+                    )
+            is_valid = True
+            for axis in qd.static(range(3)):
+                is_valid = is_valid and not qd.math.isnan(velocity[axis]) and not qd.math.isinf(velocity[axis])
+            if is_valid:
+                particles[particle_idx, env_idx].vel = velocity
+            else:
+                errno[env_idx] = ErrorCode.INVALID_IPBSTF_STATE_NAN
+
+
+@qd.kernel
+def _kernel_compute_damping_state(
+    n_particles: qd.i32,
+    damping_velocity_scale: float,
+    support_radius: float,
+    particles: qd.template(),
+    particles_status: qd.template(),
+    particles_info: qd.template(),
+    damping_state: qd.template(),
+):
+    for env_idx in range(particles.shape[1]):
+        damping_state[env_idx].mass = 0.0
+        damping_state[env_idx].mass_displacement_sqr = 0.0
+        damping_state[env_idx].is_active = False
+
+    for particle_idx, env_idx in qd.ndrange(n_particles, particles.shape[1]):
+        if particles_status[particle_idx, env_idx].active and not particles_info[particle_idx, env_idx].is_fixed:
+            mass = particles_info[particle_idx, env_idx].mass
+            displacement = particles[particle_idx, env_idx].pos - particles[particle_idx, env_idx].pos_prev
+            damping_state[env_idx].mass += mass
+            damping_state[env_idx].mass_displacement_sqr += mass * displacement.norm_sqr()
+
+    for env_idx in range(particles.shape[1]):
+        displacement_limit = damping_velocity_scale * support_radius
+        damping_state[env_idx].is_active = (
+            damping_state[env_idx].mass > gs.EPS
+            and damping_state[env_idx].mass_displacement_sqr
+            < damping_state[env_idx].mass * displacement_limit * displacement_limit
+        )
+
+
+@qd.kernel
+def _kernel_compute_viscosity_velocity_updates(
+    n_particles: qd.i32,
+    viscosity: float,
+    support_radius: float,
+    particles: qd.template(),
+    particles_status: qd.template(),
+    particles_info: qd.template(),
+    spatial_hasher: qd.template(),
+):
+    for particle_idx, env_idx in qd.ndrange(n_particles, particles.shape[1]):
+        if particles_status[particle_idx, env_idx].active and not particles_info[particle_idx, env_idx].is_fixed:
+            particle = particles[particle_idx, env_idx]
+            delta_vel = qd.Vector.zero(gs.qd_float, 3)
+            grid = spatial_hasher.pos_to_grid(particle.pos)
+            for offset in qd.grouped(qd.ndrange((-1, 2), (-1, 2), (-1, 2))):
+                slot_idx = spatial_hasher.grid_to_slot(grid + offset)
+                slot_start = spatial_hasher.slot_start[slot_idx, env_idx]
+                slot_end = slot_start + spatial_hasher.slot_size[slot_idx, env_idx]
+                for neighbor_idx in range(slot_start, slot_end):
+                    if (
+                        neighbor_idx != particle_idx
+                        and particles_status[neighbor_idx, env_idx].active
+                        and not particles_info[neighbor_idx, env_idx].is_fixed
+                    ):
+                        neighbor = particles[neighbor_idx, env_idx]
+                        distance = (particle.pos - neighbor.pos).norm()
+                        if distance < support_radius and neighbor.density > gs.EPS:
+                            delta_vel += (
+                                particles_info[neighbor_idx, env_idx].mass
+                                / neighbor.density
+                                * (neighbor.vel - particle.vel)
+                                * _cubic_kernel(distance, support_radius)
+                            )
+            particles[particle_idx, env_idx].delta_vel = viscosity * delta_vel
+
+
+@qd.kernel
+def _kernel_apply_viscosity_velocity_updates(
+    n_particles: qd.i32,
     particles: qd.template(),
     particles_status: qd.template(),
     particles_info: qd.template(),
@@ -484,7 +935,135 @@ def _kernel_update_velocities(
 ):
     for particle_idx, env_idx in qd.ndrange(n_particles, particles.shape[1]):
         if particles_status[particle_idx, env_idx].active and not particles_info[particle_idx, env_idx].is_fixed:
-            velocity = (particles[particle_idx, env_idx].pos - particles[particle_idx, env_idx].pos_prev) / substep_dt
+            velocity = particles[particle_idx, env_idx].vel + particles[particle_idx, env_idx].delta_vel
+            is_valid = True
+            for axis in qd.static(range(3)):
+                is_valid = is_valid and not qd.math.isnan(velocity[axis]) and not qd.math.isinf(velocity[axis])
+            if is_valid:
+                particles[particle_idx, env_idx].vel = velocity
+            else:
+                errno[env_idx] = ErrorCode.INVALID_IPBSTF_STATE_NAN
+
+
+@qd.kernel
+def _kernel_initialize_kinetic_smoothing(
+    n_particles: qd.i32,
+    particles: qd.template(),
+    particles_status: qd.template(),
+    particles_info: qd.template(),
+    kinetic_smoothing_state: qd.template(),
+):
+    for env_idx in range(particles.shape[1]):
+        kinetic_smoothing_state[env_idx].mass = 0.0
+        kinetic_smoothing_state[env_idx].momentum = qd.Vector.zero(gs.qd_float, 3)
+        kinetic_smoothing_state[env_idx].second_moment = qd.Matrix.zero(gs.qd_float, 3, 3)
+        kinetic_smoothing_state[env_idx].filtered_momentum = qd.Vector.zero(gs.qd_float, 3)
+        kinetic_smoothing_state[env_idx].filtered_second_moment = qd.Matrix.zero(gs.qd_float, 3, 3)
+        kinetic_smoothing_state[env_idx].velocity_transform = qd.Matrix.identity(gs.qd_float, 3)
+        kinetic_smoothing_state[env_idx].is_active = False
+
+    for particle_idx, env_idx in qd.ndrange(n_particles, particles.shape[1]):
+        if particles_status[particle_idx, env_idx].active and not particles_info[particle_idx, env_idx].is_fixed:
+            mass = particles_info[particle_idx, env_idx].mass
+            velocity = particles[particle_idx, env_idx].vel
+            kinetic_smoothing_state[env_idx].mass += mass
+            for axis in qd.static(range(3)):
+                kinetic_smoothing_state[env_idx].momentum[axis] += mass * velocity[axis]
+                for axis_j in qd.static(range(3)):
+                    kinetic_smoothing_state[env_idx].second_moment[axis, axis_j] += (
+                        mass * velocity[axis] * velocity[axis_j]
+                    )
+
+
+@qd.kernel
+def _kernel_reduce_kinetic_smoothing(
+    n_particles: qd.i32,
+    particles: qd.template(),
+    particles_status: qd.template(),
+    particles_info: qd.template(),
+    kinetic_smoothing_state: qd.template(),
+):
+    for particle_idx, env_idx in qd.ndrange(n_particles, particles.shape[1]):
+        if particles_status[particle_idx, env_idx].active and not particles_info[particle_idx, env_idx].is_fixed:
+            mass = particles_info[particle_idx, env_idx].mass
+            velocity = particles[particle_idx, env_idx].vel + particles[particle_idx, env_idx].delta_vel
+            for axis in qd.static(range(3)):
+                kinetic_smoothing_state[env_idx].filtered_momentum[axis] += mass * velocity[axis]
+                for axis_j in qd.static(range(3)):
+                    kinetic_smoothing_state[env_idx].filtered_second_moment[axis, axis_j] += (
+                        mass * velocity[axis] * velocity[axis_j]
+                    )
+
+
+@qd.kernel
+def _kernel_prepare_kinetic_smoothing(kinetic_smoothing_state: qd.template()):
+    for env_idx in range(kinetic_smoothing_state.shape[0]):
+        state = kinetic_smoothing_state[env_idx]
+        if state.mass > gs.EPS:
+            velocity_center = state.momentum / state.mass
+            velocity_center_filtered = state.filtered_momentum / state.mass
+            covariance = state.second_moment / state.mass - velocity_center.outer_product(velocity_center)
+            covariance_filtered = (
+                state.filtered_second_moment / state.mass
+                - velocity_center_filtered.outer_product(velocity_center_filtered)
+            )
+            eigenvalues, eigenvectors = qd.sym_eig(covariance)
+            eigenvalues_filtered, eigenvectors_filtered = qd.sym_eig(covariance_filtered)
+            covariance_trace = qd.max(0.0, eigenvalues[0] + eigenvalues[1] + eigenvalues[2])
+            covariance_trace_filtered = qd.max(
+                0.0,
+                eigenvalues_filtered[0] + eigenvalues_filtered[1] + eigenvalues_filtered[2],
+            )
+            eigenvalue_tolerance = gs.EPS * qd.max(1.0, covariance_trace_filtered)
+            if covariance_trace > eigenvalue_tolerance and covariance_trace_filtered > eigenvalue_tolerance:
+                kinetic_smoothing_state[env_idx].is_active = True
+                if eigenvalues_filtered[0] > eigenvalue_tolerance:
+                    covariance_sqrt = qd.Matrix.zero(gs.qd_float, 3, 3)
+                    covariance_filtered_inv_sqrt = qd.Matrix.zero(gs.qd_float, 3, 3)
+                    for mode in qd.static(range(3)):
+                        sqrt_eigenvalue = qd.sqrt(qd.max(0.0, eigenvalues[mode]))
+                        inv_sqrt_eigenvalue_filtered = 1.0 / qd.sqrt(eigenvalues_filtered[mode])
+                        for row in qd.static(range(3)):
+                            for column in qd.static(range(3)):
+                                covariance_sqrt[row, column] += (
+                                    sqrt_eigenvalue * eigenvectors[row, mode] * eigenvectors[column, mode]
+                                )
+                                covariance_filtered_inv_sqrt[row, column] += (
+                                    inv_sqrt_eigenvalue_filtered
+                                    * eigenvectors_filtered[row, mode]
+                                    * eigenvectors_filtered[column, mode]
+                                )
+                    kinetic_smoothing_state[env_idx].velocity_transform = (
+                        covariance_sqrt @ covariance_filtered_inv_sqrt
+                    )
+                else:
+                    scale = qd.sqrt(covariance_trace / covariance_trace_filtered)
+                    kinetic_smoothing_state[env_idx].velocity_transform = (
+                        scale * qd.Matrix.identity(gs.qd_float, 3)
+                    )
+
+
+@qd.kernel
+def _kernel_apply_kinetic_smoothing(
+    n_particles: qd.i32,
+    particles: qd.template(),
+    particles_status: qd.template(),
+    particles_info: qd.template(),
+    kinetic_smoothing_state: qd.template(),
+    errno: qd.Tensor,
+):
+    for particle_idx, env_idx in qd.ndrange(n_particles, particles.shape[1]):
+        if particles_status[particle_idx, env_idx].active and not particles_info[particle_idx, env_idx].is_fixed:
+            state = kinetic_smoothing_state[env_idx]
+            velocity = particles[particle_idx, env_idx].vel
+            if state.mass > gs.EPS and state.is_active:
+                velocity_center = state.momentum / state.mass
+                velocity_center_filtered = state.filtered_momentum / state.mass
+                velocity = velocity_center + state.velocity_transform @ (
+                    particles[particle_idx, env_idx].vel
+                    + particles[particle_idx, env_idx].delta_vel
+                    - velocity_center_filtered
+                )
             is_valid = True
             for axis in qd.static(range(3)):
                 is_valid = is_valid and not qd.math.isnan(velocity[axis]) and not qd.math.isinf(velocity[axis])
@@ -695,17 +1274,29 @@ def _kernel_get_mass(
 
 
 class IPBSTFSolver(Solver):
-    """Implicit position-based surface-tension fluid (IPBSTF) solver using parallel local Newton updates."""
+    """Implicit position-based surface-tension fluid (IPBSTF) density solver using parallel local Newton updates."""
 
     def __init__(self, scene, sim, options):
         super().__init__(scene, sim, options)
 
         self._alpha = options.alpha
+        self._is_damping_enabled = options.is_damping_enabled
+        self._damping_alpha = options.damping_alpha
+        self._damping_beta = options.damping_beta
+        self._damping_velocity_scale = options.damping_velocity_scale
+        self._density_constraint_tolerance = max(1e-8, 512.0 * gs.EPS)
+        self._density_update_fraction = options.density_update_fraction
+        # Candidate motion stays within half a hash cell between each pair, so a two-cell stencil remains complete.
+        self._density_update_limit = 0.25 * options.support_radius
         self._hessian_determinant_epsilon = options.hessian_determinant_epsilon
         self._particle_size = options.particle_size
         self._particle_radius = 0.5 * options.particle_size
-        self._support_radius = options._support_radius
+        self._support_radius = options.support_radius
+        self._surface_update_limit = options.surface_update_scale * self._support_radius
         self._max_solver_iterations = options.max_solver_iterations
+        self._max_line_search_iterations = 24
+        self._line_search_reduction = 0.5
+        self._energy_decrease_fraction = 1e-4
         self._static_colliders = _StaticColliderConfig(
             tuple(create_static_collider(collider_options) for collider_options in options.static_colliders)
         )
@@ -719,9 +1310,17 @@ class IPBSTFSolver(Solver):
 
         self.sh = gu.SpatialHasher(cell_size=options.hash_grid_cell_size, grid_res=options._hash_grid_res)
         self.boundary = CubeBoundary(lower=self._lower_bound, upper=self._upper_bound)
+        self._collision_boundary = CubeBoundary(
+            lower=options.collision_lower_bound,
+            upper=options.collision_upper_bound,
+        )
 
         self._default_mass = 1.0
         self._material = None
+        self._viscosity = None
+        self._kinetic_smoothing = None
+        self._kinetic_smoothing_state = None
+        self._damping_state = None
         self._errno = None
 
     @property
@@ -780,18 +1379,27 @@ class IPBSTFSolver(Solver):
             gs.raise_exception("IPBSTFSolver requires at least one liquid entity.")
         self._material = liquid_entities[0].material
         for entity in liquid_entities[1:]:
-            if entity.material.rho != self._material.rho:
+            if (
+                entity.material.rho != self._material.rho
+                or entity.material.viscosity != self._material.viscosity
+                or entity.material.kinetic_smoothing != self._material.kinetic_smoothing
+            ):
                 gs.raise_exception(
-                    "All entities in one IPBSTFSolver must use the same rest density because the current solver is "
-                    "single-phase."
+                    "All liquid entities in one IPBSTFSolver must use the same rest density, viscosity, and kinetic "
+                    "smoothing because the current solver is single-phase."
                 )
+        self._viscosity = self._material.viscosity
+        self._kinetic_smoothing = self._material.kinetic_smoothing
 
         self.sh.build(self._B)
         particle_state = qd.types.struct(
             pos=gs.qd_vec3,
             pos_prev=gs.qd_vec3,
             pos_predicted=gs.qd_vec3,
+            pos_iteration=gs.qd_vec3,
+            pos_damping=gs.qd_vec3,
             delta_pos=gs.qd_vec3,
+            delta_vel=gs.qd_vec3,
             vel=gs.qd_vec3,
             density=gs.qd_float,
             density_constraint=gs.qd_float,
@@ -803,6 +1411,28 @@ class IPBSTFSolver(Solver):
         particle_status = qd.types.struct(reordered_idx=gs.qd_int, active=gs.qd_bool)
         particle_info = qd.types.struct(mass=gs.qd_float, rho_rest=gs.qd_float, is_fixed=gs.qd_bool)
         particle_render = qd.types.struct(pos=gs.qd_vec3, vel=gs.qd_vec3, active=gs.qd_bool)
+        line_search_state = qd.types.struct(
+            initial_energy=gs.qd_float,
+            candidate_energy=gs.qd_float,
+            accepted_energy=gs.qd_float,
+            directional_decrease=gs.qd_float,
+            step_size=gs.qd_float,
+            is_active=gs.qd_bool,
+        )
+        kinetic_smoothing_state = qd.types.struct(
+            mass=gs.qd_float,
+            momentum=gs.qd_vec3,
+            second_moment=gs.qd_mat3,
+            filtered_momentum=gs.qd_vec3,
+            filtered_second_moment=gs.qd_mat3,
+            velocity_transform=gs.qd_mat3,
+            is_active=gs.qd_bool,
+        )
+        damping_state = qd.types.struct(
+            mass=gs.qd_float,
+            mass_displacement_sqr=gs.qd_float,
+            is_active=gs.qd_bool,
+        )
 
         shape = (self._n_particles, self._B)
         self.particles = particle_state.field(shape=shape, layout=qd.Layout.SOA)
@@ -812,6 +1442,12 @@ class IPBSTFSolver(Solver):
         self.particles_status_reordered = particle_status.field(shape=shape, layout=qd.Layout.SOA)
         self.particles_info_reordered = particle_info.field(shape=shape, layout=qd.Layout.SOA)
         self.particles_render = particle_render.field(shape=shape, layout=qd.Layout.SOA)
+        self._line_search_state = line_search_state.field(shape=(self._B,), layout=qd.Layout.SOA)
+        self._kinetic_smoothing_state = kinetic_smoothing_state.field(shape=(self._B,), layout=qd.Layout.SOA)
+        self._damping_state = damping_state.field(shape=(self._B,), layout=qd.Layout.SOA)
+        self._solver_iteration_energy = qd.field(
+            gs.qd_float, shape=(self._max_solver_iterations + 1, self._B)
+        )
         self._max_density = qd.field(gs.qd_float, shape=())
         self._errno = qd.field(gs.qd_int, shape=(self._B,))
 
@@ -873,6 +1509,7 @@ class IPBSTFSolver(Solver):
     def _compute_density_constraints(self, is_fixed_influence_enabled=True):
         _kernel_compute_density_constraints(
             self._n_particles,
+            self._density_constraint_tolerance,
             self._particle_radius,
             self._support_radius,
             self.particles_reordered,
@@ -942,11 +1579,33 @@ class IPBSTFSolver(Solver):
             self.particles_status_reordered,
             self.particles_info_reordered,
         )
+        _kernel_project_positions(
+            self._n_particles,
+            self.particles_reordered,
+            self.particles_status_reordered,
+            self.particles_info_reordered,
+            self._kernel_static_colliders_pos,
+            self._kernel_static_colliders_quat,
+            self._collision_boundary,
+            self._static_colliders,
+            self._errno,
+        )
         _kernel_copy_from_reordered(self._n_particles, self.particles, self.particles_status, self.particles_reordered)
 
-        for _ in range(self._max_solver_iterations):
+        for iteration_idx in range(self._max_solver_iterations):
             self._reorder_particles()
             self._compute_density_constraints()
+            _kernel_initialize_line_search(
+                self._n_particles,
+                iteration_idx,
+                self._substep_dt,
+                self._alpha,
+                self.particles_reordered,
+                self.particles_status_reordered,
+                self.particles_info_reordered,
+                self._line_search_state,
+                self._solver_iteration_energy,
+            )
             _kernel_assemble_density_local_systems(
                 self._n_particles,
                 self._substep_dt,
@@ -963,36 +1622,175 @@ class IPBSTFSolver(Solver):
             )
             _kernel_solve_local_systems(
                 self._n_particles,
+                self._density_update_fraction,
+                self._density_update_limit,
+                self._surface_update_limit,
                 self._hessian_determinant_epsilon,
                 self.particles_reordered,
                 self.particles_status_reordered,
                 self.particles_info_reordered,
+                self._line_search_state,
                 self._errno,
             )
-            _kernel_apply_position_updates(
+            if self._is_damping_enabled and iteration_idx == self._max_solver_iterations - 1:
+                _kernel_compute_damping_positions(
+                    self._n_particles,
+                    self._substep_dt,
+                    self._damping_alpha,
+                    self._density_update_fraction,
+                    self._density_update_limit,
+                    self._surface_update_limit,
+                    self._hessian_determinant_epsilon,
+                    self._particle_radius,
+                    self._support_radius,
+                    self.particles_reordered,
+                    self.particles_status_reordered,
+                    self.particles_info_reordered,
+                    self._kernel_static_colliders_pos,
+                    self._kernel_static_colliders_quat,
+                    self.sh,
+                    self._collision_boundary,
+                    self._static_colliders,
+                    self._errno,
+                )
+            for _ in range(self._max_line_search_iterations):
+                _kernel_apply_position_updates(
+                    self._n_particles,
+                    self.particles_reordered,
+                    self.particles_status_reordered,
+                    self.particles_info_reordered,
+                    self._kernel_static_colliders_pos,
+                    self._kernel_static_colliders_quat,
+                    self._line_search_state,
+                    self._collision_boundary,
+                    self._static_colliders,
+                    self._errno,
+                )
+                _kernel_compute_line_search_density_constraints(
+                    self._n_particles,
+                    self._density_constraint_tolerance,
+                    self._particle_radius,
+                    self._support_radius,
+                    self.particles_reordered,
+                    self.particles_status_reordered,
+                    self.particles_info_reordered,
+                    self._kernel_static_colliders_pos,
+                    self._kernel_static_colliders_quat,
+                    self._line_search_state,
+                    self.sh,
+                    self._static_colliders,
+                )
+                _kernel_update_line_search(
+                    self._n_particles,
+                    self._substep_dt,
+                    self._alpha,
+                    self._line_search_reduction,
+                    self._energy_decrease_fraction,
+                    self.particles_reordered,
+                    self.particles_status_reordered,
+                    self.particles_info_reordered,
+                    self._line_search_state,
+                )
+
+            _kernel_restore_failed_line_search(
                 self._n_particles,
+                iteration_idx,
                 self.particles_reordered,
                 self.particles_status_reordered,
                 self.particles_info_reordered,
-                self._kernel_static_colliders_pos,
-                self._kernel_static_colliders_quat,
-                self.boundary,
-                self._static_colliders,
-                self._errno,
+                self._line_search_state,
+                self._solver_iteration_energy,
             )
             _kernel_copy_from_reordered(
                 self._n_particles, self.particles, self.particles_status, self.particles_reordered
             )
 
         self._reorder_particles()
-        _kernel_update_velocities(
+        _kernel_project_positions(
             self._n_particles,
-            self._substep_dt,
             self.particles_reordered,
             self.particles_status_reordered,
             self.particles_info_reordered,
+            self._kernel_static_colliders_pos,
+            self._kernel_static_colliders_quat,
+            self._collision_boundary,
+            self._static_colliders,
             self._errno,
         )
+        if self._is_damping_enabled:
+            _kernel_compute_damping_state(
+                self._n_particles,
+                self._damping_velocity_scale,
+                self._support_radius,
+                self.particles_reordered,
+                self.particles_status_reordered,
+                self.particles_info_reordered,
+                self._damping_state,
+            )
+        _kernel_update_velocities(
+            self._n_particles,
+            self._substep_dt,
+            self._damping_beta,
+            self._support_radius,
+            self.particles_reordered,
+            self.particles_status_reordered,
+            self.particles_info_reordered,
+            self._damping_state,
+            self._is_damping_enabled,
+            self._errno,
+        )
+        if self._viscosity > 0.0:
+            self._compute_density_constraints()
+            _kernel_compute_viscosity_velocity_updates(
+                self._n_particles,
+                self._viscosity,
+                self._support_radius,
+                self.particles_reordered,
+                self.particles_status_reordered,
+                self.particles_info_reordered,
+                self.sh,
+            )
+            _kernel_apply_viscosity_velocity_updates(
+                self._n_particles,
+                self.particles_reordered,
+                self.particles_status_reordered,
+                self.particles_info_reordered,
+                self._errno,
+            )
+        if self._kinetic_smoothing > 0.0:
+            self._compute_density_constraints()
+            _kernel_initialize_kinetic_smoothing(
+                self._n_particles,
+                self.particles_reordered,
+                self.particles_status_reordered,
+                self.particles_info_reordered,
+                self._kinetic_smoothing_state,
+            )
+            _kernel_compute_viscosity_velocity_updates(
+                self._n_particles,
+                self._kinetic_smoothing,
+                self._support_radius,
+                self.particles_reordered,
+                self.particles_status_reordered,
+                self.particles_info_reordered,
+                self.sh,
+            )
+            _kernel_reduce_kinetic_smoothing(
+                self._n_particles,
+                self.particles_reordered,
+                self.particles_status_reordered,
+                self.particles_info_reordered,
+                self._kinetic_smoothing_state,
+            )
+            _kernel_prepare_kinetic_smoothing(self._kinetic_smoothing_state)
+            _kernel_apply_kinetic_smoothing(
+                self._n_particles,
+                self.particles_reordered,
+                self.particles_status_reordered,
+                self.particles_info_reordered,
+                self._kinetic_smoothing_state,
+                self._errno,
+            )
 
     def substep_pre_coupling_grad(self, f):
         pass
@@ -1025,9 +1823,33 @@ class IPBSTFSolver(Solver):
         errno = np.bitwise_or.reduce(qd_to_numpy(self._errno, transpose=True))
         if errno & ErrorCode.INVALID_IPBSTF_STATE_NAN:
             gs.raise_exception(
-                "IPBSTF produced a non-finite position or velocity. Increase alpha, reduce the time step, or increase "
-                "the particle resolution."
+                "IPBSTF produced a non-finite local solve, position, or velocity. Reduce the time step, increase the "
+                "particle resolution, or use larger alpha and damping_alpha values."
             )
+
+    @gs.assert_built
+    def get_kinetic_energy(self, envs_idx=None):
+        """Get the total translational kinetic energy of active liquid particles in Joules [J]."""
+        envs_idx = self._scene._sanitize_envs_idx(envs_idx)
+        velocity = qd_to_torch(self.particles.vel, envs_idx, transpose=True)
+        is_active = qd_to_torch(self.particles_status.active, envs_idx, transpose=True)
+        is_fixed = qd_to_torch(self.particles_info.is_fixed)
+        mass = qd_to_torch(self.particles_info.mass)
+        speed_sqr = torch.sum(velocity * velocity, dim=-1)
+        kinetic_energy = 0.5 * torch.sum((is_active & ~is_fixed) * mass * speed_sqr, dim=-1)
+        return kinetic_energy[0] if self._sim.n_envs == 0 else kinetic_energy
+
+    @gs.assert_built
+    def get_last_step_variational_energy(self, envs_idx=None):
+        """Get energy before and after each density iteration of the most recent solver substep.
+
+        Returns a tensor with shape ``(max_solver_iterations + 1,)`` or
+        ``(n_envs, max_solver_iterations + 1)``. Entry zero is the energy of the collision-projected prediction;
+        each remaining entry is the accepted energy after one relaxed local Newton iteration.
+        """
+        envs_idx = self._scene._sanitize_envs_idx(envs_idx)
+        energy = qd_to_torch(self._solver_iteration_energy, envs_idx, transpose=True, copy=True)
+        return energy[0] if self._sim.n_envs == 0 else energy
 
     def set_state(self, f, state, envs_idx=None):
         if self.is_active:
