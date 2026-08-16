@@ -140,6 +140,41 @@ class SPHEntityState(RBC):
         return self._vel
 
 
+class IPBFEntityState(RBC):
+    """
+    Dynamic state queried from a genesis IPBFEntity.
+    """
+
+    def __init__(self, entity, s_global):
+        self._entity = entity
+        self._s_global = s_global
+        base_shape = (self.entity.sim._B, self._entity.n_particles)
+        args = {
+            "dtype": gs.tc_float,
+            "requires_grad": False,
+            "scene": self._entity.scene,
+        }
+
+        self._pos = gs.zeros(base_shape + (3,), **args)
+        self._vel = gs.zeros(base_shape + (3,), **args)
+
+    @property
+    def entity(self):
+        return self._entity
+
+    @property
+    def s_global(self):
+        return self._s_global
+
+    @property
+    def pos(self):
+        return self._pos
+
+    @property
+    def vel(self):
+        return self._vel
+
+
 class FEMEntityState:
     """
     Dynamic state queried from a genesis FEMEntity.

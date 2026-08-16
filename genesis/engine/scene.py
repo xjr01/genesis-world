@@ -23,6 +23,7 @@ from genesis.options import (
     BaseCouplerOptions,
     LegacyCouplerOptions,
     FEMOptions,
+    IPBFOptions,
     MPMOptions,
     PBDOptions,
     ProfilingOptions,
@@ -73,6 +74,8 @@ class Scene(RBC):
         The options configuring the mpm_solver (``scene.sim.MPMSolver``).
     sph_options : gs.options.SPHOptions
         The options configuring the sph_solver (``scene.sim.SPHSolver``).
+    ipbf_options : gs.options.IPBFOptions
+        The options configuring the ipbf_solver (``scene.sim.IPBFSolver``).
     fem_options : gs.options.FEMOptions
         The options configuring the fem_solver (``scene.sim.FEMSolver``).
     sf_options : gs.options.SFOptions
@@ -100,6 +103,7 @@ class Scene(RBC):
         kinematic_options: KinematicOptions | None = None,
         mpm_options: MPMOptions | None = None,
         sph_options: SPHOptions | None = None,
+        ipbf_options: IPBFOptions | None = None,
         fem_options: FEMOptions | None = None,
         sf_options: SFOptions | None = None,
         pbd_options: PBDOptions | None = None,
@@ -121,6 +125,7 @@ class Scene(RBC):
         kinematic_options = kinematic_options or KinematicOptions()
         mpm_options = mpm_options or MPMOptions()
         sph_options = sph_options or SPHOptions()
+        ipbf_options = ipbf_options or IPBFOptions()
         fem_options = fem_options or FEMOptions()
         sf_options = sf_options or SFOptions()
         pbd_options = pbd_options or PBDOptions()
@@ -142,6 +147,7 @@ class Scene(RBC):
             kinematic_options,
             mpm_options,
             sph_options,
+            ipbf_options,
             fem_options,
             sf_options,
             pbd_options,
@@ -158,6 +164,7 @@ class Scene(RBC):
         self.kinematic_options = kinematic_options.model_copy_from(sim_options)
         self.mpm_options = mpm_options.model_copy_from(sim_options)
         self.sph_options = sph_options.model_copy_from(sim_options)
+        self.ipbf_options = ipbf_options.model_copy_from(sim_options)
         self.fem_options = fem_options.model_copy_from(sim_options)
         self.sf_options = sf_options.model_copy_from(sim_options)
         self.pbd_options = pbd_options.model_copy_from(sim_options)
@@ -177,6 +184,7 @@ class Scene(RBC):
             kinematic_options=self.kinematic_options,
             mpm_options=self.mpm_options,
             sph_options=self.sph_options,
+            ipbf_options=self.ipbf_options,
             fem_options=self.fem_options,
             sf_options=self.sf_options,
             pbd_options=self.pbd_options,
@@ -219,6 +227,7 @@ class Scene(RBC):
         kinematic_options: KinematicOptions,
         mpm_options: MPMOptions,
         sph_options: SPHOptions,
+        ipbf_options: IPBFOptions,
         fem_options: FEMOptions,
         sf_options: SFOptions,
         pbd_options: PBDOptions,
@@ -247,6 +256,9 @@ class Scene(RBC):
 
         if not isinstance(sph_options, SPHOptions):
             gs.raise_exception("`sph_options` should be an instance of `SPHOptions`.")
+
+        if not isinstance(ipbf_options, IPBFOptions):
+            gs.raise_exception("`ipbf_options` should be an instance of `IPBFOptions`.")
 
         if not isinstance(fem_options, FEMOptions):
             gs.raise_exception("`fem_options` should be an instance of `FEMOptions`.")
@@ -434,6 +446,7 @@ class Scene(RBC):
                 gs.materials.MPM.Sand,
                 gs.materials.MPM.Snow,
                 gs.materials.SPH.Liquid,
+                gs.materials.IPBF.Liquid,
             ),
         ):
             if surface.vis_mode is None:
@@ -453,7 +466,7 @@ class Scene(RBC):
                     f"Unsupported `surface.vis_mode` for material {material}: '{surface.vis_mode}'. Expected one of: ['particle', 'recon']."
                 )
 
-        elif isinstance(material, (gs.materials.PBD.Base, gs.materials.MPM.Base, gs.materials.SPH.Base)):
+        elif isinstance(material, (gs.materials.PBD.Base, gs.materials.MPM.Base, gs.materials.SPH.Base, gs.materials.IPBF.Base)):
             if surface.vis_mode is None:
                 surface.vis_mode = "visual"
 
@@ -1767,6 +1780,11 @@ class Scene(RBC):
     def sph_solver(self):
         """The scene's `sph_solver`, managing all the `SPHEntity` in the scene."""
         return self._sim.sph_solver
+
+    @property
+    def ipbf_solver(self):
+        """The scene's `ipbf_solver`, managing all the `IPBFEntity` in the scene."""
+        return self._sim.ipbf_solver
 
     @property
     def fem_solver(self):

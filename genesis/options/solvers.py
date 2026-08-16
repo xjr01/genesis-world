@@ -765,6 +765,84 @@ class SPHOptions(Options):
             self._hash_grid_res = np.ceil(np.array(self.hash_grid_res) / self.hash_grid_cell_size).astype(gs.np_int)
 
 
+class IPBFOptions(Options):
+    """
+    Options configuring the IPBFSolver (Implicit Position-Based Fluids, Diaz et al. 2025).
+
+    Note
+    ----
+    If spatial hashing parameters are not given, we will compute them automatically this way: For `hash_grid_cell_size`, we will set it to be the `support_radius`, which is essentially 2 * `particle_size`. For `hash_grid_res`, if a small bound is given, it's used for the hash grid; otherwise, we use a default value of a 150^3 cube. Any grid bigger than that will results in too many cells hence not ideal.
+
+    Parameters
+    ----------
+    dt : float, optional
+        Time duration for each simulation step in seconds. If none, it will inherit from `SimOptions`. Defaults to None.
+    gravity : tuple, optional
+        Gravity force in N/kg. If none, it will inherit from `SimOptions`. Defaults to None.
+    particle_size : float, optional
+        Particle diameter in meters. Defaults to 0.02.
+    lower_bound : tuple, shape (3,), optional
+        Lower bound of the simulation domain. Defaults to (-100.0, -100.0, 0.0).
+    upper_bound : tuple, shape (3,), optional
+        Upper bound of the simulation domain. Defaults to (100.0, 100.0, 100.0).
+    hash_grid_res : tuple, optional
+        Size of the spatially-repetitive spatial hashing grid in meters. If none, it will be computed automatically. Defaults to None.
+    hash_grid_cell_size : float, optional
+        Size of the lattic cell of the spatial hashing grid in meters. This should be at least 2 * `particle_size`. If none, it will be computed automatically. Defaults to None.
+    ipbf_iterations : int, optional
+        Number of per-particle Newton (relaxed Jacobi) iterations per substep. Defaults to 2.
+    alpha : float, optional
+        Compliance of the pressure energy (alpha = 1 / k). 0.0 means infinite stiffness (paper default). Defaults to 0.0.
+    damping_beta : float, optional
+        Beta coefficient of the artificial damping (in units of support radius). Defaults to 60.0.
+    """
+
+    dt: PositiveFloat | None = None
+    gravity: Vec3FType | None = None
+    particle_size: PositiveFloat = 0.02
+
+    lower_bound: Vec3FType = (-100.0, -100.0, 0.0)
+    upper_bound: Vec3FType = (100.0, 100.0, 100.0)
+
+    # spatial hashing
+    hash_grid_res: Vec3FType | None = None  # size of the spatially-repetitive hash grid in meters
+    hash_grid_cell_size: PositiveFloat | None = None  # size of the cubic cell in meters
+
+    # IPBF parameters (reserved for the actual pressure solve; unused by the gravity-only skeleton)
+    ipbf_iterations: PositiveInt = 2
+    alpha: NonNegativeFloat = 0.0
+    damping_beta: NonNegativeFloat = 60.0
+
+    _support_radius: float = PrivateAttr(default=0.0)
+    _hash_grid_res: np.ndarray = PrivateAttr(default=None)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _resolve_defaults(cls, data: dict) -> dict:
+        particle_size = data.get("particle_size", 0.02)
+        support_radius = 2 * particle_size
+        if data.get("hash_grid_cell_size") is None:
+            data["hash_grid_cell_size"] = support_radius
+        return data
+
+    def model_post_init(self, context: Any) -> None:
+        if not np.all(np.array(self.upper_bound) > np.array(self.lower_bound)):
+            gs.raise_exception("Invalid pair of upper_bound and lower_bound.")
+
+        self._support_radius = 2 * self.particle_size
+
+        if self.hash_grid_cell_size < self._support_radius:
+            gs.raise_exception("`hash_grid_cell_size` should not be smaller than 2 * `particle_size`.")
+
+        if self.hash_grid_res is None:
+            max_hash_grid_res = np.ceil(
+                (np.array(self.upper_bound) - np.array(self.lower_bound)) / self.hash_grid_cell_size
+            ).astype(gs.np_int)
+            self._hash_grid_res = np.minimum(max_hash_grid_res, np.array([150, 150, 150], dtype=gs.np_int))
+        else:
+            self._hash_grid_res = np.ceil(np.array(self.hash_grid_res) / self.hash_grid_cell_size).astype(gs.np_int)
+
+
 class PBDOptions(Options):
     """
     Options configuring the PBDSolver.
