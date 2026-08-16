@@ -28,10 +28,18 @@ class IPBFSolver(Solver):
         self._particle_size = options.particle_size
         self._support_radius = options._support_radius
 
-        # IPBF parameters (damping_beta is reserved for the artificial damping of Phase 3)
+        # IPBF parameters
         self._ipbf_iterations = options.ipbf_iterations
         self._alpha = options.alpha
+
+        # artificial damping (paper section 3.6, eqs. 16-18)
+        self._damping_enabled = options.damping_enabled
+        self._damping_alpha_star = options.damping_alpha_star
         self._damping_beta = options.damping_beta
+
+        # static boundary particles (PLAN P4.1)
+        self._boundary_particles_enabled = options.boundary_particles
+        self._boundary_layers = options.boundary_layers
 
         # numerical guard (PLAN P2.4): skip neighbor pairs closer than eps * support radius
         self._eps_r = 1e-6 * self._support_radius
@@ -65,12 +73,14 @@ class IPBFSolver(Solver):
             y=gs.qd_vec3,  # inertial position (eq. 3)
             dpos=gs.qd_vec3,  # Newton step (Delta x) scratch
             C=gs.qd_float,  # clamped density constraint max(rho - 1, 0)
+            xstar=gs.qd_vec3,  # alternative position x* with compliance alpha* (artificial damping)
         )
 
         # dynamic particle state without gradient
         struct_particle_state_ng = qd.types.struct(
             reordered_idx=gs.qd_int,
             active=gs.qd_bool,
+            is_boundary=gs.qd_bool,  # static Akinci-style boundary particle (fixed, no own constraint)
         )
 
         # static particle info
@@ -128,6 +138,14 @@ class IPBFSolver(Solver):
         self._n_particles = self.n_particles
 
         if self.is_active:
+            # fluid particles come first; static boundary particles are appended after them
+            self._n_fluid_particles = self._n_particles
+            boundary_pos = (
+                self._sample_boundary_particles() if self._boundary_particles_enabled else np.zeros((0, 3))
+            )
+            self._n_boundary_particles = len(boundary_pos)
+            self._n_particles = self._n_fluid_particles + self._n_boundary_particles
+
             self.sh.build(self._B)
             self.init_particle_fields()
             self.init_ckpt()
@@ -135,12 +153,82 @@ class IPBFSolver(Solver):
             for entity in self.entities:
                 entity._add_to_solver()
 
+            if self._n_boundary_particles > 0:
+                self._kernel_add_boundary_particles(
+                    self._n_fluid_particles,
+                    self._n_boundary_particles,
+                    self.entities[0].material.rho,
+                    boundary_pos,
+                )
+            gs.logger.info(f"IPBFSolver: {self._n_fluid_particles} fluid + {self._n_boundary_particles} boundary particles.")
+
         # FIXME: _gravity must be a raw qd.field() — see comment in mpm_solver.py
         # Only when active — see the SNode-tree note in mpm_solver.py.
         if self.is_active and self._gravity is not None:
             gravity = self._gravity.to_numpy()
             self._gravity = qd.field(dtype=gs.qd_vec3, shape=(self._B,))
             self._gravity.from_numpy(gravity)
+
+    def _sample_boundary_particles(self):
+        """
+        Sample static boundary particles on the boundary box walls (PLAN P4.1, Akinci et al. 2012 style):
+        bottom face (z = lower.z) + 4 side faces spanning the full box height, on a regular grid with
+        spacing `particle_size`; layer 0 sits on the wall plane, further layers are shifted one
+        `particle_size` outward each. Corner/edge duplicates are removed.
+        """
+        ps = self._particle_size
+        lx, ly, lz = self._lower_bound
+        ux, uy, uz = self._upper_bound
+        xs = np.arange(lx, ux + 0.5 * ps, ps)
+        ys = np.arange(ly, uy + 0.5 * ps, ps)
+        zs = np.arange(lz, uz + 0.5 * ps, ps)
+
+        pts = []
+        for l in range(self._boundary_layers):
+            # layer 0 sits ONE particle spacing outside the wall plane, further layers one more
+            # spacing each. (Deviation from PLAN P4.1's literal "layer 0 on the wall": fluid
+            # particles clamped by CubeBoundary land exactly on the wall plane, so a wall-plane
+            # boundary lattice would produce r=0 duplicate pairs and contact-density spikes.
+            # At 1x spacing the contact geometry is the standard Akinci interleaved lattice.)
+            off = -(l + 1) * ps
+            # bottom face
+            X, Y = np.meshgrid(xs, ys, indexing="ij")
+            pts.append(np.stack([X, Y, np.full_like(X, lz + off)], axis=-1).reshape(-1, 3))
+            # side faces at x = lx / ux (full y, z)
+            for xv in (lx + off, ux - off):
+                Y, Z = np.meshgrid(ys, zs, indexing="ij")
+                pts.append(np.stack([np.full_like(Y, xv), Y, Z], axis=-1).reshape(-1, 3))
+            # side faces at y = ly / uy (full x, z)
+            for yv in (ly + off, uy - off):
+                X, Z = np.meshgrid(xs, zs, indexing="ij")
+                pts.append(np.stack([X, np.full_like(X, yv), Z], axis=-1).reshape(-1, 3))
+
+        pos = np.concatenate(pts, axis=0)
+        # dedupe corner/edge duplicates on the integer grid
+        grid_idx = np.round(pos / ps).astype(np.int64)
+        _, uniq_idx = np.unique(grid_idx, axis=0, return_index=True)
+        return pos[np.sort(uniq_idx)].astype(gs.np_float)
+
+    @qd.kernel
+    def _kernel_add_boundary_particles(
+        self,
+        particle_start: qd.i32,
+        n_particles: qd.i32,
+        mat_rho: qd.f32,
+        pos: qd.types.ndarray(),
+    ):
+        for i_p_, i_b in qd.ndrange(n_particles, self._B):
+            i_p = i_p_ + particle_start
+            self.particles_ng[i_p, i_b].active = True
+            self.particles_ng[i_p, i_b].is_boundary = True
+            for i in qd.static(range(3)):
+                self.particles[i_p, i_b].pos[i] = pos[i_p_, i]
+            self.particles[i_p, i_b].vel = qd.Vector.zero(gs.qd_float, 3)
+
+        for i_p_ in range(n_particles):
+            i_p = i_p_ + particle_start
+            self.particles_info[i_p].rho = mat_rho
+            self.particles_info[i_p].mass = self._particle_volume * mat_rho
 
     # ------------------------------------------------------------------------------------
     # -------------------------------------- misc ----------------------------------------
@@ -250,7 +338,8 @@ class IPBFSolver(Solver):
     @qd.kernel
     def _kernel_predict(self, f: qd.i32):
         for i_p, i_b in qd.ndrange(self._n_particles, self._B):
-            if self.particles_ng[i_p, i_b].active:
+            # boundary particles are static: no prediction
+            if self.particles_ng[i_p, i_b].active and not self.particles_ng[i_p, i_b].is_boundary:
                 self.particles[i_p, i_b].ipos = self.particles[i_p, i_b].pos
                 # inertial position y = x^t + h (v^t + h a*), a* = gravity (eq. 3; viscosity joins a* in Phase 3)
                 y = self.particles[i_p, i_b].pos + self._substep_dt * (
@@ -274,9 +363,11 @@ class IPBFSolver(Solver):
     @qd.kernel
     def _kernel_compute_density_C(self, f: qd.i32):
         for i_p, i_b in qd.ndrange(self._n_particles, self._B):
-            if self.particles_ng[i_p, i_b].active:
+            # boundary particles only contribute density; they carry no constraint of their own
+            if self.particles_ng[i_p, i_b].active and not self.particles_ng[i_p, i_b].is_boundary:
                 pos_i = self.particles[i_p, i_b].pos
-                # volume-normalized density rho~_i = sum_j V W_ij (includes the self term V W(0))
+                # volume-normalized density rho~_i = sum_j V W_ij over fluid AND boundary neighbors
+                # (includes the self term V W(0)); boundary neighbors contribute with V_b = V
                 rho = self._particle_volume * self.cubic_kernel_W(0.0)
                 base = self.sh.pos_to_grid(pos_i)
                 for offset in qd.grouped(qd.ndrange((-1, 2), (-1, 2), (-1, 2))):
@@ -294,10 +385,67 @@ class IPBFSolver(Solver):
                 # negative-pressure clamp: C_i = max(rho~_i - 1, 0) (paper: enabled in all tests)
                 self.particles[i_p, i_b].C = qd.max(rho - 1.0, 0.0)
 
+    @qd.func
+    def _solve_newton_direction(
+        self,
+        alpha_over_h2,
+        x_minus_y,
+        C_i,
+        g_ii,
+        A_ii,
+        sum_Cj_gij,
+        sum_gij_gijT,
+        sum_Cj_DAij,
+    ):
+        """
+        Assemble f_i (eq. 10) and H_i (eq. 11 + column-norm diagonal approximation, eq. 15) from the
+        per-particle accumulators and solve Delta x_i = H_i^-1 f_i via the 3x3 adjugate / determinant.
+        Shared by the plain Newton step (alpha) and the alternative solution x* (alpha*).
+        """
+        # f_i: negative gradient (eq. 10)
+        f_i = -alpha_over_h2 * x_minus_y - C_i * g_ii - sum_Cj_gij
+
+        # H_i: eq. 11 with the geometric stiffness replaced by its column-norm diagonal
+        # approximation (eq. 15, Andrews et al. 2017) — mandatory for stability
+        H_i = alpha_over_h2 * qd.Matrix.identity(dt=gs.qd_float, n=3)
+        H_i += g_ii.outer_product(g_ii) + sum_gij_gijT
+        for c in qd.static(range(3)):
+            H_i[c, c] += C_i * qd.sqrt(A_ii[0, c] ** 2 + A_ii[1, c] ** 2 + A_ii[2, c] ** 2) + sum_Cj_DAij[c]
+
+        # 3x3 analytic inverse via adjugate / determinant (H_i is symmetric)
+        m00 = H_i[0, 0]
+        m01 = H_i[0, 1]
+        m02 = H_i[0, 2]
+        m11 = H_i[1, 1]
+        m12 = H_i[1, 2]
+        m22 = H_i[2, 2]
+        K00 = m11 * m22 - m12 * m12
+        K01 = m02 * m12 - m01 * m22
+        K02 = m01 * m12 - m02 * m11
+        det = m00 * K00 + m01 * K01 + m02 * K02
+        dpos = qd.Vector.zero(gs.qd_float, 3)
+        # degenerate guard (PLAN P2.4): isolated particle / fully clamped neighborhood => H_i = 0
+        if det > 1e-12 * m00 * m11 * m22:
+            K11 = m00 * m22 - m02 * m02
+            K12 = m01 * m02 - m00 * m12
+            K22 = m00 * m11 - m01 * m01
+            inv_det = 1.0 / det
+            dpos = inv_det * qd.Vector(
+                [
+                    K00 * f_i[0] + K01 * f_i[1] + K02 * f_i[2],
+                    K01 * f_i[0] + K11 * f_i[1] + K12 * f_i[2],
+                    K02 * f_i[0] + K12 * f_i[1] + K22 * f_i[2],
+                ],
+                dt=gs.qd_float,
+            )
+        return dpos
+
     @qd.kernel
-    def _kernel_compute_newton_step(self, f: qd.i32):
+    def _kernel_compute_newton_step(self, f: qd.i32, with_star: qd.i32):
         for i_p, i_b in qd.ndrange(self._n_particles, self._B):
-            if self.particles_ng[i_p, i_b].active:
+            # boundary particles are never updated; note their C is always 0 (never computed), so they
+            # contribute to g_ii / A_ii sums but produce no neighbor-constraint terms (PLAN P4.1)
+            if self.particles_ng[i_p, i_b].active and not self.particles_ng[i_p, i_b].is_boundary:
                 pos_i = self.particles[i_p, i_b].pos
                 C_i = self.particles[i_p, i_b].C
                 m_i = self.particles_info[i_p].mass
@@ -344,65 +492,68 @@ class IPBFSolver(Solver):
                 for c in qd.static(range(3)):
                     A_ii[c, c] += ddW0
 
-                alpha_over_h2 = self._alpha * m_i / self._substep_dt**2
-                # f_i: negative gradient (eq. 10)
-                f_i = -alpha_over_h2 * (pos_i - self.particles[i_p, i_b].y) - C_i * g_ii - sum_Cj_gij
+                x_minus_y = pos_i - self.particles[i_p, i_b].y
+                self.particles[i_p, i_b].dpos = self._solve_newton_direction(
+                    self._alpha * m_i / self._substep_dt**2,
+                    x_minus_y,
+                    C_i,
+                    g_ii,
+                    A_ii,
+                    sum_Cj_gij,
+                    sum_gij_gijT,
+                    sum_Cj_DAij,
+                )
 
-                # H_i: eq. 11 with the geometric stiffness replaced by its column-norm diagonal
-                # approximation (eq. 15, Andrews et al. 2017) — mandatory for stability
-                H_i = alpha_over_h2 * qd.Matrix.identity(dt=gs.qd_float, n=3)
-                H_i += g_ii.outer_product(g_ii) + sum_gij_gijT
-                for c in qd.static(range(3)):
-                    H_i[c, c] += C_i * qd.sqrt(A_ii[0, c] ** 2 + A_ii[1, c] ** 2 + A_ii[2, c] ** 2) + sum_Cj_DAij[c]
-
-                # 3x3 analytic inverse via adjugate / determinant (H_i is symmetric)
-                m00 = H_i[0, 0]
-                m01 = H_i[0, 1]
-                m02 = H_i[0, 2]
-                m11 = H_i[1, 1]
-                m12 = H_i[1, 2]
-                m22 = H_i[2, 2]
-                K00 = m11 * m22 - m12 * m12
-                K01 = m02 * m12 - m01 * m22
-                K02 = m01 * m12 - m02 * m11
-                det = m00 * K00 + m01 * K01 + m02 * K02
-                dpos = qd.Vector.zero(gs.qd_float, 3)
-                # degenerate guard (PLAN P2.4): isolated particle / fully clamped neighborhood => H_i = 0
-                if det > 1e-12 * m00 * m11 * m22:
-                    K11 = m00 * m22 - m02 * m02
-                    K12 = m01 * m02 - m00 * m12
-                    K22 = m00 * m11 - m01 * m01
-                    inv_det = 1.0 / det
-                    dpos = inv_det * qd.Vector(
-                        [
-                            K00 * f_i[0] + K01 * f_i[1] + K02 * f_i[2],
-                            K01 * f_i[0] + K11 * f_i[1] + K12 * f_i[2],
-                            K02 * f_i[0] + K12 * f_i[1] + K22 * f_i[2],
-                        ],
-                        dt=gs.qd_float,
-                    )
-                self.particles[i_p, i_b].dpos = dpos
+                # artificial damping (paper section 3.6): during the last solver iteration, compute the
+                # alternative position x* = x_beg + Delta x* / 2 from the same accumulators with the larger
+                # compliance alpha* (single extra Newton solve, same relaxed half-step)
+                if qd.static(self._damping_enabled):
+                    if with_star == 1:
+                        dpos_star = self._solve_newton_direction(
+                            self._damping_alpha_star * m_i / self._substep_dt**2,
+                            x_minus_y,
+                            C_i,
+                            g_ii,
+                            A_ii,
+                            sum_Cj_gij,
+                            sum_gij_gijT,
+                            sum_Cj_DAij,
+                        )
+                        self.particles[i_p, i_b].xstar = pos_i + 0.5 * dpos_star
 
     @qd.kernel
     def _kernel_apply_relaxed_update(self, f: qd.i32):
         for i_p, i_b in qd.ndrange(self._n_particles, self._B):
-            if self.particles_ng[i_p, i_b].active:
+            if self.particles_ng[i_p, i_b].active and not self.particles_ng[i_p, i_b].is_boundary:
                 # relaxed Jacobi: simultaneous half-step update (relaxation factor fixed at 1/2)
                 self.particles[i_p, i_b].pos += 0.5 * self.particles[i_p, i_b].dpos
 
     @qd.kernel
     def _kernel_finalize(self, f: qd.i32):
         for i_p, i_b in qd.ndrange(self._n_particles, self._B):
-            if self.particles_ng[i_p, i_b].active:
+            if self.particles_ng[i_p, i_b].active and not self.particles_ng[i_p, i_b].is_boundary:
                 # PBD-style velocity update: v^{t+1} = (x^{t+1} - x^t) / h
-                self.particles[i_p, i_b].vel = (
-                    self.particles[i_p, i_b].pos - self.particles[i_p, i_b].ipos
-                ) / self._substep_dt
+                v = (self.particles[i_p, i_b].pos - self.particles[i_p, i_b].ipos) / self._substep_dt
+                # artificial damping (paper section 3.6, eqs. 16-18): compare against the alternative
+                # solution x* and extract kinetic energy only when the motion is coming close to a stop
+                if qd.static(self._damping_enabled):
+                    dist = (self.particles[i_p, i_b].xstar - self.particles[i_p, i_b].pos).norm()
+                    beta_r = self._damping_beta * self._support_radius
+                    if dist < beta_r:
+                        v_star = (self.particles[i_p, i_b].xstar - self.particles[i_p, i_b].ipos) / self._substep_dt
+                        v2 = v.norm_sqr()
+                        v_star2 = v_star.norm_sqr()
+                        if v_star2 < v2 and v2 > 0.0:
+                            d = 1.0 - dist / beta_r
+                            v = v * qd.sqrt(1.0 - d * (v2 - v_star2) / v2)
+                self.particles[i_p, i_b].vel = v
 
     @qd.kernel
     def _kernel_impose_boundary(self, f: qd.i32):
         for i_p, i_b in qd.ndrange(self._n_particles, self._B):
-            if self.particles_ng[i_p, i_b].active:
+            # CubeBoundary clamp stays as a fallback for escaped fluid particles; boundary particles
+            # are fixed and never clamped
+            if self.particles_ng[i_p, i_b].active and not self.particles_ng[i_p, i_b].is_boundary:
                 corrected_pos, corrected_vel = self.boundary.impose_pos_vel(
                     self.particles[i_p, i_b].pos, self.particles[i_p, i_b].vel
                 )
@@ -414,9 +565,11 @@ class IPBFSolver(Solver):
             # Algorithm 1: predict (x <- y) -> hash rebuild -> relaxed-Jacobi Newton iterations -> finalize
             self._kernel_predict(f)
             self._kernel_build_hash(f)
-            for _ in range(self._ipbf_iterations):
+            for it in range(self._ipbf_iterations):
                 self._kernel_compute_density_C(f)
-                self._kernel_compute_newton_step(f)
+                # during the last iteration, also compute the alternative solution x* (artificial damping)
+                with_star = 1 if it == self._ipbf_iterations - 1 else 0
+                self._kernel_compute_newton_step(f, with_star)
                 self._kernel_apply_relaxed_update(f)
             self._kernel_finalize(f)
 
@@ -499,12 +652,14 @@ class IPBFSolver(Solver):
     @qd.kernel
     def _kernel_update_render_fields(self, f: qd.i32):
         for i_p, i_b in qd.ndrange(self._n_particles, self._B):
-            if self.particles_ng[i_p, i_b].active:
+            # boundary particles are never rendered
+            if self.particles_ng[i_p, i_b].active and not self.particles_ng[i_p, i_b].is_boundary:
                 self.particles_render[i_p, i_b].pos = self.particles[i_p, i_b].pos
                 self.particles_render[i_p, i_b].vel = self.particles[i_p, i_b].vel
+                self.particles_render[i_p, i_b].active = True
             else:
                 self.particles_render[i_p, i_b].pos = gu.qd_nowhere()
-            self.particles_render[i_p, i_b].active = self.particles_ng[i_p, i_b].active
+                self.particles_render[i_p, i_b].active = False
 
     @qd.kernel
     def _kernel_add_particles(

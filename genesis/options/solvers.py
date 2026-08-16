@@ -795,6 +795,22 @@ class IPBFOptions(Options):
         Compliance of the pressure energy (alpha = 1 / k). 0.0 means infinite stiffness (paper default). Defaults to 0.0.
     damping_beta : float, optional
         Beta coefficient of the artificial damping (in units of support radius). Defaults to 60.0.
+    damping_enabled : bool, optional
+        Whether to enable the artificial damping (paper section 3.6, eqs. 16-18; enabled in all paper tests).
+        Defaults to True.
+    damping_alpha_star : float, optional
+        Compliance of the alternative (lower-stiffness) solution used by the artificial damping.
+        The paper value 1e-3 is tuned for its own units (particle diameter 0.5, kernel radius R = 1):
+        the inertia-to-constraint ratio in H scales as alpha * m * R^2 / h^2 with m ~ R^3 and the
+        constraint gradient squared ~ 1 / R^2, i.e. as alpha * R^5 / h^2. Rescaling to a meter-scale
+        scene with R = 0.02 (2 * particle_size = 0.01) gives 1e-3 * (1 / 0.02)^5 = 3.2e6.
+        Defaults to 3.2e6.
+    boundary_particles : bool, optional
+        Whether to sample static Akinci-style boundary particles on the boundary box walls
+        (bottom + 4 side faces) and include them in the density sum (PLAN P4.1). Defaults to True.
+    boundary_layers : int, optional
+        Number of boundary particle layers; layer 0 sits on the wall plane, further layers are
+        shifted one `particle_size` outward each. Defaults to 2.
     """
 
     dt: PositiveFloat | None = None
@@ -808,10 +824,20 @@ class IPBFOptions(Options):
     hash_grid_res: Vec3FType | None = None  # size of the spatially-repetitive hash grid in meters
     hash_grid_cell_size: PositiveFloat | None = None  # size of the cubic cell in meters
 
-    # IPBF parameters (reserved for the actual pressure solve; unused by the gravity-only skeleton)
+    # IPBF parameters
     ipbf_iterations: PositiveInt = 2
     alpha: NonNegativeFloat = 0.0
+
+    # artificial damping (paper section 3.6, eqs. 16-18)
+    # NOTE: disabled by default for now — alpha_star tuning is deferred (user decision 2026-08-17);
+    # alpha_star >= 10 saturates (over-damped "sand-like" in 1 m scenes); effective range is [0.1, 10].
+    damping_enabled: StrictBool = False
+    damping_alpha_star: PositiveFloat = 3.2e6  # paper's 1e-3 rescaled from R=1 to R=0.02 (see docstring)
     damping_beta: NonNegativeFloat = 60.0
+
+    # static boundary particles (PLAN P4.1, Akinci et al. 2012 style; the paper leaves boundaries open)
+    boundary_particles: StrictBool = True
+    boundary_layers: PositiveInt = 2
 
     _support_radius: float = PrivateAttr(default=0.0)
     _hash_grid_res: np.ndarray = PrivateAttr(default=None)
