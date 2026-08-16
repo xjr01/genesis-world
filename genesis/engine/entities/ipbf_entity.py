@@ -171,6 +171,14 @@ class IPBFEntity(ParticleEntity):
             vels = vels[0]
         return vels
 
+    def get_particles_rho(self, envs_idx=None):
+        envs_idx = self._scene._sanitize_envs_idx(envs_idx)
+        rhos = self._sanitize_particles_tensor(None, gs.tc_float, None, envs_idx)
+        self.solver._kernel_get_particles_rho(self._particle_start, self.n_particles, envs_idx, rhos)
+        if self._scene.n_envs == 0:
+            rhos = rhos[0]
+        return rhos
+
     @gs.assert_built
     def set_particles_active(self, actives, particles_idx_local=None, envs_idx=None):
         envs_idx = self._scene._sanitize_envs_idx(envs_idx)
