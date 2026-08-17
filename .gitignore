@@ -158,5 +158,8 @@ uv.lock
 # alarm.yml outputs
 outputs/
 
+# IPBF example outputs (generated videos/CSVs)
+examples/ipbf/output/
+
 # Local benchmark archive (not versioned)
 /benchmarks/
