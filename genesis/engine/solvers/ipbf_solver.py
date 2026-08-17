@@ -608,6 +608,9 @@ class IPBFSolver(Solver):
 
     def set_state(self, f, state, envs_idx=None):
         if self.is_active:
+            assert state.pos.shape[1] == self._n_particles, (
+                f"state size mismatch: {state.pos.shape[1]} != {self._n_particles}"
+            )
             self._kernel_set_state(f, state.pos, state.vel, state.active)
 
     @qd.kernel
@@ -627,6 +630,9 @@ class IPBFSolver(Solver):
     def get_state(self, f):
         if self.is_active:
             state = IPBFSolverState(self.scene)
+            assert state.pos.shape[1] == self._n_particles, (
+                f"state size mismatch: {state.pos.shape[1]} != {self._n_particles}"
+            )
             self._kernel_get_state(f, state.pos, state.vel, state.active)
         else:
             state = None
@@ -784,10 +790,14 @@ class IPBFSolver(Solver):
 
     @property
     def n_particles(self):
-        if self.is_built:
-            return self._n_particles
-        else:
-            return sum([entity.n_particles for entity in self._entities])
+        # NOTE: after build, `_n_particles` includes the static boundary particles, which do not belong
+        # to any entity. Prefer it whenever it exists so state arrays are sized correctly even when
+        # captured while `scene._is_built` is still False (e.g. Scene._init_state during build).
+        # `add_entity` queries this property before build (attribute absent) and gets the entity sum.
+        n = getattr(self, "_n_particles", None)
+        if n is not None:
+            return n
+        return sum([entity.n_particles for entity in self._entities])
 
     @property
     def particle_volume(self):
