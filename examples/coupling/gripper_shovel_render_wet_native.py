@@ -224,10 +224,10 @@ def main():
             surface=wall_surface,
         )
 
-    # real shovel asset (objaverse 'Shovel vintage', aligned to the tilt-box frame by
-    # phase8_shovel_align.py); its frame origin coincides with the physical blade box
+    # real litter-scoop asset (objaverse 'Litter scoop/貓砂鏟', aligned to the tilt-box frame by
+    # phase8b_litter_align.py); its frame origin coincides with the physical blade box
     shovel = scene.add_entity(
-        morph=gs.morphs.Mesh(file=os.path.join(EXPERIMENTS_DIR, "assets", "shovel_vintage_aligned.glb")),
+        morph=gs.morphs.Mesh(file=os.path.join(EXPERIMENTS_DIR, "assets", "litter_scoop_aligned.glb")),
         material=gs.materials.Kinematic(),
     )
     franka = scene.add_entity(

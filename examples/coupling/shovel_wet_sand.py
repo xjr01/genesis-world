@@ -86,7 +86,9 @@ BOX_UPPER = (0.35, 0.30, 0.80)
 WALL_THICK = 0.01
 WALL_HEIGHT = 0.18
 
-BLADE_HALF = (0.15, 0.12, 0.01)
+# blade box matched to the litter-scoop pan (objaverse 'Litter scoop/貓砂鏟'):
+# pan depth 0.30 m along x, pan width 0.234 m along y
+BLADE_HALF = (0.15, 0.117, 0.01)
 BLADE_ANGLE = math.radians(40.0)  # about +y: local +x edge descends toward +x (leading edge low)
 BLADE_POS0 = (-0.20, 0.0, 0.369)  # tip starts at (-0.085, 0.273) above the descent target point
 HANDLE_LEN = 0.3
@@ -195,11 +197,11 @@ def main():
     blade_quat0 = np.array(
         [math.cos(BLADE_ANGLE / 2.0), 0.0, math.sin(BLADE_ANGLE / 2.0), 0.0]
     )
-    # real shovel asset (objaverse 'Shovel vintage', aligned to the tilt-box frame by
-    # phase8_shovel_align.py): pure visualization; physics stays with the DEM tilt-box obstacle
+    # real litter-scoop asset (objaverse 'Litter scoop/貓砂鏟', aligned to the tilt-box frame by
+    # phase8b_litter_align.py): pure visualization; physics stays with the DEM tilt-box obstacle
     shovel = scene.add_entity(
         morph=gs.morphs.Mesh(
-            file=os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "shovel_vintage_aligned.glb"),
+            file=os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "litter_scoop_aligned.glb"),
             pos=BLADE_POS0,
             quat=tuple(blade_quat0),
         ),

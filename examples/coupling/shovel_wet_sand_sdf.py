@@ -1,30 +1,53 @@
 """
-Phase 7 gripper-arm shovel demo: a Franka Panda grips the shovel handle and follows it through
-the exact same scoop motion as the best wet-sand demo (examples/coupling/shovel_wet_sand.py,
-viscosity_coeff = 0.01 + contact release, n_wet_lifted ~ 5666).
+Wet-sand scoop demo, MESH-SDF obstacle variant: identical scene/motion as phase5_shovel_wet.py,
+but the physical boundary is the voxelized SDF of the real litter-scoop mesh
+(assets/litter_scoop_sdf.npz, built by phase8c_voxelize_scoop.py from the SAME aligned glb that
+is rendered), driven through dem.set_sdf_obstacle / set_sdf_obstacle_vel instead of the
+analytic tilt box. The scoop's raised walls and curved pan now participate in the physics.
 
-The shovel dynamics are replicated at the code level: the same scene parameters, the same
-action constants (descend / insert / pivot / lift / hold velocities and step counts) drive the
-same DEM tilt-box obstacle, so the blade trajectory is bit-identical to the best demo. The arm
-is a pure kinematic follower: every step the handle midpoint world pose is recomputed from the
-solver's actual blade pose (same blade->handle transform as the demo), the hand link target is
-built with the convention calibrated in phase7_franka_smoke.py (hand x-axis || handle axis,
-hand z-axis = world -y, grasp point 0.09 m along +z pinned to the handle midpoint), IK is
-solved with warm start, the finger joints are overwritten to the 0.015 m grip, and the result
-is hard-set with set_qpos (zero_velocity). Rigid gravity and collisions are off, and the
-LegacyCoupler has no rigid<->dem / rigid<->flip channel, so the arm has zero effect on the
-sand/water physics.
+Usage: python phase5_shovel_wet_sdf.py [max_steps]
+Outputs (separate from the tilt-box run):
+- experiments/videos/phase5_shovel_wet_sdf.mp4           (sand + water + scoop, native rendering)
+- experiments/videos/phase5_shovel_wet_sdf_sandwet.mp4   (sand only, per-grain color by water ratio)
+- experiments/recordings/phase5_shovel_wet_sdf/frame_*.npz
 
-Usage: python phase7_gripper_shovel.py [max_steps] [tag]
-  max_steps  cap on the 766-step run (for short scaffold checks)
-  tag        suffix for output paths (video / recordings / frames), default "" (full run)
+Wet-sand scoop demo: drip water onto sand, then descend, insert, pivot up, and lift the wet clump.
 
-Outputs (tagged):
-- experiments/videos/phase7_gripper_shovel{tag}.mp4          (native render)
-- experiments/videos/phase7_gripper_shovel{tag}_sandwet.mp4  (per-grain wetness render)
-- experiments/recordings/phase7_gripper_shovel{tag}/frame_*.npz + meta.json
-- experiments/recordings/phase7_gripper_shovel{tag}/ik_log.csv (per-step IK follow error)
-- experiments/frames/phase7_gripper_shovel{tag}_frame_*.png  (keyframes)
+Scene: a walled box (interior = DEM domain bounds, x in [-0.35, 0.35], y in [-0.30, 0.30]) with a
+sand layer (0.68 x 0.58 x 0.16 m, fcc) covering its floor; the four walls are kinematic
+visualization-only entities. At t = 0 a water droplet (radius 0.04 m) is released at (0.02, 0)
+right at the sand surface (z = 0.205, contact release) -- centered over the horizontal blade's
+span after the pivot, clear of the vertical descent path -- and is absorbed during the 5 s settle
+(max_ratio = 0.3, grid dx ~ 6.25 mm keeps absorption active), forming a cohesive wet clump via
+the capillary (liquid-bridge) forces.
+
+The shovel (0.3 x 0.24 x 0.02 m blade + 0.3 m handle, one unioned SDF obstacle, blade at 40 deg)
+then:
+  1. descends vertically (vel = (0, 0, -0.12) m/s) for 0.92 s until the leading tip touches the
+     sand surface at (-0.085, 0.163),
+  2. inserts diagonally along the blade direction (vel = (0.115, 0, -0.0964) m/s, i.e. 40 deg
+     down) for 1.6 s, ending with the tip at (0.099, 0.008), nearly grazing the floor,
+     underneath the wet clump,
+  3. pivots up about the blade's TRAILING edge (handle side): a rotation from 40 deg to flat
+     (omega_y = -0.399 rad/s about the blade center) with a compensating translation
+     (vel = (0.0205, 0, 0.0563) m/s, mid-rotation value of v_c = -omega x r_pivot) that keeps the
+     trailing edge near (-0.131, 0.201) fixed -- the tip sweeps up along a circular arc through
+     the sand, scooping the wet clump onto the blade for 1.75 s, ending horizontal at z ~ 0.20,
+  4. lifts vertically (vel = (0, 0, 0.10) m/s) for 2.5 s up to z ~ 0.46, carrying the wet clump,
+  5. holds still for 1 s.
+
+Note: the FLIP water does not see the shovel obstacle (DEM-only); the script relies on the droplet
+being fully absorbed during the settle phase (monitored via water_active).
+
+Per-frame recording for offline re-rendering: every step saves sand particle positions + water
+ratios, active water particle positions, and the shovel (blade) position + quaternion to
+experiments/recordings/phase5_shovel_wet/frame_%04d.npz; static scene parameters (domain bounds,
+walls, blade/handle geometry, droplet, grid/particle sizes) go to meta.json in the same directory.
+
+Videos:
+- experiments/videos/phase5_shovel_wet.mp4           (sand + water + shovel, native rendering)
+- experiments/videos/phase5_shovel_wet_sandwet.mp4   (sand only, per-grain color by water ratio)
+Keyframes: experiments/frames/phase5_shovel_wet_frame_*.png.
 """
 
 import math
@@ -45,16 +68,14 @@ import genesis as gs
 
 EXPERIMENTS_DIR = os.path.dirname(os.path.abspath(__file__))
 FRAMES_DIR = os.path.join(EXPERIMENTS_DIR, "frames")
+VIDEO_PATH = os.path.join(EXPERIMENTS_DIR, "videos", "phase5_shovel_wet_sdf.mp4")
+VIDEO_WET_PATH = os.path.join(EXPERIMENTS_DIR, "videos", "phase5_shovel_wet_sdf_sandwet.mp4")
+WET_RAW_DIR = os.path.join(FRAMES_DIR, "phase5_shovel_wet_sdf_sandwet_raw")
+REC_DIR = os.path.join(EXPERIMENTS_DIR, "recordings", "phase5_shovel_wet_sdf")
+SDF_NPZ = os.path.join(EXPERIMENTS_DIR, "assets", "litter_scoop_sdf.npz")
 
-MAX_STEPS = int(sys.argv[1]) if len(sys.argv) > 1 else 10**9
-TAG = sys.argv[2] if len(sys.argv) > 2 else ""
+MAX_STEPS = int(sys.argv[1]) if len(sys.argv) > 1 else None  # debug: cap the total steps
 
-VIDEO_PATH = os.path.join(EXPERIMENTS_DIR, "videos", f"phase7_gripper_shovel{TAG}.mp4")
-VIDEO_WET_PATH = os.path.join(EXPERIMENTS_DIR, "videos", f"phase7_gripper_shovel{TAG}_sandwet.mp4")
-WET_RAW_DIR = os.path.join(FRAMES_DIR, f"phase7_gripper_shovel{TAG}_sandwet_raw")
-REC_DIR = os.path.join(EXPERIMENTS_DIR, "recordings", f"phase7_gripper_shovel{TAG}")
-
-# --- identical scene/action constants to the best demo (shovel_wet_sand.py) ---
 DT = 1.0 / 60.0
 N_SETTLE_STEPS = 300  # 5 s: droplet falls and is absorbed
 N_DESCEND_STEPS = 55  # 0.92 s
@@ -62,40 +83,40 @@ N_INSERT_STEPS = 96  # 1.6 s
 N_ROTATE_STEPS = 105  # 1.75 s
 N_LIFT_STEPS = 150  # 2.5 s
 N_HOLD_STEPS = 60  # 1 s
-DESCEND_VEL = (0.0, 0.0, -0.12)
-INSERT_VEL = (0.115, 0.0, -0.0964)
-ROTATE_VEL = (0.0205, 0.0, 0.0563)
-ROTATE_OMEGA = (0.0, -math.radians(40.0) / 1.75, 0.0)
+DESCEND_VEL = (0.0, 0.0, -0.12)  # straight down until the leading tip touches the sand surface
+# (tip (-0.085, 0.273) -> (-0.085, 0.163))
+INSERT_VEL = (0.115, 0.0, -0.0964)  # 0.15 m/s along the 40 deg blade direction: the tip slides
+# into the sand to (0.099, 0.008), nearly grazing the floor, underneath the wet clump
+ROTATE_VEL = (0.0205, 0.0, 0.0563)  # trailing-edge-pivot emulation: v_center = -omega x r_pivot
+# (mid-rotation value), keeps the trailing (handle-side) edge near (-0.131, 0.201) fixed so the tip
+# sweeps up along a circular arc through the sand, scooping the wet clump onto the blade
+ROTATE_OMEGA = (0.0, -math.radians(40.0) / 1.75, 0.0)  # 40 deg -> flat about the blade center
 LIFT_VEL = (0.0, 0.0, 0.10)
 KEYFRAME_STEPS = [0, 299, 354, 450, 555, 705, 765]
 WET_EVERY = 3
 
-PARTICLE_RADIUS = 3.125e-3
+PARTICLE_RADIUS = 3.125e-3  # sand particle diameter 6.25 mm = 0.8 / 128, matching the FLIP grid dx
 BOX_LOWER = (-0.35, -0.30, 0.0)
 BOX_UPPER = (0.35, 0.30, 0.80)
 WALL_THICK = 0.01
 WALL_HEIGHT = 0.18
 
-BLADE_HALF = (0.15, 0.12, 0.01)
-BLADE_ANGLE = math.radians(40.0)
-BLADE_POS0 = (-0.20, 0.0, 0.369)
+# blade box matched to the litter-scoop pan (objaverse 'Litter scoop/貓砂鏟'):
+# pan depth 0.30 m along x, pan width 0.234 m along y
+BLADE_HALF = (0.15, 0.117, 0.01)
+BLADE_ANGLE = math.radians(40.0)  # about +y: local +x edge descends toward +x (leading edge low)
+BLADE_POS0 = (-0.20, 0.0, 0.369)  # tip starts at (-0.085, 0.273) above the descent target point
 HANDLE_LEN = 0.3
 HANDLE_HALF_THICK = 0.015
 HANDLE_ANGLE = math.radians(40.0)
 
-DROPLET_POS = (0.02, 0.0, 0.205)
+DROPLET_POS = (0.02, 0.0, 0.205)  # contact release at the sand surface (user-selected over the
+# z = 0.55 falling release: same drag coefficient infiltrates deeper and spreads less)
 DROPLET_RADIUS = 0.04
 
+# 0.5 was tried and is marginally unstable at this fine particle size (NaN in the full run, 10x
+# velocity spikes in the absorb probe); the demo uses the previously validated 0.3
 MAX_RATIO = 0.3
-
-# --- Phase 7 arm constants (calibrated in phase7_franka_smoke.py) ---
-FRANKA_BASE_POS = (-0.25, 0.45, 0.0)  # 0.15 m behind the +y wall, reaching toward -y
-FINGER_GRIP = 0.015  # 3 cm gap = handle cross-section (visual grip only, no contact physics)
-GRASP_DIST = 0.09  # hand origin -> grasp point along hand local +z
-
-
-def to_np(x):
-    return x.detach().cpu().numpy() if hasattr(x, "detach") else np.asarray(x)
 
 
 def quat_to_R(q):
@@ -124,53 +145,10 @@ def quat_mul(q1, q2):
     )
 
 
-def R_to_quat(R):
-    # (w, x, y, z) quaternion of a rotation matrix
-    t = np.trace(R)
-    if t > 0.0:
-        s = math.sqrt(t + 1.0) * 2.0
-        return np.array([0.25 * s, (R[2, 1] - R[1, 2]) / s, (R[0, 2] - R[2, 0]) / s, (R[1, 0] - R[0, 1]) / s])
-    i = int(np.argmax([R[0, 0], R[1, 1], R[2, 2]]))
-    j, k = (i + 1) % 3, (i + 2) % 3
-    s = math.sqrt(1.0 + R[i, i] - R[j, j] - R[k, k]) * 2.0
-    q = np.zeros(4)
-    q[0] = (R[k, j] - R[j, k]) / s
-    q[1 + i] = 0.25 * s
-    q[1 + j] = (R[j, i] + R[i, j]) / s
-    q[1 + k] = (R[k, i] + R[i, k]) / s
-    return q / np.linalg.norm(q)
-
-
-def blade_to_handle(blade_pos, blade_quat):
-    """World pose of the handle midpoint, same transform as the demo script."""
-    handle_quat_rel = np.array(
-        [math.cos((math.pi + HANDLE_ANGLE) / 2.0), 0.0, math.sin((math.pi + HANDLE_ANGLE) / 2.0), 0.0]
-    )
-    handle_dir_local = np.array([-math.cos(HANDLE_ANGLE), 0.0, math.sin(HANDLE_ANGLE)])
-    handle_offset_local = np.array([-BLADE_HALF[0], 0.0, 0.0]) + handle_dir_local * (HANDLE_LEN / 2.0)
-    handle_pos = blade_pos + quat_to_R(blade_quat) @ handle_offset_local
-    handle_quat = quat_mul(blade_quat, handle_quat_rel)
-    return handle_pos, handle_quat
-
-
-def hand_target_from_handle(handle_pos, handle_quat):
-    """IK target (pos, quat wxyz) for the franka 'hand' link: x-axis || handle axis, z-axis
-    = world -y (fingers reach from the robot side across the handle), grasp point pinned at
-    the handle midpoint."""
-    x_h = quat_to_R(handle_quat) @ np.array([1.0, 0.0, 0.0])
-    x_h = x_h / np.linalg.norm(x_h)
-    z_h = np.array([0.0, -1.0, 0.0])
-    z_h = z_h - np.dot(z_h, x_h) * x_h
-    z_h = z_h / np.linalg.norm(z_h)
-    y_h = np.cross(z_h, x_h)
-    R_hand = np.column_stack([x_h, y_h, z_h])
-    hand_pos = handle_pos - R_hand @ np.array([0.0, 0.0, GRASP_DIST])
-    return hand_pos, R_to_quat(R_hand)
-
-
 def render_wet_frame(pos, ratio, path):
     fig = plt.figure(figsize=(9.6, 7.2), dpi=150)
     ax = fig.add_subplot(111, projection="3d")
+    # ratio in [0, MAX_RATIO] -> light tan (dry) to dark brown (wet)
     t = np.clip(ratio / MAX_RATIO, 0.0, 1.0)
     dry = np.array([0.87, 0.72, 0.53])
     wet = np.array([0.25, 0.13, 0.06])
@@ -194,14 +172,6 @@ def main():
 
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(dt=DT, substeps=1, gravity=(0.0, 0.0, -9.8)),
-        # the arm is a pure kinematic follower: no rigid gravity, no rigid-rigid collisions
-        # (the LegacyCoupler has no rigid<->dem / rigid<->flip channel, so the arm can never
-        # touch the sand/water physics)
-        rigid_options=gs.options.RigidOptions(
-            gravity=(0.0, 0.0, 0.0),
-            enable_collision=False,
-            enable_self_collision=False,
-        ),
         dem_options=gs.options.DEMOptions(
             particle_size=2.0 * PARTICLE_RADIUS,
             ddt_safety=0.5,
@@ -209,8 +179,11 @@ def main():
             upper_bound=BOX_UPPER,
         ),
         flip_options=gs.options.FLIPOptions(
-            grid_res=128,
-            viscosity_coeff=0.01,
+            grid_res=128,  # dx ~ 6.25 mm over the 0.8 m extent = the sand particle diameter; absorption
+            # needs dx < 15 mm at r = 5 mm (floor truncation), so dx = 2r here keeps it well active
+            viscosity_coeff=0.01,  # weaker sand<->water drag than the reference default 1.0: water
+            # infiltrates deeper into the bed instead of spreading on the surface (user-selected
+            # after the 0.3/0.1/0.04/0.01 infiltration comparison, see phase5_absorb_test.py)
             lower_bound=BOX_LOWER,
             upper_bound=BOX_UPPER,
         ),
@@ -219,6 +192,7 @@ def main():
 
     scene.add_entity(gs.morphs.Plane())
 
+    # visualization-only walls; physical containment is the DEM domain bounds themselves
     wall_surface = gs.surfaces.Default(color=(0.55, 0.55, 0.6))
     box_x = BOX_UPPER[0] - BOX_LOWER[0]
     box_y = BOX_UPPER[1] - BOX_LOWER[1]
@@ -248,11 +222,6 @@ def main():
         ),
         material=gs.materials.Kinematic(),
     )
-
-    franka = scene.add_entity(
-        gs.morphs.MJCF(file="xml/franka_emika_panda/panda.xml", pos=FRANKA_BASE_POS),
-    )
-
     sand = scene.add_entity(
         morph=gs.morphs.Box(
             pos=(0.0, 0.0, 0.081),
@@ -279,13 +248,17 @@ def main():
     scene.build()
     dem = scene.sim.dem_solver
     flip = scene.sim.flip_solver
-    dem.set_tilt_box_obstacle(
-        BLADE_HALF,
+    # physical boundary = the litter scoop's voxelized SDF (the same mesh as the visual asset),
+    # not an analytic tilt box; the pose/motion constants are unchanged (mesh frame = blade frame)
+    sdf_data = np.load(SDF_NPZ)
+    dem.set_sdf_obstacle(
+        sdf_data["sdf_val"],
+        sdf_data["dims"],
+        sdf_data["origin"],
+        sdf_data["cell"],
         BLADE_POS0,
         quat=tuple(blade_quat0),
-        handle=(HANDLE_LEN, HANDLE_HALF_THICK, HANDLE_ANGLE),
     )
-    hand_link = franka.get_link("hand")
     print(
         f"n_water = {water.n_particles}, n_sand = {sand.n_particles}, "
         f"single_ratio = {flip._single_ratio:.4f}",
@@ -297,6 +270,7 @@ def main():
     os.makedirs(os.path.dirname(VIDEO_PATH), exist_ok=True)
     os.makedirs(REC_DIR, exist_ok=True)
 
+    # static scene parameters for offline re-rendering of the per-frame npz recordings
     with open(os.path.join(REC_DIR, "meta.json"), "w") as f_meta:
         json.dump(
             {
@@ -315,15 +289,10 @@ def main():
                 "droplet_radius": DROPLET_RADIUS,
                 "n_sand": sand.n_particles,
                 "n_water": water.n_particles,
-                "franka_base_pos": FRANKA_BASE_POS,
-                "finger_grip": FINGER_GRIP,
-                "grasp_dist": GRASP_DIST,
             },
             f_meta,
             indent=2,
         )
-    ik_log = open(os.path.join(REC_DIR, "ik_log.csv"), "w")
-    ik_log.write("step,ik_pos_err,ik_rot_err,grasp_err\n")
 
     cam.start_recording(save_to_filename=VIDEO_PATH, fps=60)
 
@@ -333,65 +302,43 @@ def main():
     i_rotate = i_insert + N_INSERT_STEPS
     i_lift = i_rotate + N_ROTATE_STEPS
     i_hold = i_lift + N_LIFT_STEPS
-    n_steps = min(i_hold + N_HOLD_STEPS, MAX_STEPS)
+    n_steps = i_hold + N_HOLD_STEPS
+    if MAX_STEPS is not None:
+        n_steps = min(n_steps, MAX_STEPS)
     keyframe_idx = 0
     wet_idx = 0
     n_water0 = water.n_particles
     for i in range(n_steps):
         if i == i_descend:
-            dem.set_tilt_box_vel(DESCEND_VEL)
+            dem.set_sdf_obstacle_vel(DESCEND_VEL)
             print(f"step {i + 1}: blade starts descending vertically at {DESCEND_VEL} m/s", flush=True)
         elif i == i_insert:
-            dem.set_tilt_box_vel(INSERT_VEL)
+            dem.set_sdf_obstacle_vel(INSERT_VEL)
             print(f"step {i + 1}: blade starts inserting along the blade direction at {INSERT_VEL} m/s", flush=True)
         elif i == i_rotate:
-            dem.set_tilt_box_vel(ROTATE_VEL, omega=ROTATE_OMEGA)
+            dem.set_sdf_obstacle_vel(ROTATE_VEL, omega=ROTATE_OMEGA)
             print(
                 f"step {i + 1}: blade starts pivoting up about the trailing edge "
                 f"(omega_y = {ROTATE_OMEGA[1]:.4f} rad/s)",
                 flush=True,
             )
         elif i == i_lift:
-            dem.set_tilt_box_vel(LIFT_VEL)
+            dem.set_sdf_obstacle_vel(LIFT_VEL)
             print(f"step {i + 1}: blade starts lifting vertically at {LIFT_VEL} m/s", flush=True)
         elif i == i_hold:
-            dem.set_tilt_box_vel((0.0, 0.0, 0.0))
+            dem.set_sdf_obstacle_vel((0.0, 0.0, 0.0))
             print(f"step {i + 1}: blade holds", flush=True)
 
         # sync the visualization-only kinematic shovel with the solver's obstacle
-        blade_pos = to_np(dem.get_tilt_box_pos()[0]).astype(np.float64)
-        blade_quat = to_np(dem.get_tilt_box_quat()[0]).astype(np.float64)
+        blade_pos = dem.get_sdf_obstacle_pos()[0]
+        blade_quat = dem.get_sdf_obstacle_quat()[0]
         shovel.set_pos(blade_pos)
         shovel.set_quat(blade_quat)
-        handle_pos, handle_quat = blade_to_handle(blade_pos, blade_quat)
-
-        # arm follows the handle: IK to the calibrated hand target, grip hard-set, zero velocity
-        target_pos, target_quat = hand_target_from_handle(handle_pos, handle_quat)
-        q, err = franka.inverse_kinematics(
-            hand_link,
-            pos=target_pos,
-            quat=target_quat,
-            return_error=True,
-            max_samples=100,
-            max_solver_iters=100,
-            damping=0.005,
-            pos_tol=1e-4,
-            rot_tol=1e-3,
-        )
-        q = to_np(q).astype(np.float64).reshape(-1).copy()
-        err = to_np(err).astype(np.float64).reshape(-1)[:6]
-        q[-2:] = FINGER_GRIP
-        franka.set_qpos(q)
 
         scene.step()
 
-        achieved_pos = to_np(hand_link.get_pos()).astype(np.float64).reshape(-1)[:3]
-        achieved_quat = to_np(hand_link.get_quat()).astype(np.float64).reshape(-1)[:4]
-        grasp = achieved_pos + quat_to_R(achieved_quat) @ np.array([0.0, 0.0, GRASP_DIST])
-        grasp_err = float(np.linalg.norm(grasp - handle_pos))
-        ik_log.write(f"{i},{np.linalg.norm(err[:3]):.6f},{np.linalg.norm(err[3:]):.6f},{grasp_err:.6f}\n")
-
-        # per-frame recording for offline re-rendering (blade pose = the one just synced above)
+        # per-frame recording for offline re-rendering (blade pose = the one just synced to the
+        # kinematic visualization entities above)
         sand_pos = sand.get_particles_pos().cpu().numpy()[0].astype(np.float32)
         sand_ratio = dem.particles.ratio.to_numpy()[:, 0].astype(np.float32)
         water_active_mask = flip.particles.active.to_numpy()[:, 0].astype(bool)
@@ -412,7 +359,7 @@ def main():
         if i in KEYFRAME_STEPS:
             rgb, *_ = cam.render(rgb=True)
             imageio.imwrite(
-                os.path.join(FRAMES_DIR, f"phase7_gripper_shovel{TAG}_frame_{keyframe_idx:04d}.png"),
+                os.path.join(FRAMES_DIR, f"phase5_shovel_wet_frame_{keyframe_idx:04d}.png"),
                 rgb[0] if isinstance(rgb, list) else rgb,
             )
             keyframe_idx += 1
@@ -429,12 +376,10 @@ def main():
                 f"n_wet_lifted = {((pos[:, 2] > 0.2) & (ratio > 0.02)).sum():5d}  "
                 f"water_active = {n_active}/{n_water0}  ratio_mean = {ratio.mean():.4f}  "
                 f"blade = ({blade_pos[0]:+.3f}, {blade_pos[2]:.3f})  theta = {theta:+6.2f}  "
-                f"grasp_err = {grasp_err:.5f}  "
                 f"nan = {np.isnan(pos).any()}  elapsed = {time.time() - t0:.1f}s",
                 flush=True,
             )
 
-    ik_log.close()
     cam.stop_recording()
 
     subprocess.run(
