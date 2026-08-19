@@ -17,6 +17,12 @@ def test_unilateral_density_energy(n_envs, show_viewer):
         ),
         ipbstf_options=gs.options.IPBSTFOptions(
             particle_size=0.1,
+            static_colliders=[
+                gs.options.PBSTFBoxStaticColliderOptions(
+                    lower=(0.5, 0.0, -0.5),
+                    upper=(1.5, 1.0, 0.5),
+                ),
+            ],
             lower_bound=(-2.0, -2.0, -2.0),
             upper_bound=(2.0, 2.0, 2.0),
         ),
@@ -35,11 +41,24 @@ def test_unilateral_density_energy(n_envs, show_viewer):
             sampler="staggered",
         ),
     )
+    collider_liquid = scene.add_entity(
+        morph=gs.morphs.Particles(
+            positions=((1.0, 0.02, 0.0),),
+        ),
+        material=gs.materials.IPBSTF.Liquid(
+            sampler="staggered",
+        ),
+    )
     scene.build(n_envs=n_envs)
 
     pos_initial = tensor_to_array(liquid.get_state().pos)
     scene.step()
     assert_allclose(tensor_to_array(liquid.get_state().pos), pos_initial, atol=1e-6)
+    collider_pos = tensor_to_array(collider_liquid.get_state().pos)
+    collider_pos_expected = np.zeros_like(collider_pos)
+    collider_pos_expected[..., 0] = 1.0
+    collider_pos_expected[..., 1] = -0.05
+    assert_allclose(collider_pos, collider_pos_expected, atol=1e-6)
 
     center = pos_initial.mean(axis=1, keepdims=True)
     pos_compressed = center + 0.65 * (pos_initial - center)

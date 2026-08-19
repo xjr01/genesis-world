@@ -132,6 +132,7 @@ def _is_separated_by_static_colliders(
 def _project_out_static_colliders(
     env_idx,
     pos,
+    particle_radius,
     static_colliders_pos,
     static_colliders_quat,
     static_colliders: _StaticColliderConfig,
@@ -141,6 +142,7 @@ def _project_out_static_colliders(
             collider_idx,
             env_idx,
             pos,
+            particle_radius,
             static_colliders_pos,
             static_colliders_quat,
             static_colliders.values[collider_idx],
@@ -442,6 +444,7 @@ def _kernel_solve_local_systems(
 @qd.kernel
 def _kernel_apply_position_updates(
     n_particles: qd.i32,
+    particle_radius: float,
     particles: qd.template(),
     particles_status: qd.template(),
     particles_info: qd.template(),
@@ -457,7 +460,7 @@ def _kernel_apply_position_updates(
                 particles[particle_idx, env_idx].pos + 0.5 * particles[particle_idx, env_idx].delta_pos
             )
             pos = _project_out_static_colliders(
-                env_idx, pos, static_colliders_pos, static_colliders_quat, static_colliders
+                env_idx, pos, particle_radius, static_colliders_pos, static_colliders_quat, static_colliders
             )
             is_valid = True
             for axis in qd.static(range(3)):
@@ -966,6 +969,7 @@ class IPBSTFSolver(Solver):
             )
             _kernel_apply_position_updates(
                 self._n_particles,
+                self._particle_radius,
                 self.particles_reordered,
                 self.particles_status_reordered,
                 self.particles_info_reordered,

@@ -757,8 +757,8 @@ class PBSTFStaticColliderOptions(Options):
     """Base pose options for one-way PBSTF colliders.
 
     The pose can change after scene construction through
-    :meth:`PBSTFSolver.set_static_colliders_pose`. The collider remains one-way: it affects the liquid and receives no
-    force or velocity response from it.
+    :meth:`PBSTFSolver.set_static_colliders_pose`. The collider remains one-way: it affects simulated particles and
+    receives no force or velocity response from them.
     ``is_density_blocking`` toggles the per-neighbor density-separation test: when True (default) the collider blocks
     density interactions between particle pairs it separates (thin internal obstacles); when False the collider only
     projects particles out of its volume, skipping the per-neighbor test. Set False for boundary colliders whose
@@ -768,6 +768,24 @@ class PBSTFStaticColliderOptions(Options):
     pos: Vec3FType = (0.0, 0.0, 0.0)
     quat: UnitVec4FType = (1.0, 0.0, 0.0, 0.0)
     is_density_blocking: bool = True
+
+
+class PBSTFBoxStaticColliderOptions(PBSTFStaticColliderOptions):
+    """Finite analytic box collider.
+
+    ``lower`` and ``upper`` are opposite corners in the collider's local frame. Analytic queries keep rectangular
+    geometry exact and inexpensive; a mesh collider supports arbitrary geometry at preprocessing and field-memory cost.
+    """
+
+    type: Literal["box"] = "box"
+    lower: Vec3FType
+    upper: Vec3FType
+
+    @model_validator(mode="after")
+    def _validate_geometry(self):
+        if not np.all(np.array(self.upper) > np.array(self.lower)):
+            gs.raise_exception("PBSTF box collider `upper` must be greater than `lower` along every axis.")
+        return self
 
 
 class PBSTFConeStaticColliderOptions(PBSTFStaticColliderOptions):
@@ -802,25 +820,8 @@ class PBSTFMeshStaticColliderOptions(PBSTFStaticColliderOptions):
     sdf_res: StrictInt = Field(default=150, ge=16)
 
 
-class PBSTFBoxStaticColliderOptions(PBSTFStaticColliderOptions):
-    """Finite analytic box (rectangular cuboid) collider.
-
-    ``center`` is the box center and ``half_extent`` is its per-axis half size, both in the collider's local frame.
-    """
-
-    type: Literal["box"] = "box"
-    center: Vec3FType
-    half_extent: Vec3FType
-
-    @model_validator(mode="after")
-    def _validate_geometry(self):
-        if np.any(np.array(self.half_extent) <= 0.0):
-            gs.raise_exception("PBSTF box collider `half_extent` must be positive on every axis.")
-        return self
-
-
 PBSTFStaticColliderOptionsType = Annotated[
-    PBSTFConeStaticColliderOptions | PBSTFMeshStaticColliderOptions | PBSTFBoxStaticColliderOptions,
+    PBSTFBoxStaticColliderOptions | PBSTFConeStaticColliderOptions | PBSTFMeshStaticColliderOptions,
     Field(discriminator="type"),
 ]
 

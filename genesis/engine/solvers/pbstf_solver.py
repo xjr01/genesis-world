@@ -1,9 +1,9 @@
 import math
-from typing import TYPE_CHECKING
 
 import numpy as np
-import quadrants as qd
 import torch
+
+import quadrants as qd
 
 import genesis as gs
 import genesis.utils.geom as gu
@@ -12,11 +12,13 @@ from genesis.engine.boundaries import (
     create_static_collider,
     project_out_static_collider,
     query_static_collider,
+    query_static_collider_contact,
     static_collider_separates,
 )
-from genesis.engine.entities import PBSTFEntity
+from genesis.engine.entities import PBSTFEntity, PBSTFPorousEntity
 from genesis.engine.states.solvers import PBSTFSolverState
 from genesis.utils import particle
+from genesis.utils.array_class import ErrorCode
 from genesis.utils.misc import (
     assign_indexed_tensor,
     broadcast_tensor,
@@ -26,10 +28,8 @@ from genesis.utils.misc import (
     sanitize_index,
 )
 
+from . import pbstf_porous
 from .base_solver import Solver
-
-if TYPE_CHECKING:
-    from genesis.engine.entities import PBSTFEntity
 
 
 @qd.data_oriented
@@ -37,10 +37,9 @@ class PBSTFSolver(Solver):
     """
     GPU implementation of *Position-Based Surface Tension Flow*.
 
-    This is deliberately independent of :class:`PBDSolver`: it has only fluid
-    particles, uses the reference cubic-spline kernel for density, normals and
-    every density gradient, and uses collision-distance constraints instead of
-    PBF artificial pressure.
+    This is deliberately independent of :class:`PBDSolver`. Liquid particles use the reference cubic-spline kernel
+    for density, normals and every density gradient. Optional porous particles form a meshless elastic solid and
+    exchange capacity, capillary, and drag constraints with the liquid.
     """
 
     _N_THETA = 18
@@ -62,6 +61,7 @@ class PBSTFSolver(Solver):
         self._max_surface_neighbors = options.max_surface_neighbors
         self._max_localmesh_neighbors = options.max_localmesh_neighbors
         self._enable_pca_normals = options.enable_pca_normals
+        self._n_vvert_supports = self.scene.vis_options.n_support_neighbors
         self._static_colliders = tuple(
             create_static_collider(collider_options) for collider_options in options.static_colliders
         )
@@ -72,35 +72,79 @@ class PBSTFSolver(Solver):
         self._lower_bound = np.asarray(options.lower_bound, dtype=gs.np_float)
 
         self.sh = gu.SpatialHasher(cell_size=options.hash_grid_cell_size, grid_res=options._hash_grid_res)
+        self.porous_sh = gu.SpatialHasher(cell_size=options.hash_grid_cell_size, grid_res=options._hash_grid_res)
         self.boundary = CubeBoundary(lower=self._lower_bound, upper=self._upper_bound)
 
         self._default_mass = 1.0
         self._material = None
+        self._porous_materials = []
+        self._has_porous_capillary_or_drag = False
+        self._n_porous_particles = 0
+        self._n_total_particles = 0
+        self._n_vverts = 0
+        self.fluid_render_indices = None
+        self.porous_render_indices = None
+        self.porous_particles = None
+        self.porous_particles_status = None
+        self.porous_particles_info = None
+        self.porous_particles_reordered = None
+        self.porous_particles_status_reordered = None
+        self.porous_particles_info_reordered = None
+        self.porous_neighbor_offsets = None
+        self.porous_neighbor_indices = None
+        self.porous_rest_offsets = None
+        self.porous_corrected_gradients = None
+        self.is_fluid_in_porous = None
+        self.fluid_porous_weight_sums = None
+        self.porous_fluid_weight_sums = None
+        self._errno = None
 
     @property
     def is_active(self):
         return self.n_particles > 0
 
-    def add_entity(self, idx, material, morph, surface, name: str | None = None) -> "PBSTFEntity":
-        entity = PBSTFEntity(
-            scene=self.scene,
-            solver=self,
-            material=material,
-            morph=morph,
-            surface=surface,
-            particle_size=self._particle_size,
-            idx=idx,
-            particle_start=self.n_particles,
-            name=name,
-        )
+    def add_entity(
+        self, idx, material, morph, surface, name: str | None = None
+    ) -> "PBSTFEntity | PBSTFPorousEntity":
+        if isinstance(material, gs.materials.PBSTF.PorousElastic):
+            material_idx = len(self._porous_materials)
+            self._porous_materials.append(material)
+            entity = PBSTFPorousEntity(
+                scene=self.scene,
+                solver=self,
+                material=material,
+                morph=morph,
+                surface=surface,
+                particle_size=self._particle_size,
+                idx=idx,
+                particle_start=self.n_particles,
+                porous_particle_start=self.n_porous_particles,
+                material_idx=material_idx,
+                vvert_start=self.n_vverts,
+                name=name,
+            )
+        else:
+            entity = PBSTFEntity(
+                scene=self.scene,
+                solver=self,
+                material=material,
+                morph=morph,
+                surface=surface,
+                particle_size=self._particle_size,
+                idx=idx,
+                particle_start=self.n_particles,
+                fluid_particle_start=self.n_fluid_particles,
+                name=name,
+            )
         self.entities.append(entity)
         return entity
 
     def _validate_materials(self):
-        if not self.entities:
-            return
-        self._material = self.entities[0].material
-        for entity in self.entities[1:]:
+        liquid_entities = [entity for entity in self.entities if isinstance(entity.material, gs.materials.PBSTF.Liquid)]
+        if not liquid_entities:
+            gs.raise_exception("PBSTFSolver requires at least one liquid entity.")
+        self._material = liquid_entities[0].material
+        for entity in liquid_entities[1:]:
             material = entity.material
             if (
                 material.rho != self._material.rho
@@ -123,7 +167,32 @@ class PBSTFSolver(Solver):
     def build(self):
         super().build()
         self._B = self._sim._B
-        self._n_particles = self.n_particles
+        self._n_particles = sum(
+            entity.n_particles for entity in self.entities if isinstance(entity.material, gs.materials.PBSTF.Liquid)
+        )
+        self._n_porous_particles = sum(
+            entity.n_particles
+            for entity in self.entities
+            if isinstance(entity.material, gs.materials.PBSTF.PorousElastic)
+        )
+        self._n_total_particles = self._n_particles + self._n_porous_particles
+        self._has_porous_capillary_or_drag = any(
+            entity.material.capillary_compliance is not None or entity.material.drag > 0.0
+            for entity in self.entities
+            if isinstance(entity.material, gs.materials.PBSTF.PorousElastic)
+        )
+        self._n_vverts = self.n_vverts
+        fluid_render_indices = np.empty(self._n_particles, dtype=gs.np_int)
+        porous_render_indices = np.empty(self._n_porous_particles, dtype=gs.np_int)
+        for entity in self.entities:
+            if isinstance(entity.material, gs.materials.PBSTF.Liquid):
+                fluid_render_indices[
+                    entity.fluid_particle_start : entity.fluid_particle_start + entity.n_particles
+                ] = np.arange(entity.particle_start, entity.particle_end, dtype=gs.np_int)
+            else:
+                porous_render_indices[
+                    entity.porous_particle_start : entity.porous_particle_start + entity.n_particles
+                ] = np.arange(entity.particle_start, entity.particle_end, dtype=gs.np_int)
         if self._n_static_colliders > 0:
             self._static_colliders_pos = qd.field(gs.qd_vec3, shape=(self._n_static_colliders, self._B))
             self._static_colliders_quat = qd.field(gs.qd_vec4, shape=(self._n_static_colliders, self._B))
@@ -155,13 +224,44 @@ class PBSTFSolver(Solver):
 
             self._validate_materials()
             self.sh.build(self._B)
+            if self._n_porous_particles > 0:
+                self.porous_sh.build(self._B)
             self._init_particle_fields()
+            self._errno = qd.field(gs.qd_int, shape=(self._B,))
+            self.fluid_render_indices.from_numpy(fluid_render_indices)
+            if self._n_porous_particles > 0:
+                self.porous_render_indices.from_numpy(porous_render_indices)
             self._init_surface_fields()
+            if self._n_porous_particles > 0:
+                porous_entities = tuple(
+                    entity
+                    for entity in self.entities
+                    if isinstance(entity.material, gs.materials.PBSTF.PorousElastic)
+                )
+                porous_rest_topology = pbstf_porous.build_porous_rest_topology(
+                    porous_entities, self._support_radius
+                )
+                self._init_porous_fields(porous_rest_topology)
 
             for entity in self.entities:
                 entity._add_to_solver()
 
-            has_active_particles = any(entity.active for entity in self.entities)
+            if self._n_porous_particles > 0:
+                self.porous_particles_info.density_reference.from_numpy(porous_rest_topology.density_reference)
+                self._reorder_porous_particles()
+                pbstf_porous.kernel_compute_porous_density(
+                    self._n_porous_particles,
+                    self._support_radius,
+                    self.porous_particles_reordered,
+                    self.porous_particles_status_reordered,
+                    self.porous_particles_info_reordered,
+                    self.porous_sh,
+                )
+                self._copy_porous_from_reordered()
+
+            has_active_particles = any(
+                entity.active for entity in self.entities if isinstance(entity.material, gs.materials.PBSTF.Liquid)
+            )
             if has_active_particles:
                 self._kernel_reorder_particles(0)
                 self._kernel_compute_density(0)
@@ -193,6 +293,10 @@ class PBSTFSolver(Solver):
             self._kernel_set_particle_mass(self._default_mass)
             self._kernel_reorder_particles(0)
             self._kernel_compute_density(0)
+            if self._n_porous_particles > 0:
+                self._reorder_porous_particles()
+                self._update_porous_derived_fields()
+                self._copy_porous_from_reordered()
 
     @gs.assert_built
     def set_static_colliders_pose(self, pos, quat, colliders_idx=None, envs_idx=None):
@@ -272,8 +376,263 @@ class PBSTFSolver(Solver):
         self.particles_reordered = particle_state.field(shape=shape, layout=qd.Layout.SOA)
         self.particles_ng_reordered = particle_state_ng.field(shape=shape, layout=qd.Layout.SOA)
         self.particles_info_reordered = particle_info.field(shape=shape, layout=qd.Layout.SOA)
-        self.particles_render = particle_render.field(shape=shape, layout=qd.Layout.SOA)
+        self.particles_render = particle_render.field(shape=(self._n_total_particles, self._B), layout=qd.Layout.SOA)
+        self.fluid_render_indices = qd.field(gs.qd_int, shape=(self._n_particles,))
+        if self._n_porous_particles > 0:
+            self.porous_render_indices = qd.field(gs.qd_int, shape=(self._n_porous_particles,))
+        if self._n_vverts > 0:
+            vvert_info = qd.types.struct(
+                support_idxs=qd.types.vector(self._n_vvert_supports, gs.qd_int),
+                support_weights=qd.types.vector(self._n_vvert_supports, gs.qd_float),
+            )
+            vvert_render = qd.types.struct(pos=gs.qd_vec3, active=gs.qd_bool)
+            self.vverts_info = vvert_info.field(shape=(self._n_vverts,), layout=qd.Layout.SOA)
+            self.vverts_render = vvert_render.field(shape=(self._n_vverts, self._B), layout=qd.Layout.SOA)
         self._max_density = qd.field(gs.qd_float, shape=())
+
+    def _init_porous_fields(self, rest_topology):
+        porous_particle_state = qd.types.struct(
+            pos=gs.qd_vec3,
+            ipos=gs.qd_vec3,
+            dpos=gs.qd_vec3,
+            vel=gs.qd_vec3,
+            density=gs.qd_float,
+            porosity=gs.qd_float,
+            saturation=gs.qd_float,
+            rotation=gs.qd_mat3,
+            strain=gs.qd_mat3,
+        )
+        porous_particle_status = qd.types.struct(
+            reordered_idx=gs.qd_int,
+            active=gs.qd_bool,
+            is_fixed=gs.qd_bool,
+        )
+        porous_particle_info = qd.types.struct(
+            mass=gs.qd_float,
+            rest_volume=gs.qd_float,
+            density_reference=gs.qd_float,
+            porosity=gs.qd_float,
+            material_idx=gs.qd_int,
+            deviatoric_compliance=gs.qd_float,
+            volumetric_compliance=gs.qd_float,
+            pore_compliance=gs.qd_float,
+            capillary_compliance=gs.qd_float,
+            capillary_saturation_falloff=gs.qd_float,
+            drag=gs.qd_float,
+            wet_deviatoric_compliance_scale=gs.qd_float,
+            wet_volumetric_compliance_scale=gs.qd_float,
+            bloating_volume_strain=gs.qd_float,
+            is_capillary_enabled=gs.qd_bool,
+        )
+
+        shape = (self._n_porous_particles, self._B)
+        self.porous_particles = porous_particle_state.field(shape=shape, layout=qd.Layout.SOA)
+        self.porous_particles_status = porous_particle_status.field(shape=shape, layout=qd.Layout.SOA)
+        self.porous_particles_info = porous_particle_info.field(
+            shape=(self._n_porous_particles,), layout=qd.Layout.SOA
+        )
+        self.porous_particles_reordered = porous_particle_state.field(shape=shape, layout=qd.Layout.SOA)
+        self.porous_particles_status_reordered = porous_particle_status.field(shape=shape, layout=qd.Layout.SOA)
+        self.porous_particles_info_reordered = porous_particle_info.field(shape=shape, layout=qd.Layout.SOA)
+        self.porous_neighbor_offsets = qd.field(gs.qd_int, shape=(self._n_porous_particles + 1,))
+        self.porous_neighbor_indices = qd.field(gs.qd_int, shape=(len(rest_topology.neighbor_indices),))
+        self.porous_rest_offsets = qd.field(gs.qd_vec3, shape=(len(rest_topology.rest_offsets),))
+        self.porous_corrected_gradients = qd.field(gs.qd_vec3, shape=(len(rest_topology.corrected_gradients),))
+        self.porous_neighbor_offsets.from_numpy(rest_topology.neighbor_offsets)
+        self.porous_neighbor_indices.from_numpy(rest_topology.neighbor_indices)
+        self.porous_rest_offsets.from_numpy(rest_topology.rest_offsets)
+        self.porous_corrected_gradients.from_numpy(rest_topology.corrected_gradients)
+        self.is_fluid_in_porous = qd.field(gs.qd_bool, shape=(self._n_particles, self._B))
+        if self._has_porous_capillary_or_drag:
+            self.fluid_porous_weight_sums = qd.field(gs.qd_float, shape=(self._n_particles, self._B))
+            self.porous_fluid_weight_sums = qd.field(gs.qd_float, shape=(self._n_porous_particles, self._B))
+
+    def _add_porous_particles(
+        self,
+        active,
+        particle_start,
+        n_particles,
+        material_idx,
+        rho,
+        porosity,
+        rest_volume,
+        pos,
+    ):
+        if rest_volume <= 0.0:
+            gs.raise_exception("PBSTF porous particles require a positive reference volume.")
+        material = self._porous_materials[material_idx]
+        is_capillary_enabled = material.capillary_compliance is not None
+        capillary_compliance = 0.0 if material.capillary_compliance is None else material.capillary_compliance
+        pbstf_porous.kernel_add_porous_particles(
+            particle_start,
+            n_particles,
+            active,
+            material_idx,
+            rho,
+            porosity,
+            rest_volume,
+            material.deviatoric_compliance,
+            material.volumetric_compliance,
+            material.pore_compliance,
+            capillary_compliance,
+            material.capillary_saturation_falloff,
+            material.drag,
+            material.wet_deviatoric_compliance_scale,
+            material.wet_volumetric_compliance_scale,
+            material.bloating_volume_strain,
+            pos,
+            self.porous_particles,
+            self.porous_particles_status,
+            self.porous_particles_info,
+            is_capillary_enabled,
+        )
+
+    def _reorder_porous_particles(self):
+        pbstf_porous.kernel_reorder_porous_particles(
+            self._n_porous_particles,
+            self.porous_particles,
+            self.porous_particles_status,
+            self.porous_particles_info,
+            self.porous_particles_reordered,
+            self.porous_particles_status_reordered,
+            self.porous_particles_info_reordered,
+            self.porous_sh,
+        )
+
+    def _copy_porous_from_reordered(self):
+        pbstf_porous.kernel_copy_porous_from_reordered(
+            self._n_porous_particles,
+            self.porous_particles,
+            self.porous_particles_status,
+            self.porous_particles_reordered,
+        )
+
+    def _update_porous_derived_fields(self):
+        pbstf_porous.kernel_compute_porous_density(
+            self._n_porous_particles,
+            self._support_radius,
+            self.porous_particles_reordered,
+            self.porous_particles_status_reordered,
+            self.porous_particles_info_reordered,
+            self.porous_sh,
+        )
+        pbstf_porous.kernel_compute_porous_saturation(
+            self._n_porous_particles,
+            self._support_radius,
+            self.particles_reordered,
+            self.particles_ng_reordered,
+            self.particles_info_reordered,
+            self.porous_particles_reordered,
+            self.porous_particles_status_reordered,
+            self.porous_particles_info_reordered,
+            self.sh,
+            self.porous_sh,
+        )
+        pbstf_porous.kernel_compute_porous_kinematics(
+            self._n_porous_particles,
+            self.porous_particles,
+            self.porous_particles_status,
+            self.porous_particles_info,
+            self.porous_particles_reordered,
+            self.porous_neighbor_offsets,
+            self.porous_neighbor_indices,
+            self.porous_rest_offsets,
+            self.porous_corrected_gradients,
+        )
+
+    def _set_porous_particles_pos(self, particles_idx, envs_idx, poss):
+        pbstf_porous.kernel_set_porous_particles_pos(particles_idx, envs_idx, poss, self.porous_particles)
+
+    def _get_porous_particles_pos(self, particle_start, n_particles, envs_idx, poss):
+        pbstf_porous.kernel_get_porous_particles_pos(
+            particle_start, n_particles, envs_idx, self.porous_particles, poss
+        )
+
+    def _set_porous_particles_vel(self, particles_idx, envs_idx, vels):
+        pbstf_porous.kernel_set_porous_particles_vel(particles_idx, envs_idx, vels, self.porous_particles)
+
+    def _get_porous_particles_vel(self, particle_start, n_particles, envs_idx, vels):
+        pbstf_porous.kernel_get_porous_particles_vel(
+            particle_start, n_particles, envs_idx, self.porous_particles, vels
+        )
+
+    def _set_porous_particles_active(self, particles_idx, envs_idx, actives):
+        pbstf_porous.kernel_set_porous_particles_active(
+            particles_idx, envs_idx, actives, self.porous_particles_status
+        )
+
+    def _get_porous_particles_active(self, particle_start, n_particles, envs_idx, actives):
+        pbstf_porous.kernel_get_porous_particles_active(
+            particle_start, n_particles, envs_idx, self.porous_particles_status, actives
+        )
+
+    def _fix_porous_particles(self, particles_idx, envs_idx):
+        pbstf_porous.kernel_set_porous_particles_fixed(
+            particles_idx,
+            envs_idx,
+            is_fixed=1,
+            particles_status=self.porous_particles_status,
+        )
+
+    def _release_porous_particles(self, particles_idx, envs_idx):
+        pbstf_porous.kernel_set_porous_particles_fixed(
+            particles_idx,
+            envs_idx,
+            is_fixed=0,
+            particles_status=self.porous_particles_status,
+        )
+
+    def _get_porous_particles_fixed(self, particle_start, n_particles, envs_idx, is_fixed):
+        pbstf_porous.kernel_get_porous_particles_fixed(
+            particle_start, n_particles, envs_idx, self.porous_particles_status, is_fixed
+        )
+
+    def _get_porous_particles_frame(self, particle_start, n_particles, envs_idx, pos, vel, active, is_fixed):
+        pbstf_porous.kernel_get_porous_particles_frame(
+            particle_start,
+            n_particles,
+            envs_idx,
+            self.porous_particles,
+            self.porous_particles_status,
+            pos,
+            vel,
+            active,
+            is_fixed,
+        )
+
+    def _set_porous_particles_frame(self, particle_start, n_particles, envs_idx, pos, vel, active, is_fixed):
+        pbstf_porous.kernel_set_porous_particles_frame(
+            particle_start,
+            n_particles,
+            envs_idx,
+            pos,
+            vel,
+            active,
+            is_fixed,
+            self.porous_particles,
+            self.porous_particles_status,
+        )
+
+    def get_porous_particles_saturation(self, particle_start, n_particles, envs_idx, saturation):
+        pbstf_porous.kernel_get_porous_particles_saturation(
+            particle_start, n_particles, envs_idx, self.porous_particles, saturation
+        )
+
+    def get_porous_particles_porosity(self, particle_start, n_particles, envs_idx, porosity):
+        pbstf_porous.kernel_get_porous_particles_porosity(
+            particle_start, n_particles, envs_idx, self.porous_particles, porosity
+        )
+
+    def get_absorbed_fluid_volume(self, particle_start, n_particles, envs_idx, volume):
+        pbstf_porous.kernel_get_absorbed_fluid_volume(
+            particle_start,
+            n_particles,
+            envs_idx,
+            self.porous_particles,
+            self.porous_particles_status,
+            self.porous_particles_info,
+            volume,
+        )
 
     def _init_surface_fields(self):
         n = self._n_particles
@@ -314,6 +673,7 @@ class PBSTFSolver(Solver):
                 collider_idx,
                 env_idx,
                 pos,
+                self._particle_radius,
                 self._static_colliders_pos,
                 self._static_colliders_quat,
                 self._static_colliders[collider_idx],
@@ -343,34 +703,16 @@ class PBSTFSolver(Solver):
 
     @qd.func
     def cubic_kernel(self, distance):
-        result = gs.qd_float(0.0)
-        q = distance / self._support_radius
-        coefficient = 8.0 / (math.pi * self._support_radius**3)
-        if q < 0.5:
-            result = coefficient * (6.0 * q * q * (q - 1.0) + 1.0)
-        elif q < 1.0:
-            result = 2.0 * coefficient * (1.0 - q) ** 3
-        return result
+        return pbstf_porous.cubic_kernel(distance, self._support_radius)
 
     @qd.func
     def cubic_kernel_first_derivative(self, distance):
-        result = gs.qd_float(0.0)
-        q = distance / self._support_radius
-        coefficient = 48.0 / (math.pi * self._support_radius**4)
-        if q < 0.5:
-            result = coefficient * q * (3.0 * q - 2.0)
-        elif q < 1.0:
-            result = coefficient * (1.0 - q) * (q - 1.0)
-        return result
+        return pbstf_porous.cubic_kernel_first_derivative(distance, self._support_radius)
 
     @qd.func
     def cubic_gradient_kernel(self, delta):
         """Reference ``gradientKernel``: gradient with respect to the second point."""
-        result = qd.Vector.zero(gs.qd_float, 3)
-        distance = delta.norm()
-        if distance > gs.EPS and distance < self._support_radius:
-            result = -self.cubic_kernel_first_derivative(distance) * delta / distance
-        return result
+        return pbstf_porous.cubic_gradient(delta, self._support_radius)
 
     # ------------------------------------------------------------------
     # Reordering and density
@@ -780,6 +1122,20 @@ class PBSTFSolver(Solver):
         self._kernel_classify_surface()
         self._kernel_compute_normals()
         self._kernel_mark_density_constraints()
+        if self._n_porous_particles > 0:
+            pbstf_porous.kernel_classify_fluid_in_porous(
+                self._n_particles,
+                self._support_radius,
+                self.particles_reordered,
+                self.particles_ng_reordered,
+                self.porous_particles_reordered,
+                self.porous_particles_status_reordered,
+                self.porous_sh,
+                self.is_fluid_in_porous,
+                self.on_surface,
+                self.topology_valid,
+                self.density_constraint_enabled,
+            )
         self._kernel_build_local_meshes()
         overflow = qd_to_numpy(self._overflow, transpose=True)[()]
         if overflow == self._LOCAL_MESH_NEIGHBOR_OVERFLOW:
@@ -802,7 +1158,11 @@ class PBSTFSolver(Solver):
     def _density_target(self, i, i_b):
         target = self.particles_info_reordered[i, i_b].rho_rest
         if self.on_surface[i, i_b]:
-            target *= 0.7
+            is_free_surface = True
+            if qd.static(self._n_porous_particles > 0):
+                is_free_surface = not self.is_fluid_in_porous[i, i_b]
+            if is_free_surface:
+                target *= 0.7
         return target
 
     @qd.func
@@ -838,10 +1198,26 @@ class PBSTFSolver(Solver):
                     self._task_density_constraint,
                     i_b,
                 )
+                if qd.static(self._n_porous_particles > 0):
+                    result = pbstf_porous.accumulate_porous_capacity(
+                        i,
+                        i_b,
+                        self._support_radius,
+                        rho_rest,
+                        result,
+                        self.particles_reordered,
+                        self.porous_particles_reordered,
+                        self.porous_particles_status_reordered,
+                        self.porous_particles_info_reordered,
+                        self.porous_sh,
+                    )
                 result.denominator += result.grad_i.norm_sqr() / mass_i
                 constraint = result.density / rho_rest - 1.0
                 lmd = gs.qd_float(0.0)
-                if result.denominator > gs.EPS:
+                is_capacity_active = not qd.static(self._n_porous_particles > 0)
+                if qd.static(self._n_porous_particles > 0):
+                    is_capacity_active = not self.is_fluid_in_porous[i, i_b] or constraint > 0.0
+                if result.denominator > gs.EPS and is_capacity_active:
                     lmd = -constraint / result.denominator
                 self.particles_reordered[i, i_b].density = result.density
                 self.particles_reordered[i, i_b].grad_i = result.grad_i
@@ -877,6 +1253,18 @@ class PBSTFSolver(Solver):
                     self._task_apply_density_constraint,
                     i_b,
                 )
+                if qd.static(self._n_porous_particles > 0):
+                    pbstf_porous.apply_porous_capacity(
+                        i,
+                        i_b,
+                        self._support_radius,
+                        self.particles_reordered[i, i_b].lmd,
+                        self.particles_reordered,
+                        self.porous_particles_reordered,
+                        self.porous_particles_status_reordered,
+                        self.porous_particles_info_reordered,
+                        self.porous_sh,
+                    )
 
     @qd.func
     def _triangle_area(self, a, b, c, i_b):
@@ -998,19 +1386,22 @@ class PBSTFSolver(Solver):
                 pos = self.particles_reordered[i, i_b].pos
                 mass = self.particles_info_reordered[i, i_b].mass
                 for collider_idx in qd.static(range(self._n_static_colliders)):
-                    closest, normal, _, surface_distance = query_static_collider(
+                    anchor, normal, _, surface_distance = query_static_collider_contact(
                         collider_idx,
                         i_b,
                         pos,
+                        self._particle_radius,
                         self._static_colliders_pos,
                         self._static_colliders_quat,
                         self._static_colliders[collider_idx],
                     )
-                    if surface_distance <= self._particle_radius:
-                        constraint = (pos - closest).dot(normal)
-                        denominator = self._material.collider_adhesion_compliance / self._default_mass + 1.0 / mass
-                        if denominator > gs.EPS:
-                            self.particles_reordered[i, i_b].dpos += -constraint / denominator / mass * normal
+                    if surface_distance <= 2.0 * self._particle_radius:
+                        anchor_delta = pos - anchor
+                        if anchor_delta.dot(anchor_delta) <= self._particle_radius * self._particle_radius:
+                            constraint = anchor_delta.dot(normal)
+                            denominator = self._material.collider_adhesion_compliance / self._default_mass + 1.0 / mass
+                            if denominator > gs.EPS:
+                                self.particles_reordered[i, i_b].dpos += -constraint / denominator / mass * normal
 
     @qd.kernel
     def _kernel_apply_position_delta(self):
@@ -1020,6 +1411,17 @@ class PBSTFSolver(Solver):
                     self.particles_reordered[i, i_b].pos + self.particles_reordered[i, i_b].dpos
                 )
                 self.particles_reordered[i, i_b].pos = self._project_out_static_colliders(i_b, pos)
+        if qd.static(self._n_porous_particles > 0):
+            for i, i_b in qd.ndrange(self._n_porous_particles, self._B):
+                if (
+                    self.porous_particles_status_reordered[i, i_b].active
+                    and not self.porous_particles_status_reordered[i, i_b].is_fixed
+                ):
+                    pos = self.boundary.impose_pos(
+                        self.porous_particles_reordered[i, i_b].pos
+                        + self.porous_particles_reordered[i, i_b].dpos
+                    )
+                    self.porous_particles_reordered[i, i_b].pos = self._project_out_static_colliders(i_b, pos)
 
     # ------------------------------------------------------------------
     # Time integration and XSPH velocity filtering
@@ -1122,17 +1524,38 @@ class PBSTFSolver(Solver):
 
         self._kernel_reorder_particles(f)
         self._kernel_predict_positions(f, self._sim.cur_t)
+        if self._n_porous_particles > 0:
+            self._reorder_porous_particles()
+            pbstf_porous.kernel_predict_porous_positions(
+                self._n_porous_particles,
+                self._substep_dt,
+                self._gravity,
+                self.porous_particles_reordered,
+                self.porous_particles_status_reordered,
+            )
 
         # The reference rebuilds its neighbor search after prediction.
         self._kernel_copy_from_reordered(f)
         self._kernel_reorder_particles(f)
+        if self._n_porous_particles > 0:
+            self._copy_porous_from_reordered()
+            self._reorder_porous_particles()
 
         for iteration in range(self._max_solver_iterations):
             if iteration % self._topology_rebuild_interval == 0:
                 if iteration > 0:
                     self._kernel_copy_from_reordered(f)
                     self._kernel_reorder_particles(f)
+                    if self._n_porous_particles > 0:
+                        self._copy_porous_from_reordered()
+                        self._reorder_porous_particles()
                 self._rebuild_topology(f)
+
+            if self._n_porous_particles > 0:
+                self._update_porous_derived_fields()
+                pbstf_porous.kernel_clear_porous_position_delta(
+                    self._n_porous_particles, self.porous_particles_reordered
+                )
 
             # One Jacobi accumulation combines density and area constraints,
             # plus collision-distance constraints on even iterations. There is
@@ -1140,6 +1563,57 @@ class PBSTFSolver(Solver):
             self._kernel_prepare_density_constraints()
             self._kernel_apply_density_constraints()
             self._kernel_apply_surface_constraints()
+            if self._n_porous_particles > 0:
+                pbstf_porous.kernel_apply_porous_elastic_constraints(
+                    self._n_porous_particles,
+                    self._substep_dt,
+                    self.porous_particles,
+                    self.porous_particles_status,
+                    self.porous_particles_info,
+                    self.porous_particles_reordered,
+                    self.porous_particles_status_reordered,
+                    self.porous_particles_info_reordered,
+                    self.porous_neighbor_offsets,
+                    self.porous_neighbor_indices,
+                    self.porous_corrected_gradients,
+                )
+                pbstf_porous.kernel_apply_porous_pore_constraints(
+                    self._n_porous_particles,
+                    self._substep_dt,
+                    self._support_radius,
+                    self.porous_particles_reordered,
+                    self.porous_particles_status_reordered,
+                    self.porous_particles_info_reordered,
+                    self.porous_sh,
+                )
+                if self._has_porous_capillary_or_drag:
+                    pbstf_porous.kernel_compute_porous_coupling_weights(
+                        self._n_particles,
+                        self._n_porous_particles,
+                        self._support_radius,
+                        self.fluid_porous_weight_sums,
+                        self.porous_fluid_weight_sums,
+                        self.particles_reordered,
+                        self.particles_ng_reordered,
+                        self.porous_particles_reordered,
+                        self.porous_particles_status_reordered,
+                        self.porous_sh,
+                    )
+                    pbstf_porous.kernel_apply_porous_capillary_drag(
+                        self._n_particles,
+                        self._substep_dt,
+                        self._support_radius,
+                        self._default_mass,
+                        self.fluid_porous_weight_sums,
+                        self.porous_fluid_weight_sums,
+                        self.particles_reordered,
+                        self.particles_ng_reordered,
+                        self.particles_info_reordered,
+                        self.porous_particles_reordered,
+                        self.porous_particles_status_reordered,
+                        self.porous_particles_info_reordered,
+                        self.porous_sh,
+                    )
             if iteration % 2 == 0:
                 self._kernel_apply_distance_constraints()
             if self._material.is_collider_adhesion_friction_enabled:
@@ -1147,6 +1621,13 @@ class PBSTFSolver(Solver):
             self._kernel_apply_position_delta()
 
         self._kernel_update_velocities_from_positions()
+        if self._n_porous_particles > 0:
+            pbstf_porous.kernel_update_porous_velocities(
+                self._n_porous_particles,
+                self._substep_dt,
+                self.porous_particles_reordered,
+                self.porous_particles_status_reordered,
+            )
 
         # XSPH uses a fresh final neighbor search, as in the CPU reference.
         self._kernel_copy_from_reordered(f)
@@ -1154,6 +1635,37 @@ class PBSTFSolver(Solver):
         self._kernel_compute_density(f)
         self._kernel_compute_viscosity()
         self._kernel_apply_viscosity()
+        self._kernel_copy_from_reordered(f)
+        self._kernel_reorder_particles(f)
+        self._kernel_compute_density(f)
+        if self._n_porous_particles > 0:
+            self._copy_porous_from_reordered()
+            self._reorder_porous_particles()
+            self._update_porous_derived_fields()
+        error_code = int(ErrorCode.INVALID_PBSTF_STATE_NAN)
+        pbstf_porous.kernel_check_fluid_state(
+            self._n_particles,
+            self.particles_reordered,
+            self.particles_ng_reordered,
+            error_code,
+            self._errno,
+        )
+        if self._n_porous_particles > 0:
+            pbstf_porous.kernel_check_porous_state(
+                self._n_porous_particles,
+                self.porous_particles_reordered,
+                self.porous_particles_status_reordered,
+                error_code,
+                self._errno,
+            )
+
+    def check_errno(self):
+        errno = np.bitwise_or.reduce(qd_to_numpy(self._errno, transpose=True))
+        if errno & ErrorCode.INVALID_PBSTF_STATE_NAN:
+            gs.raise_exception(
+                "PBSTF produced a non-finite fluid or porous state. Increase compliance, reduce the time step, or "
+                "increase the particle resolution."
+            )
 
     def substep_pre_coupling_grad(self, f):
         pass
@@ -1161,6 +1673,8 @@ class PBSTFSolver(Solver):
     def substep_post_coupling(self, f):
         if self.is_active:
             self._kernel_copy_from_reordered(f)
+            if self._n_porous_particles > 0:
+                self._copy_porous_from_reordered()
 
     def substep_post_coupling_grad(self, f):
         pass
@@ -1186,17 +1700,40 @@ class PBSTFSolver(Solver):
 
     def set_state(self, f, state, envs_idx=None):
         if self.is_active:
-            self._kernel_set_state(f, state.pos, state.vel, state.active)
+            envs_idx = self._scene._sanitize_envs_idx(envs_idx)
+            if gs.use_zerocopy:
+                errno = qd_to_torch(self._errno, transpose=True, copy=False)
+                errno[envs_idx] = 0
+            else:
+                pbstf_porous.kernel_clear_errno(envs_idx, self._errno)
+            self._kernel_set_state(f, envs_idx, state.pos, state.vel, state.active)
+            if self._n_porous_particles > 0:
+                self._set_porous_particles_frame(
+                    0,
+                    self._n_porous_particles,
+                    envs_idx,
+                    state.porous_pos,
+                    state.porous_vel,
+                    state.porous_active,
+                    state.porous_is_fixed,
+                )
+                self._kernel_reorder_particles(f)
+                self._kernel_compute_density(f)
+                self._reorder_porous_particles()
+                self._update_porous_derived_fields()
+                self._copy_porous_from_reordered()
 
     @qd.kernel
     def _kernel_set_state(
         self,
         f: qd.i32,
+        envs_idx: qd.types.ndarray(),
         pos: qd.types.ndarray(),
         vel: qd.types.ndarray(),
         active: qd.types.ndarray(),
     ):
-        for i, i_b in qd.ndrange(self._n_particles, self._B):
+        for i, i_b_ in qd.ndrange(self._n_particles, envs_idx.shape[0]):
+            i_b = envs_idx[i_b_]
             for axis in qd.static(range(3)):
                 self.particles[i, i_b].pos[axis] = pos[i_b, i, axis]
                 self.particles[i, i_b].vel[axis] = vel[i_b, i, axis]
@@ -1207,6 +1744,17 @@ class PBSTFSolver(Solver):
             return None
         state = PBSTFSolverState(self.scene)
         self._kernel_get_state(f, state.pos, state.vel, state.active)
+        if self._n_porous_particles > 0:
+            envs_idx = self._scene._sanitize_envs_idx(None)
+            self._get_porous_particles_frame(
+                0,
+                self._n_porous_particles,
+                envs_idx,
+                state.porous_pos,
+                state.porous_vel,
+                state.porous_active,
+                state.porous_is_fixed,
+            )
         return state
 
     @qd.kernel
@@ -1225,16 +1773,33 @@ class PBSTFSolver(Solver):
 
     def update_render_fields(self):
         self._kernel_update_render_fields(self.sim.cur_substep_local)
+        if self._n_porous_particles > 0:
+            pbstf_porous.kernel_update_porous_render_fields(
+                self._n_porous_particles,
+                self.porous_particles,
+                self.porous_particles_status,
+                self.porous_render_indices,
+                self.particles_render,
+            )
+        if self._n_vverts > 0:
+            pbstf_porous.kernel_update_porous_visual_vertices(
+                self._n_vverts,
+                self._n_vvert_supports,
+                self.particles_render,
+                self.vverts_info,
+                self.vverts_render,
+            )
 
     @qd.kernel
     def _kernel_update_render_fields(self, f: qd.i32):
         for i, i_b in qd.ndrange(self._n_particles, self._B):
+            render_idx = self.fluid_render_indices[i]
             if self.particles_ng[i, i_b].active:
-                self.particles_render[i, i_b].pos = self.particles[i, i_b].pos
-                self.particles_render[i, i_b].vel = self.particles[i, i_b].vel
+                self.particles_render[render_idx, i_b].pos = self.particles[i, i_b].pos
+                self.particles_render[render_idx, i_b].vel = self.particles[i, i_b].vel
             else:
-                self.particles_render[i, i_b].pos = gu.qd_nowhere()
-            self.particles_render[i, i_b].active = self.particles_ng[i, i_b].active
+                self.particles_render[render_idx, i_b].pos = gu.qd_nowhere()
+            self.particles_render[render_idx, i_b].active = self.particles_ng[i, i_b].active
 
     @qd.kernel
     def _kernel_add_particles(
@@ -1360,8 +1925,36 @@ class PBSTFSolver(Solver):
     @property
     def n_particles(self):
         if self.is_built:
-            return self._n_particles
+            return self._n_total_particles
         return sum(entity.n_particles for entity in self.entities)
+
+    @property
+    def n_fluid_particles(self):
+        if self.is_built:
+            return self._n_particles
+        return sum(
+            entity.n_particles for entity in self.entities if isinstance(entity.material, gs.materials.PBSTF.Liquid)
+        )
+
+    @property
+    def n_porous_particles(self):
+        if self.is_built:
+            return self._n_porous_particles
+        return sum(
+            entity.n_particles
+            for entity in self.entities
+            if isinstance(entity.material, gs.materials.PBSTF.PorousElastic)
+        )
+
+    @property
+    def n_vverts(self):
+        if self.is_built:
+            return self._n_vverts
+        return sum(
+            entity.n_vverts
+            for entity in self.entities
+            if isinstance(entity.material, gs.materials.PBSTF.PorousElastic) and entity.surface.vis_mode == "visual"
+        )
 
     @property
     def particle_size(self):

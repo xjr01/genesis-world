@@ -85,7 +85,7 @@ class Scene(RBC):
     ipbstf_options : gs.options.IPBSTFOptions
         The options configuring the implicit position-based surface-tension fluid (IPBSTF) solver.
     pbstf_options : gs.options.PBSTFOptions
-        The options configuring the fluid-only pbstf_solver (``scene.sim.PBSTFSolver``).
+        The options configuring the pbstf_solver (``scene.sim.PBSTFSolver``).
     vis_options : gs.options.VisOptions
         The options configuring the visualization system (``scene.visualizer``). Visualizer controls both the interactive viewer and the cameras.
     viewer_options : gs.options.ViewerOptions
@@ -480,6 +480,16 @@ class Scene(RBC):
                     f"Unsupported `surface.vis_mode` for material {material}: '{surface.vis_mode}'. Expected one of: ['particle', 'recon']."
                 )
 
+        elif isinstance(material, gs.materials.PBSTF.PorousElastic):
+            if surface.vis_mode is None:
+                surface.vis_mode = "visual"
+
+            if surface.vis_mode not in ("visual", "particle", "recon"):
+                gs.raise_exception(
+                    f"Unsupported `surface.vis_mode` for material {material}: '{surface.vis_mode}'. Expected one of: "
+                    "['visual', 'particle', 'recon']."
+                )
+
         elif isinstance(
             material,
             (
@@ -836,7 +846,7 @@ class Scene(RBC):
         material : gs.materials.Material
             The material of the fluid to be emitted. Must be an instance of `gs.materials.MPM.Base`,
             `gs.materials.SPH.Base`, `gs.materials.PBD.Particle`, `gs.materials.PBD.Liquid` or
-            `gs.materials.IPBSTF.Base` or `gs.materials.PBSTF.Base`.
+            `gs.materials.IPBSTF.Base` or `gs.materials.PBSTF.Liquid`.
         max_particles : int
             The maximum number of particles that can be emitted by the emitter. Particles will be recycled once this
             limit is reached.
@@ -861,13 +871,13 @@ class Scene(RBC):
                 gs.materials.PBD.Particle,
                 gs.materials.PBD.Liquid,
                 gs.materials.IPBSTF.Base,
-                gs.materials.PBSTF.Base,
+                gs.materials.PBSTF.Liquid,
             ),
         ):
             gs.raise_exception(
                 "Non-supported material for emitter. Supported materials are: `gs.materials.MPM.Base`, "
                 "`gs.materials.SPH.Base`, `gs.materials.PBD.Particle`, `gs.materials.PBD.Liquid`, "
-                "`gs.materials.IPBSTF.Base`, `gs.materials.PBSTF.Base`."
+                "`gs.materials.IPBSTF.Base`, `gs.materials.PBSTF.Liquid`."
             )
 
         if surface is None:

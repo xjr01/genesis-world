@@ -99,8 +99,8 @@ def build_scene(
         )
         boundary_colliders = [
             gs.options.PBSTFBoxStaticColliderOptions(
-                center=tuple(0.5 * (lo + up) for lo, up in zip(lower, upper)),
-                half_extent=tuple(0.5 * (up - lo) for lo, up in zip(lower, upper)),
+                lower=lower,
+                upper=upper,
                 is_density_blocking=False,
             )
             for lower, upper in solid_bounds

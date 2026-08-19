@@ -12,6 +12,7 @@ from .pbd_entity import (
     PBDParticleEntity,
 )
 from .pbstf_entity import PBSTFEntity
+from .pbstf_porous_entity import PBSTFPorousEntity
 from .rigid_entity import KinematicEntity, RigidEntity
 from .sf_entity import SFParticleEntity
 from .sph_entity import SPHEntity
