@@ -52,6 +52,7 @@ def build_scene(
     dt=None,
     alpha=1e-6,
     max_solver_iterations=10,
+    show_boundary=True,
 ):
     """Build an implicit position-based fluid example scene."""
     if case == CASE_DAM_BREAK:
@@ -68,6 +69,42 @@ def build_scene(
         boundary_thickness = 2.0 * particle_size
         # The padded hash-grid domain keeps its projection boundary beyond the solid particle layers.
         domain_padding = 3.0 * boundary_thickness
+        # Each solid particle layer is paired with an analytic box collider of identical extent so the boundary
+        # combines the frozen-fluid density response with a strict project-out.
+        solid_bounds = (
+            (
+                (-2.0 - boundary_thickness, -boundary_thickness, -2.0 - boundary_thickness),
+                (2.0 + boundary_thickness, 0.0, 2.0 + boundary_thickness),
+            ),
+            (
+                (-2.0 - boundary_thickness, 0.0, -2.0 - boundary_thickness),
+                (-2.0, 4.0, 2.0 + boundary_thickness),
+            ),
+            (
+                (2.0, 0.0, -2.0 - boundary_thickness),
+                (2.0 + boundary_thickness, 4.0, 2.0 + boundary_thickness),
+            ),
+            (
+                (-2.0, 0.0, -2.0 - boundary_thickness),
+                (2.0, 4.0, -2.0),
+            ),
+            (
+                (-2.0, 0.0, 2.0),
+                (2.0, 4.0, 2.0 + boundary_thickness),
+            ),
+            (
+                (-2.0 - boundary_thickness, 4.0, -2.0 - boundary_thickness),
+                (2.0 + boundary_thickness, 4.0 + boundary_thickness, 2.0 + boundary_thickness),
+            ),
+        )
+        boundary_colliders = [
+            gs.options.PBSTFBoxStaticColliderOptions(
+                center=tuple(0.5 * (lo + up) for lo, up in zip(lower, upper)),
+                half_extent=tuple(0.5 * (up - lo) for lo, up in zip(lower, upper)),
+                is_density_blocking=False,
+            )
+            for lower, upper in solid_bounds
+        ]
         scene = gs.Scene(
             sim_options=gs.options.SimOptions(
                 dt=dt,
@@ -77,6 +114,7 @@ def build_scene(
                 alpha=alpha,
                 particle_size=particle_size,
                 max_solver_iterations=max_solver_iterations,
+                static_colliders=boundary_colliders,
                 lower_bound=(
                     -2.0 - domain_padding,
                     -domain_padding,
@@ -108,30 +146,8 @@ def build_scene(
             sampler="staggered",
         )
         solid_surface = gs.surfaces.Default(
-            color=(0.7, 0.75, 0.8, 0.35),
+            color=(0.7, 0.75, 0.8, 0.35 if show_boundary else 0.0),
             vis_mode="particle",
-        )
-        solid_bounds = (
-            (
-                (-2.0 - boundary_thickness, -boundary_thickness, -2.0 - boundary_thickness),
-                (2.0 + boundary_thickness, 0.0, 2.0 + boundary_thickness),
-            ),
-            (
-                (-2.0 - boundary_thickness, 0.0, -2.0 - boundary_thickness),
-                (-2.0, 4.0, 2.0 + boundary_thickness),
-            ),
-            (
-                (2.0, 0.0, -2.0 - boundary_thickness),
-                (2.0 + boundary_thickness, 4.0, 2.0 + boundary_thickness),
-            ),
-            (
-                (-2.0, 0.0, -2.0 - boundary_thickness),
-                (2.0, 4.0, -2.0),
-            ),
-            (
-                (-2.0, 0.0, 2.0),
-                (2.0, 4.0, 2.0 + boundary_thickness),
-            ),
         )
         for lower, upper in solid_bounds:
             scene.add_entity(
@@ -219,6 +235,12 @@ def main():
         default=False,
         help="Record the viewer and prompt for the output path on exit",
     )
+    parser.add_argument(
+        "--show-boundary",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Semi-transparently display the solid boundary particles; the box colliders are never shown",
+    )
     args = parser.parse_args()
     if args.scale is not None and args.scale <= 0:
         parser.error("--scale must be positive")
@@ -239,6 +261,7 @@ def main():
         dt=args.dt,
         alpha=args.alpha,
         max_solver_iterations=args.iterations,
+        show_boundary=args.show_boundary,
     )
     if args.case == CASE_DAM_BREAK:
         settings = None

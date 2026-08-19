@@ -759,10 +759,15 @@ class PBSTFStaticColliderOptions(Options):
     The pose can change after scene construction through
     :meth:`PBSTFSolver.set_static_colliders_pose`. The collider remains one-way: it affects the liquid and receives no
     force or velocity response from it.
+    ``is_density_blocking`` toggles the per-neighbor density-separation test: when True (default) the collider blocks
+    density interactions between particle pairs it separates (thin internal obstacles); when False the collider only
+    projects particles out of its volume, skipping the per-neighbor test. Set False for boundary colliders whose
+    density response is already carried by boundary particles.
     """
 
     pos: Vec3FType = (0.0, 0.0, 0.0)
     quat: UnitVec4FType = (1.0, 0.0, 0.0, 0.0)
+    is_density_blocking: bool = True
 
 
 class PBSTFConeStaticColliderOptions(PBSTFStaticColliderOptions):
@@ -797,14 +802,36 @@ class PBSTFMeshStaticColliderOptions(PBSTFStaticColliderOptions):
     sdf_res: StrictInt = Field(default=150, ge=16)
 
 
+class PBSTFBoxStaticColliderOptions(PBSTFStaticColliderOptions):
+    """Finite analytic box (rectangular cuboid) collider.
+
+    ``center`` is the box center and ``half_extent`` is its per-axis half size, both in the collider's local frame.
+    """
+
+    type: Literal["box"] = "box"
+    center: Vec3FType
+    half_extent: Vec3FType
+
+    @model_validator(mode="after")
+    def _validate_geometry(self):
+        if np.any(np.array(self.half_extent) <= 0.0):
+            gs.raise_exception("PBSTF box collider `half_extent` must be positive on every axis.")
+        return self
+
+
 PBSTFStaticColliderOptionsType = Annotated[
-    PBSTFConeStaticColliderOptions | PBSTFMeshStaticColliderOptions,
+    PBSTFConeStaticColliderOptions | PBSTFMeshStaticColliderOptions | PBSTFBoxStaticColliderOptions,
     Field(discriminator="type"),
 ]
 
 
 class IPBSTFOptions(Options):
     """Options for the implicit position-based surface-tension fluid (IPBSTF) solver's density energy.
+
+    ``particle_size`` is the particle diameter. The cubic-spline support radius is ``2 * particle_size``: large
+    enough to capture the full neighbor shell (including body-diagonal neighbors) for an isotropic density estimate,
+    at the cost of more neighbors and heavier local-system assembly than a smaller ratio. The hash-grid cell defaults
+    to the support radius, the minimum that keeps every kernel neighbor inside the 3x3x3 cell stencil.
 
     ``alpha`` weights inertia against the density energy. Larger values keep particles closer to their unconstrained
     predictions and produce a softer density response; smaller values enforce incompressibility more strongly at the
@@ -837,14 +864,14 @@ class IPBSTFOptions(Options):
     def _resolve_defaults(cls, data: dict) -> dict:
         particle_size = data.get("particle_size", 0.02)
         if data.get("hash_grid_cell_size") is None:
-            data["hash_grid_cell_size"] = 1.5 * particle_size
+            data["hash_grid_cell_size"] = 2.0 * particle_size
         return data
 
     def model_post_init(self, context: Any) -> None:
         if not np.all(np.array(self.upper_bound) > np.array(self.lower_bound)):
             gs.raise_exception("Invalid pair of upper_bound and lower_bound.")
 
-        self._support_radius = 1.5 * self.particle_size
+        self._support_radius = 2.0 * self.particle_size
         if self.hash_grid_cell_size < self._support_radius:
             gs.raise_exception("`hash_grid_cell_size` must not be smaller than the IPBSTF cubic-spline support radius.")
 

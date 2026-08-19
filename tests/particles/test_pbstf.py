@@ -22,6 +22,7 @@ from examples.teapot.pbstf_surface_tension import (
 )
 import genesis as gs
 from genesis.engine.boundaries import (
+    BoxStaticCollider,
     ConeStaticCollider,
     StaticCollider,
     project_out_static_collider,
@@ -123,6 +124,101 @@ def test_cone_static_collider_geometry():
     with pytest.raises(TypeError):
         StaticCollider()
 
+
+@pytest.mark.required
+@pytest.mark.parametrize("backend", [gs.cuda])
+def test_box_static_collider_geometry():
+    collider = BoxStaticCollider(center=(0.0, 0.0, 0.0), half_extent=(1.0, 1.0, 1.0))
+    points = np.array(
+        [
+            (0.5, 0.2, 0.1),
+            (2.0, 0.5, 0.5),
+            (2.0, 2.0, 0.5),
+            (0.9, 0.0, 0.0),
+            (1.1, 0.0, 0.0),
+            (-1.1, 0.0, 0.0),
+        ],
+        dtype=gs.np_float,
+    )
+
+    points_qd = qd.field(gs.qd_vec3, shape=(len(points),))
+    closest_qd = qd.field(gs.qd_vec3, shape=(len(points),))
+    normals_qd = qd.field(gs.qd_vec3, shape=(len(points),))
+    projected_qd = qd.field(gs.qd_vec3, shape=(len(points),))
+    inside_qd = qd.field(gs.qd_bool, shape=(len(points),))
+    separated_qd = qd.field(gs.qd_bool, shape=(2,))
+    colliders_pos_qd = qd.field(gs.qd_vec3, shape=(1, 1))
+    colliders_quat_qd = qd.field(gs.qd_vec4, shape=(1, 1))
+    points_qd.from_numpy(points)
+    colliders_pos_qd.from_numpy(np.zeros((1, 1, 3), dtype=gs.np_float))
+    colliders_quat_qd.from_numpy(np.array([[[1.0, 0.0, 0.0, 0.0]]], dtype=gs.np_float))
+
+    @qd.kernel
+    def run(
+        points_field: qd.template(),
+        closest_field: qd.template(),
+        normals_field: qd.template(),
+        projected_field: qd.template(),
+        inside_field: qd.template(),
+        separated_field: qd.template(),
+        colliders_pos: qd.template(),
+        colliders_quat: qd.template(),
+        collider_geometry: qd.template(),
+    ):
+        for i in range(points_field.shape[0]):
+            closest, normal, is_inside, _ = query_static_collider(
+                0, 0, points_field[i], colliders_pos, colliders_quat, collider_geometry
+            )
+            closest_field[i] = closest
+            normals_field[i] = normal
+            projected_field[i] = project_out_static_collider(
+                0, 0, points_field[i], colliders_pos, colliders_quat, collider_geometry
+            )
+            inside_field[i] = is_inside
+        separated_field[0] = static_collider_separates(
+            0, 0, points_field[4], points_field[5], 0.2, colliders_pos, colliders_quat, collider_geometry
+        )
+        separated_field[1] = static_collider_separates(
+            0, 0, points_field[3], points_field[4], 0.2, colliders_pos, colliders_quat, collider_geometry
+        )
+
+    run(
+        points_qd,
+        closest_qd,
+        normals_qd,
+        projected_qd,
+        inside_qd,
+        separated_qd,
+        colliders_pos_qd,
+        colliders_quat_qd,
+        collider,
+    )
+
+    closest = qd_to_numpy(closest_qd, transpose=True)
+    normals = qd_to_numpy(normals_qd, transpose=True)
+    projected = qd_to_numpy(projected_qd, transpose=True)
+    inside = qd_to_numpy(inside_qd, transpose=True)
+    separated = qd_to_numpy(separated_qd, transpose=True)
+
+    assert_allclose(closest[0], (1.0, 0.2, 0.1), atol=1e-5)
+    assert_allclose(closest[1], (1.0, 0.5, 0.5), atol=1e-5)
+    assert_allclose(closest[2], (1.0, 1.0, 0.5), atol=1e-5)
+    assert_allclose(closest[3], (1.0, 0.0, 0.0), atol=1e-5)
+    assert_allclose(closest[5], (-1.0, 0.0, 0.0), atol=1e-5)
+    assert_allclose(normals[1], (1.0, 0.0, 0.0), atol=1e-5)
+    assert_allclose(normals[2], np.sqrt(0.5) * np.array((1.0, 1.0, 0.0)), atol=1e-5)
+    assert_allclose(normals[5], (-1.0, 0.0, 0.0), atol=1e-5)
+    assert_allclose(projected[0], closest[0], atol=1e-5)
+    assert_allclose(projected[3], closest[3], atol=1e-5)
+    assert_allclose(projected[1], points[1], atol=1e-5)
+    assert_allclose(projected[2], points[2], atol=1e-5)
+    assert_allclose(projected[4], points[4], atol=1e-5)
+    assert_allclose(projected[5], points[5], atol=1e-5)
+    assert_equal(inside, (True, False, False, True, False, False))
+    assert_equal(separated, (True, False))
+
+    with pytest.raises(TypeError):
+        StaticCollider()
 
 @pytest.mark.required
 @pytest.mark.parametrize("backend", [gs.cuda])

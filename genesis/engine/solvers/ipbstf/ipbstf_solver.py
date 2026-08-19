@@ -198,15 +198,10 @@ def _accumulate_density_constraint(
                     gradient += mass_j / rho_rest * kernel_gradient
                     hessian += mass_j / rho_rest * kernel_hessian
 
-    constraint = density / rho_rest - 1.0
-    if constraint > 0.0:
-        particles[particle_idx, env_idx].density_constraint = constraint
-        particles[particle_idx, env_idx].density_gradient = gradient
-        particles[particle_idx, env_idx].density_hessian_diag = _hessian_column_norms(hessian)
-    else:
-        particles[particle_idx, env_idx].density_constraint = 0.0
-        particles[particle_idx, env_idx].density_gradient = qd.Vector.zero(gs.qd_float, 3)
-        particles[particle_idx, env_idx].density_hessian_diag = qd.Vector.zero(gs.qd_float, 3)
+    constraint = qd.max(density / rho_rest - 1.0, 0.0)
+    particles[particle_idx, env_idx].density_constraint = constraint
+    particles[particle_idx, env_idx].density_gradient = gradient
+    particles[particle_idx, env_idx].density_hessian_diag = _hessian_column_norms(hessian)
     particles[particle_idx, env_idx].density = density
 
 
@@ -240,8 +235,7 @@ def _accumulate_neighbor_density_energy(
                 delta = pos_i - pos_j
                 distance = delta.norm()
                 if (
-                    constraint > 0.0
-                    and distance < support_radius
+                    distance < support_radius
                     and not _is_separated_by_static_colliders(
                         env_idx,
                         pos_i,
@@ -315,7 +309,8 @@ def _kernel_compute_density_constraints(
     is_fixed_influence_enabled: qd.template(),
 ):
     for particle_idx, env_idx in qd.ndrange(n_particles, particles.shape[1]):
-        if particles_status[particle_idx, env_idx].active and not particles_info[particle_idx, env_idx].is_fixed:
+        # Boundary particles are fixed but carry density constraints as sources for neighboring fluid (see solver_math.md).
+        if particles_status[particle_idx, env_idx].active:
             _accumulate_density_constraint(
                 particle_idx,
                 env_idx,
