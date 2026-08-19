@@ -101,7 +101,8 @@ class TapEmitterSettings(NamedTuple):
 
 
 class MopSettings(NamedTuple):
-    asset: str
+    collider_lower: tuple[float, float, float]
+    collider_upper: tuple[float, float, float]
     table_pos: tuple[float, float, float]
     table_size: tuple[float, float, float]
     liquid_lower: tuple[float, float, float]
@@ -246,8 +247,8 @@ def _case_porous_material(case):
     if case in (CASE_MOP, CASE_SPONGE_SQUEEZE):
         return gs.materials.PBSTF.PorousElastic(
             porosity=0.8,
-            deviatoric_compliance=1e-5,
-            volumetric_compliance=1e-5,
+            deviatoric_compliance=1e-6 if case == CASE_MOP else 1e-5,
+            volumetric_compliance=1e-6 if case == CASE_MOP else 1e-5,
             capillary_compliance=10.0,
             drag=10.0,
             wet_deviatoric_compliance_scale=1.5,
@@ -343,6 +344,8 @@ def case_settings(case):
         liquid_upper = (-0.5, 0.35, 0.7)
         start_pos = (-3.5, 0.0, 0.0)
         end_pos = (3.5, 0.0, 0.0)
+        collider_lower = (-0.6, 0.02, -1.2)
+        collider_upper = (0.6, 0.85, 1.2)
         quat = (1.0, 0.0, 0.0, 0.0)
         settle_time = 1.0
         wipe_time = 5.0
@@ -358,7 +361,8 @@ def case_settings(case):
         sweep = None
         if case == CASE_MOP:
             mop = MopSettings(
-                asset="meshes/mop.obj",
+                collider_lower=collider_lower,
+                collider_upper=collider_upper,
                 table_pos=table_pos,
                 table_size=table_size,
                 liquid_lower=liquid_lower,
@@ -372,8 +376,8 @@ def case_settings(case):
         else:
             sweep = SweepSettings(
                 collider_idx=1,
-                collider_lower=(-0.6, 0.02, -1.2),
-                collider_upper=(0.6, 0.85, 1.2),
+                collider_lower=collider_lower,
+                collider_upper=collider_upper,
                 table_pos=table_pos,
                 table_size=table_size,
                 liquid_lower=liquid_lower,
@@ -569,14 +573,16 @@ def add_case_entities(scene, case, particle_size, settings, material_factory):
             material=material_factory(case),
         )
         sponge = scene.add_entity(
-            morph=gs.morphs.Mesh(
-                file=mop.asset,
+            morph=gs.morphs.Box(
                 pos=mop.start_pos,
                 quat=mop.quat,
+                offset_pos=0.5 * np.add(mop.collider_lower, mop.collider_upper),
+                size=np.subtract(mop.collider_upper, mop.collider_lower),
             ),
             material=_case_porous_material(case),
             surface=gs.surfaces.Default(
-                color=(0.9, 0.45, 0.12, 1.0),
+                color=(0.9, 0.45, 0.12),
+                opacity=0.3,
             ),
         )
         return ((liquid, None), (sponge, None))

@@ -856,15 +856,14 @@ def test_sweep_box_pushes_water(n_envs, show_viewer):
 def test_porous_elastic_absorbs_carries_and_squeezes_water(n_envs, show_viewer):
     mop_settings = case_settings(CASE_MOP)
     mop = mop_settings.mop
+    sweep = case_settings(CASE_SWEEP).sweep
     assert mop is not None
+    assert sweep is not None
     assert mop_settings.sweep is None
     assert len(mop_settings.static_colliders) == 1
-    mop_mesh = mesh_utils.load_mesh(os.path.join(gs.utils.get_assets_dir(), mop.asset))
-
-    assert mop_mesh.is_watertight
-    assert mop_mesh.is_winding_consistent
-    assert mop_mesh.volume > 0.0
-    assert_allclose(mop_mesh.bounds, ((-0.6, 0.02, -2.2), (0.6, 0.85, 2.2)), atol=1e-8)
+    assert_equal(mop.collider_lower, sweep.collider_lower)
+    assert_equal(mop.collider_upper, sweep.collider_upper)
+    assert_equal(np.subtract(mop.collider_upper, mop.collider_lower), (1.2, 0.83, 2.4))
 
     settings = case_settings(CASE_SPONGE_SQUEEZE)
     assert settings.sponge is not None
