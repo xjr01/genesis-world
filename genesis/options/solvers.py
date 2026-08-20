@@ -788,6 +788,17 @@ class PBSTFBoxStaticColliderOptions(PBSTFStaticColliderOptions):
         return self
 
 
+class PBSTFInverseBoxStaticColliderOptions(PBSTFBoxStaticColliderOptions):
+    """Finite analytic collider that confines particles to a rectangular interior.
+
+    ``lower`` and ``upper`` delimit the allowed local-frame region, and contact normals point into that region. This
+    compactly represents a closed box container; individual analytic or mesh colliders represent boundaries with
+    openings or non-rectangular geometry.
+    """
+
+    type: Literal["inverse_box"] = "inverse_box"
+
+
 class PBSTFConeStaticColliderOptions(PBSTFStaticColliderOptions):
     """Finite analytic cone collider.
 
@@ -821,7 +832,10 @@ class PBSTFMeshStaticColliderOptions(PBSTFStaticColliderOptions):
 
 
 PBSTFStaticColliderOptionsType = Annotated[
-    PBSTFBoxStaticColliderOptions | PBSTFConeStaticColliderOptions | PBSTFMeshStaticColliderOptions,
+    PBSTFBoxStaticColliderOptions
+    | PBSTFConeStaticColliderOptions
+    | PBSTFInverseBoxStaticColliderOptions
+    | PBSTFMeshStaticColliderOptions,
     Field(discriminator="type"),
 ]
 

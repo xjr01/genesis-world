@@ -116,6 +116,13 @@ def test_dam_break_spreads_under_gravity(n_envs, show_viewer):
         ipbstf_options=gs.options.IPBSTFOptions(
             particle_size=0.1,
             max_solver_iterations=5,
+            static_colliders=[
+                gs.options.PBSTFInverseBoxStaticColliderOptions(
+                    is_density_blocking=False,
+                    lower=(-1.0, 0.0, -0.5),
+                    upper=(2.0, 2.0, 0.5),
+                ),
+            ],
             lower_bound=(-1.0, -0.5, -0.5),
             upper_bound=(2.0, 2.0, 0.5),
         ),
@@ -154,6 +161,8 @@ def test_dam_break_spreads_under_gravity(n_envs, show_viewer):
 
     assert np.isfinite(pos).all()
     assert_equal(tensor_to_array(floor_entity.get_state().pos), floor_pos_initial)
-    assert (pos[..., 1] >= 0.0).all()
+    assert (pos[..., 1] >= 0.05).all()
+    assert (pos[..., 2] >= -0.45).all()
+    assert (pos[..., 2] <= 0.45).all()
     assert (pos[..., 1].mean(axis=1) < pos_initial[..., 1].mean(axis=1) - 0.3).all()
     assert (np.ptp(pos[..., 0], axis=1) > 1.5 * np.ptp(pos_initial[..., 0], axis=1)).all()

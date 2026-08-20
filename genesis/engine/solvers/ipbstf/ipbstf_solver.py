@@ -1058,6 +1058,10 @@ class IPBSTFSolver(Solver):
             self._errno,
         )
         if self._material.viscosity > 0.0:
+            _kernel_copy_from_reordered(
+                self._n_particles, self.particles, self.particles_status, self.particles_reordered
+            )
+            self._reorder_particles()
             self._compute_density_constraints()
             _kernel_compute_viscosity_velocity_updates(
                 self._n_particles,

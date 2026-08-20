@@ -16,6 +16,7 @@ from genesis.utils.misc import get_assets_dir, get_gsd_cache_dir
 _COLLIDER_CONE = 0
 _COLLIDER_MESH = 1
 _COLLIDER_BOX = 2
+_COLLIDER_INVERSE_BOX = 3
 _SDF_CACHE_SCHEMA = "pbstf-static-collider-v1"
 
 
@@ -74,13 +75,22 @@ class BoxStaticCollider(StaticCollider):
         )
 
 
+class InverseBoxStaticCollider(BoxStaticCollider):
+    """Finite analytic box whose exterior is solid and whose normals point into its interior."""
+
+    kind = _COLLIDER_INVERSE_BOX
+    type = "inverse_box"
+
+
 class ConeStaticCollider(StaticCollider):
     """Finite analytic cone whose geometry is fixed in the collider's local frame."""
 
     kind = _COLLIDER_CONE
     type = "cone"
 
-    def __init__(self, center, height, radius, pos=(0.0, 0.0, 0.0), quat=(1.0, 0.0, 0.0, 0.0), is_density_blocking=True):
+    def __init__(
+        self, center, height, radius, pos=(0.0, 0.0, 0.0), quat=(1.0, 0.0, 0.0, 0.0), is_density_blocking=True
+    ):
         super().__init__(pos, quat, is_density_blocking)
         self.center = np.array(center)
         self.height = np.array(height)
@@ -374,6 +384,10 @@ def query_static_collider(collider_idx, env_idx, pos, colliders_pos, colliders_q
     surface_distance = gs.qd_float(1.0e20)
     if qd.static(collider.kind == _COLLIDER_BOX):
         closest_local, normal_local, is_inside, surface_distance = _query_box_local(pos_local, collider)
+    elif qd.static(collider.kind == _COLLIDER_INVERSE_BOX):
+        closest_local, normal_local, is_inside_box, surface_distance = _query_box_local(pos_local, collider)
+        normal_local = -normal_local
+        is_inside = not is_inside_box
     elif qd.static(collider.kind == _COLLIDER_CONE):
         closest_local, normal_local, is_inside, surface_distance = _query_cone_local(pos_local, collider)
     elif qd.static(collider.kind == _COLLIDER_MESH):
@@ -398,6 +412,25 @@ def query_static_collider_contact(
     )
     anchor = closest + particle_radius * normal
     is_penetrating = is_inside or surface_distance < particle_radius
+    if qd.static(collider.kind == _COLLIDER_INVERSE_BOX):
+        collider_pos = colliders_pos[collider_idx, env_idx]
+        collider_quat = colliders_quat[collider_idx, env_idx]
+        pos_local = gu.qd_inv_transform_by_trans_quat(pos, collider_pos, collider_quat)
+        anchor_local = pos_local
+        is_penetrating = False
+        for axis in qd.static(range(3)):
+            lower = collider.lower_qd[axis] + particle_radius
+            upper = collider.upper_qd[axis] - particle_radius
+            if pos_local[axis] < lower:
+                anchor_local[axis] = lower
+                is_penetrating = True
+            elif pos_local[axis] > upper:
+                anchor_local[axis] = upper
+                is_penetrating = True
+        anchor = gu.qd_transform_by_trans_quat(anchor_local, collider_pos, collider_quat)
+        correction = anchor - pos
+        if correction.norm_sqr() > gs.EPS**2:
+            normal = correction.normalized()
     return anchor, normal, is_penetrating, surface_distance
 
 
@@ -437,6 +470,7 @@ def static_collider_separates(
 _STATIC_COLLIDER_TYPES = {
     BoxStaticCollider.type: BoxStaticCollider,
     ConeStaticCollider.type: ConeStaticCollider,
+    InverseBoxStaticCollider.type: InverseBoxStaticCollider,
     MeshStaticCollider.type: MeshStaticCollider,
 }
 
@@ -453,6 +487,7 @@ __all__ = [
     "StaticCollider",
     "BoxStaticCollider",
     "ConeStaticCollider",
+    "InverseBoxStaticCollider",
     "MeshStaticCollider",
     "create_static_collider",
     "project_out_static_collider",

@@ -16,6 +16,7 @@ import genesis.utils.particle as particle_utils
 from genesis.engine.boundaries import (
     BoxStaticCollider,
     ConeStaticCollider,
+    InverseBoxStaticCollider,
     StaticCollider,
     project_out_static_collider,
     query_static_collider,
@@ -175,8 +176,62 @@ def test_analytic_static_collider_geometry():
     assert_equal(inside, (True, False, False, False, False, False))
     assert_equal(separated, (True, False))
 
+    inverse_box = InverseBoxStaticCollider(
+        lower=(-1.0, -2.0, -3.0),
+        upper=(1.0, 2.0, 3.0),
+        is_density_blocking=False,
+    )
+    inverse_box_points = np.array(
+        [
+            (0.9, 0.0, 0.0),
+            (1.1, 0.0, 0.0),
+            (0.5, 0.0, 0.0),
+            (-0.9, -1.9, 0.0),
+            (1.1, 2.1, 3.1),
+            (-1.1, 0.0, 0.0),
+        ],
+        dtype=gs.np_float,
+    )
+    points_qd.from_numpy(inverse_box_points)
+    run(
+        particle_radius,
+        points_qd,
+        closest_qd,
+        normals_qd,
+        projected_qd,
+        inside_qd,
+        separated_qd,
+        colliders_pos_qd,
+        colliders_quat_qd,
+        inverse_box,
+    )
+
+    closest = qd_to_numpy(closest_qd, transpose=True)
+    normals = qd_to_numpy(normals_qd, transpose=True)
+    projected = qd_to_numpy(projected_qd, transpose=True)
+    inside = qd_to_numpy(inside_qd, transpose=True)
+    separated = qd_to_numpy(separated_qd, transpose=True)
+
+    assert_allclose(closest[:3], ((1.0, 0.0, 0.0), (1.0, 0.0, 0.0), (1.0, 0.0, 0.0)), atol=1e-6)
+    assert_allclose(normals[:3], ((-1.0, 0.0, 0.0), (-1.0, 0.0, 0.0), (-1.0, 0.0, 0.0)), atol=1e-6)
+    assert_allclose(projected[0], (0.8, 0.0, 0.0), atol=1e-6)
+    assert_allclose(projected[1], (0.8, 0.0, 0.0), atol=1e-6)
+    assert_allclose(projected[2], inverse_box_points[2], atol=1e-6)
+    assert_allclose(projected[3], (-0.8, -1.8, 0.0), atol=1e-6)
+    assert_allclose(closest[4], (1.0, 2.0, 3.0), atol=1e-6)
+    assert_allclose(normals[4], -np.sqrt(1.0 / 3.0) * np.ones(3), atol=1e-6)
+    assert_allclose(projected[4], (0.8, 1.8, 2.8), atol=1e-6)
+    assert_allclose(projected[5], (-0.8, 0.0, 0.0), atol=1e-6)
+    assert_equal(inside, (False, True, False, False, True, True))
+    assert_equal(separated, (False, False))
+
     with pytest.raises(gs.GenesisException, match="greater than"):
         gs.options.PBSTFBoxStaticColliderOptions(
+            lower=(-1.0, -1.0, -1.0),
+            upper=(1.0, -1.0, 1.0),
+        )
+    with pytest.raises(gs.GenesisException, match="greater than"):
+        gs.options.PBSTFInverseBoxStaticColliderOptions(
             lower=(-1.0, -1.0, -1.0),
             upper=(1.0, -1.0, 1.0),
         )
@@ -280,6 +335,7 @@ def test_box_static_collider_geometry():
     with pytest.raises(TypeError):
         StaticCollider()
 
+
 @pytest.mark.required
 @pytest.mark.parametrize("backend", [gs.cuda])
 @pytest.mark.parametrize("n_envs", [0, 2])
@@ -354,6 +410,7 @@ def test_mesh_static_collider_pose(asset_tmp_path, n_envs, show_viewer):
     else:
         projected_pos = particles_pos[0]
     assert np.linalg.norm(projected_pos - target_pos) > 0.4
+
 
 @pytest.mark.required
 @pytest.mark.parametrize("backend", [gs.cuda])

@@ -82,8 +82,6 @@ def build_scene(
         camera_lookat = (0.0, 2.9, 0.0) if is_double_dam_break else (0.4, 0.6, 0.0)
         # The padded hash-grid domain keeps its projection boundary beyond the solid particle layers.
         domain_padding = 3.0 * boundary_thickness
-        # Each solid particle layer is paired with an analytic box collider of identical extent so the boundary
-        # combines the frozen-fluid density response with a strict project-out.
         solid_bounds = (
             (
                 (-2.0 - boundary_thickness, -boundary_thickness, -container_half_depth - boundary_thickness),
@@ -115,12 +113,11 @@ def build_scene(
             ),
         )
         boundary_colliders = [
-            gs.options.PBSTFBoxStaticColliderOptions(
-                lower=lower,
-                upper=upper,
+            gs.options.PBSTFInverseBoxStaticColliderOptions(
                 is_density_blocking=False,
+                lower=(-2.0, 0.0, -container_half_depth),
+                upper=(2.0, container_height, container_half_depth),
             )
-            for lower, upper in solid_bounds
         ]
         scene = gs.Scene(
             sim_options=gs.options.SimOptions(
