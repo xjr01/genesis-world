@@ -863,6 +863,9 @@ class DEMOptions(Options):
         Safety factor applied to the fixed DEM sub-substep `ddt = m_ddt * ddt_safety`. Values below 1.0
         deviate from the reference implementation but improve stability when many simultaneous contacts raise the
         effective stiffness beyond what the base step `m_ddt` was derived for. Defaults to 1.0.
+    surface_tension_coeff : float, optional
+        Scale of the capillary (liquid-bridge) cohesion between wetted grains (the `surface_tensor_cof`
+        constant of the reference's `ComputeDemCapillaryForces`). Defaults to 0.007 (the reference value).
     cylinder_radius : float, optional
         If set, an additional static hollow-cylinder collider (axis along z through the domain center) confines
         the grains, following the reference's rotate-scene boundary. Defaults to None (box domain only).
@@ -884,6 +887,8 @@ class DEMOptions(Options):
     particle_size: PositiveFloat = 1e-2
 
     ddt_safety: PositiveFloat = 1.0
+
+    surface_tension_coeff: PositiveFloat = 0.007  # capillary (liquid-bridge) cohesion scale
 
     cylinder_radius: PositiveFloat | None = None
 

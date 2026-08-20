@@ -68,6 +68,8 @@ class DEMSolver(Solver):
         # base DEM sub-substep, computed at build time from the entity materials
         self._m_ddt = None
         self._ddt_safety = options.ddt_safety
+        # capillary (liquid-bridge) cohesion scale (C++ surface_tensor_cof, default 0.007)
+        self._surface_tension_coeff = options.surface_tension_coeff
 
         # optional hollow-cylinder collider (axis along z through the domain center), C++ rotate scene
         self._cylinder_radius = options.cylinder_radius
@@ -636,7 +638,7 @@ class DEMSolver(Solver):
         r = particle_radius
         Vb = 4.0 / 3.0 * 3.141592653589793 * r * r * r * 1e-4
         d_rupture = (1.0 + 0.5 * contact_angle) * (Vb ** (1.0 / 3.0) + 0.1 * Vb ** (2.0 / 3.0))
-        surface_tensor_cof = 0.007
+        surface_tensor_cof = self._surface_tension_coeff
 
         f = qd.Vector.zero(gs.qd_float, 3)
         H = dist - 2.0 * r

@@ -80,21 +80,23 @@ MAX_STEPS = int(sys.argv[1]) if len(sys.argv) > 1 else None  # debug: cap the to
 
 DT = 1.0 / 60.0
 N_SETTLE_STEPS = 300  # 5 s: droplet falls and is absorbed
-N_DESCEND_STEPS = 36  # 0.60 s: tip descends 0.072 m until it touches the deeper bed's surface (0.201)
-N_INSERT_STEPS = 96  # 1.6 s
-N_ROTATE_STEPS = 105  # 1.75 s
-N_LIFT_STEPS = 150  # 2.5 s
-N_HOLD_STEPS = 60  # 1 s
-DESCEND_VEL = (0.0, 0.0, -0.12)  # straight down until the leading tip touches the sand surface
-# (tip (-0.085, 0.273) -> (-0.085, 0.201), surface of the 0.20 m bed)
-INSERT_VEL = (0.115, 0.0, -0.0964)  # 0.15 m/s along the 40 deg blade direction: the tip slides
-# into the sand to (0.099, 0.008), nearly grazing the floor, underneath the wet clump
-ROTATE_VEL = (0.0205, 0.0, 0.0563)  # trailing-edge-pivot emulation: v_center = -omega x r_pivot
-# (mid-rotation value), keeps the trailing (handle-side) edge near (-0.131, 0.201) fixed so the tip
+# user request (2026-08-20): same geometric path, but 0.75x speed (steps x4/3) and shifted 0.04 m
+# toward -x ("scoop further back"); the phase displacements are unchanged from the validated run
+N_DESCEND_STEPS = 48  # 0.80 s: tip descends 0.072 m until it touches the deeper bed's surface (0.201)
+N_INSERT_STEPS = 128  # 2.13 s
+N_ROTATE_STEPS = 140  # 2.33 s
+N_LIFT_STEPS = 200  # 3.33 s
+N_HOLD_STEPS = 80  # 1.33 s
+DESCEND_VEL = (0.0, 0.0, -0.09)  # straight down until the leading tip touches the sand surface
+# (tip (-0.125, 0.273) -> (-0.125, 0.201), surface of the 0.20 m bed)
+INSERT_VEL = (0.08625, 0.0, -0.0723)  # 0.1125 m/s along the 40 deg blade direction: the tip slides
+# into the sand to (0.059, 0.008), nearly grazing the floor, underneath the wet clump
+ROTATE_VEL = (0.015375, 0.0, 0.042225)  # trailing-edge-pivot emulation: v_center = -omega x r_pivot
+# (mid-rotation value), keeps the trailing (handle-side) edge near (-0.171, 0.201) fixed so the tip
 # sweeps up along a circular arc through the sand, scooping the wet clump onto the blade
-ROTATE_OMEGA = (0.0, -math.radians(40.0) / 1.75, 0.0)  # 40 deg -> flat about the blade center
-LIFT_VEL = (0.0, 0.0, 0.10)
-KEYFRAME_STEPS = [0, 299, 354, 450, 555, 705, 765]
+ROTATE_OMEGA = (0.0, -math.radians(40.0) / (140.0 / 60.0), 0.0)  # 40 deg -> flat about the blade center
+LIFT_VEL = (0.0, 0.0, 0.075)
+KEYFRAME_STEPS = [0, 299, 390, 546, 616, 760, 895]
 WET_EVERY = 3
 
 PARTICLE_RADIUS = 3.125e-3  # sand particle diameter 6.25 mm = 0.8 / 128, matching the FLIP grid dx
@@ -107,12 +109,13 @@ WALL_HEIGHT = 0.24  # taller than the 0.20 m sand bed
 # pan depth 0.30 m along x, pan width 0.234 m along y
 BLADE_HALF = (0.15, 0.117, 0.01)
 BLADE_ANGLE = math.radians(40.0)  # about +y: local +x edge descends toward +x (leading edge low)
-BLADE_POS0 = (-0.20, 0.0, 0.369)  # tip starts at (-0.085, 0.273) above the descent target point
+BLADE_POS0 = (-0.24, 0.0, 0.369)  # tip starts at (-0.125, 0.273) above the descent target point
 HANDLE_LEN = 0.3
 HANDLE_HALF_THICK = 0.015
 HANDLE_ANGLE = math.radians(40.0)
 
-DROPLET_POS = (0.02, 0.0, 0.245)  # contact release at the (deeper, 0.20 m) sand surface
+DROPLET_POS = (-0.02, 0.0, 0.245)  # contact release at the (deeper, 0.20 m) sand surface, shifted
+# -0.04 m with the scoop trajectory so the wet clump stays centered on the scoop path
 DROPLET_RADIUS = 0.04
 
 # 0.5 was tried and is marginally unstable at this fine particle size (NaN in the full run, 10x
@@ -179,6 +182,9 @@ def main():
         dem_options=gs.options.DEMOptions(
             particle_size=2.0 * PARTICLE_RADIUS,
             ddt_safety=0.5,
+            # user request (2026-08-20): stronger wet-sand cohesion (~3x the reference 0.007) so the
+            # wet clump sticks together instead of trickling through the litter scoop's slots
+            surface_tension_coeff=0.02,
             lower_bound=BOX_LOWER,
             upper_bound=BOX_UPPER,
         ),
@@ -283,6 +289,7 @@ def main():
                 "grid_res": 128,
                 "max_ratio": MAX_RATIO,
                 "viscosity_coeff": 0.01,
+                "surface_tension_coeff": 0.02,
                 "box_lower": BOX_LOWER,
                 "box_upper": BOX_UPPER,
                 "wall_thick": WALL_THICK,
