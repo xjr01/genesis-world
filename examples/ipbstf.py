@@ -55,7 +55,8 @@ def build_scene(
     scale=None,
     show_viewer=False,
     dt=None,
-    alpha=1e-6,
+    alpha=0.0,
+    is_artificial_damping_enabled=True,
     viscosity=0.0,
     max_solver_iterations=10,
     show_boundary=True,
@@ -126,6 +127,7 @@ def build_scene(
             ),
             ipbstf_options=gs.options.IPBSTFOptions(
                 alpha=alpha,
+                is_artificial_damping_enabled=is_artificial_damping_enabled,
                 particle_size=particle_size,
                 max_solver_iterations=max_solver_iterations,
                 static_colliders=boundary_colliders,
@@ -217,6 +219,7 @@ def build_scene(
         ),
         ipbstf_options=gs.options.IPBSTFOptions(
             alpha=alpha,
+            is_artificial_damping_enabled=is_artificial_damping_enabled,
             particle_size=particle_size,
             max_solver_iterations=max_solver_iterations,
             static_colliders=list(settings.static_colliders),
@@ -252,7 +255,14 @@ def main():
     parser.add_argument("--scale", type=int, default=None, help="Particle scale (radius = 1 / scale)")
     parser.add_argument("--dt", type=float, default=None, help="Override the case's default time step")
     parser.add_argument("--steps", type=int, default=None, help="Override the case's default simulation horizon")
-    parser.add_argument("--alpha", type=float, default=1e-6, help="Inertial energy weight")
+    parser.add_argument("--alpha", type=float, default=0.0, help="Inertial energy weight")
+    parser.add_argument(
+        "--damping",
+        dest="is_artificial_damping_enabled",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Remove excess kinetic energy so the fluid settles, at the cost of higher per-step compute",
+    )
     parser.add_argument(
         "--viscosity",
         type=float,
@@ -281,8 +291,8 @@ def main():
         parser.error("--dt must be positive")
     if args.steps is not None and args.steps < 0:
         parser.error("--steps must be non-negative")
-    if args.alpha <= 0.0:
-        parser.error("--alpha must be positive")
+    if args.alpha < 0.0:
+        parser.error("--alpha must be non-negative")
     if args.viscosity < 0.0:
         parser.error("--viscosity must be non-negative")
     if args.iterations <= 0:
@@ -295,6 +305,7 @@ def main():
         show_viewer=args.show_viewer or args.is_recording,
         dt=args.dt,
         alpha=args.alpha,
+        is_artificial_damping_enabled=args.is_artificial_damping_enabled,
         viscosity=args.viscosity,
         max_solver_iterations=args.iterations,
         show_boundary=args.show_boundary,

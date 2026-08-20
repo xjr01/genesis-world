@@ -453,6 +453,7 @@ def _kernel_solve_local_systems(
 def _kernel_apply_position_updates(
     n_particles: qd.i32,
     particle_radius: float,
+    alternative_positions: qd.Tensor,
     particles: qd.template(),
     particles_status: qd.template(),
     particles_info: qd.template(),
@@ -460,6 +461,7 @@ def _kernel_apply_position_updates(
     static_colliders_quat: qd.Tensor,
     boundary: qd.template(),
     static_colliders: _StaticColliderConfig,
+    is_alternative_position: qd.template(),
     errno: qd.Tensor,
 ):
     for particle_idx, env_idx in qd.ndrange(n_particles, particles.shape[1]):
@@ -474,8 +476,13 @@ def _kernel_apply_position_updates(
             for axis in qd.static(range(3)):
                 is_valid = is_valid and not qd.math.isnan(pos[axis]) and not qd.math.isinf(pos[axis])
             if is_valid:
-                particles[particle_idx, env_idx].pos = pos
+                if qd.static(is_alternative_position):
+                    alternative_positions[particle_idx, env_idx] = pos
+                else:
+                    particles[particle_idx, env_idx].pos = pos
             else:
+                if qd.static(is_alternative_position):
+                    alternative_positions[particle_idx, env_idx] = particles[particle_idx, env_idx].pos
                 errno[env_idx] = ErrorCode.INVALID_IPBSTF_STATE_NAN
 
 
@@ -483,14 +490,34 @@ def _kernel_apply_position_updates(
 def _kernel_update_velocities(
     n_particles: qd.i32,
     substep_dt: float,
+    alternative_positions: qd.Tensor,
     particles: qd.template(),
     particles_status: qd.template(),
     particles_info: qd.template(),
+    artificial_damping_distance_threshold: float,
+    is_artificial_damping_enabled: qd.template(),
     errno: qd.Tensor,
 ):
     for particle_idx, env_idx in qd.ndrange(n_particles, particles.shape[1]):
         if particles_status[particle_idx, env_idx].active and not particles_info[particle_idx, env_idx].is_fixed:
             velocity = (particles[particle_idx, env_idx].pos - particles[particle_idx, env_idx].pos_prev) / substep_dt
+            if qd.static(is_artificial_damping_enabled):
+                alternative_velocity = (
+                    alternative_positions[particle_idx, env_idx] - particles[particle_idx, env_idx].pos_prev
+                ) / substep_dt
+                position_difference = (
+                    particles[particle_idx, env_idx].pos - alternative_positions[particle_idx, env_idx]
+                ).norm()
+                velocity_norm_sqr = velocity.norm_sqr()
+                alternative_velocity_norm_sqr = alternative_velocity.norm_sqr()
+                if (
+                    position_difference < artificial_damping_distance_threshold
+                    and alternative_velocity_norm_sqr < velocity_norm_sqr
+                ):
+                    damping_weight = 1.0 - position_difference / artificial_damping_distance_threshold
+                    velocity *= qd.sqrt(
+                        1.0 - damping_weight * (velocity_norm_sqr - alternative_velocity_norm_sqr) / velocity_norm_sqr
+                    )
             is_valid = True
             for axis in qd.static(range(3)):
                 is_valid = is_valid and not qd.math.isnan(velocity[axis]) and not qd.math.isinf(velocity[axis])
@@ -764,10 +791,14 @@ def _kernel_get_mass(
 class IPBSTFSolver(Solver):
     """Implicit position-based surface-tension fluid (IPBSTF) solver using parallel local Newton updates."""
 
+    _ARTIFICIAL_DAMPING_ALPHA = 1.0 / 1000.0
+    _ARTIFICIAL_DAMPING_BETA = 60.0
+
     def __init__(self, scene, sim, options):
         super().__init__(scene, sim, options)
 
         self._alpha = options.alpha
+        self._is_artificial_damping_enabled = options.is_artificial_damping_enabled
         self._hessian_determinant_epsilon = options.hessian_determinant_epsilon
         self._particle_size = options.particle_size
         self._particle_radius = 0.5 * options.particle_size
@@ -790,6 +821,7 @@ class IPBSTFSolver(Solver):
         self._default_mass = 1.0
         self._material = None
         self._errno = None
+        self._alternative_positions = None
 
     @property
     def is_active(self):
@@ -881,6 +913,8 @@ class IPBSTFSolver(Solver):
         self.particles_status_reordered = particle_status.field(shape=shape, layout=qd.Layout.SOA)
         self.particles_info_reordered = particle_info.field(shape=shape, layout=qd.Layout.SOA)
         self.particles_render = particle_render.field(shape=shape, layout=qd.Layout.SOA)
+        if self._is_artificial_damping_enabled:
+            self._alternative_positions = qd.field(gs.qd_vec3, shape=shape)
         self._max_density = qd.field(gs.qd_float, shape=())
         self._errno = qd.field(gs.qd_int, shape=(self._B,))
 
@@ -954,6 +988,45 @@ class IPBSTFSolver(Solver):
             is_fixed_influence_enabled,
         )
 
+    def _solve_density_positions(self, alpha, alternative_positions, is_alternative_position):
+        """Perform one parallel local Newton position update at the given compliance."""
+        _kernel_assemble_density_local_systems(
+            self._n_particles,
+            self._substep_dt,
+            alpha,
+            self._particle_radius,
+            self._support_radius,
+            self.particles_reordered,
+            self.particles_status_reordered,
+            self.particles_info_reordered,
+            self._kernel_static_colliders_pos,
+            self._kernel_static_colliders_quat,
+            self.sh,
+            self._static_colliders,
+        )
+        _kernel_solve_local_systems(
+            self._n_particles,
+            self._hessian_determinant_epsilon,
+            self.particles_reordered,
+            self.particles_status_reordered,
+            self.particles_info_reordered,
+            self._errno,
+        )
+        _kernel_apply_position_updates(
+            self._n_particles,
+            self._particle_radius,
+            alternative_positions,
+            self.particles_reordered,
+            self.particles_status_reordered,
+            self.particles_info_reordered,
+            self._kernel_static_colliders_pos,
+            self._kernel_static_colliders_quat,
+            self.boundary,
+            self._static_colliders,
+            is_alternative_position,
+            self._errno,
+        )
+
     @gs.assert_built
     def set_static_colliders_pose(self, pos, quat, colliders_idx=None, envs_idx=None):
         """Set positions and w-x-y-z orientations of selected one-way static colliders."""
@@ -1012,50 +1085,32 @@ class IPBSTFSolver(Solver):
         )
         self._reorder_particles()
 
-        for _ in range(self._max_solver_iterations):
+        for iteration_idx in range(self._max_solver_iterations):
             self._compute_density_constraints()
-            _kernel_assemble_density_local_systems(
-                self._n_particles,
-                self._substep_dt,
+            if self._is_artificial_damping_enabled and iteration_idx == self._max_solver_iterations - 1:
+                self._solve_density_positions(
+                    self._ARTIFICIAL_DAMPING_ALPHA,
+                    self._alternative_positions,
+                    is_alternative_position=True,
+                )
+            self._solve_density_positions(
                 self._alpha,
-                self._particle_radius,
-                self._support_radius,
-                self.particles_reordered,
-                self.particles_status_reordered,
-                self.particles_info_reordered,
-                self._kernel_static_colliders_pos,
-                self._kernel_static_colliders_quat,
-                self.sh,
-                self._static_colliders,
-            )
-            _kernel_solve_local_systems(
-                self._n_particles,
-                self._hessian_determinant_epsilon,
-                self.particles_reordered,
-                self.particles_status_reordered,
-                self.particles_info_reordered,
-                self._errno,
-            )
-            _kernel_apply_position_updates(
-                self._n_particles,
-                self._particle_radius,
-                self.particles_reordered,
-                self.particles_status_reordered,
-                self.particles_info_reordered,
-                self._kernel_static_colliders_pos,
-                self._kernel_static_colliders_quat,
-                self.boundary,
-                self._static_colliders,
-                self._errno,
+                self.particles_reordered.pos,
+                is_alternative_position=False,
             )
 
         _kernel_update_velocities(
             self._n_particles,
             self._substep_dt,
-            self.particles_reordered,
-            self.particles_status_reordered,
-            self.particles_info_reordered,
-            self._errno,
+            alternative_positions=(
+                self._alternative_positions if self._is_artificial_damping_enabled else self.particles_reordered.pos
+            ),
+            particles=self.particles_reordered,
+            particles_status=self.particles_status_reordered,
+            particles_info=self.particles_info_reordered,
+            artificial_damping_distance_threshold=self._ARTIFICIAL_DAMPING_BETA * self._support_radius,
+            is_artificial_damping_enabled=self._is_artificial_damping_enabled,
+            errno=self._errno,
         )
         if self._material.viscosity > 0.0:
             _kernel_copy_from_reordered(

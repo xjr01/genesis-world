@@ -9,13 +9,17 @@ from tests.utils import assert_allclose, assert_equal
 @pytest.mark.required
 @pytest.mark.parametrize("backend", [gs.cuda])
 @pytest.mark.parametrize("n_envs", [0, 2])
-def test_unilateral_density_energy_and_viscosity(n_envs, show_viewer):
+@pytest.mark.parametrize("is_artificial_damping_enabled", [False, True])
+def test_unilateral_density_energy_viscosity_and_artificial_damping(n_envs, is_artificial_damping_enabled, show_viewer):
+    dt = 0.01
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
-            dt=0.01,
+            dt=dt,
             gravity=(0.0, 0.0, 0.0),
         ),
         ipbstf_options=gs.options.IPBSTFOptions(
+            alpha=0.0,
+            is_artificial_damping_enabled=is_artificial_damping_enabled,
             particle_size=0.1,
             static_colliders=[
                 gs.options.PBSTFBoxStaticColliderOptions(
@@ -98,10 +102,18 @@ def test_unilateral_density_energy_and_viscosity(n_envs, show_viewer):
     scene.step()
     pos_expanded = tensor_to_array(liquid.get_state().pos)
     moving_boundary_liquid_pos = tensor_to_array(moving_boundary_liquid.get_state().pos)
+    moving_boundary_liquid_vel = tensor_to_array(moving_boundary_liquid.get_state().vel)
+    moving_boundary_liquid_vel_undamped = (moving_boundary_liquid_pos - moving_boundary_liquid_pos_initial) / dt
 
     assert_allclose(pos_expanded.mean(axis=1), center[..., 0, :], atol=1e-5)
     assert (np.ptp(pos_expanded, axis=1) > 1.1 * np.ptp(pos_compressed, axis=1)).all()
     assert (moving_boundary_liquid_pos[..., 0] < moving_boundary_liquid_pos_initial[..., 0] - 0.01).all()
+    if is_artificial_damping_enabled:
+        assert (
+            np.sum(moving_boundary_liquid_vel**2, axis=-1) < np.sum(moving_boundary_liquid_vel_undamped**2, axis=-1)
+        ).all()
+    else:
+        assert_allclose(moving_boundary_liquid_vel, moving_boundary_liquid_vel_undamped, atol=1e-6)
 
 
 @pytest.mark.required

@@ -850,16 +850,18 @@ class IPBSTFOptions(Options):
 
     ``alpha`` weights inertia against the density energy. Larger values keep particles closer to their unconstrained
     predictions and produce a softer density response; smaller values enforce incompressibility more strongly at the
-    cost of larger Newton updates. ``hessian_determinant_epsilon`` skips local updates with smaller Hessian
-    determinants. Larger values reject more numerically weak solves but may suppress valid updates; smaller values
-    preserve more updates with less protection from roundoff amplification. ``max_solver_iterations`` controls
-    convergence work without changing that energy.
+    cost of larger Newton updates. ``is_artificial_damping_enabled`` removes excess kinetic energy from under-converged
+    stiff solves so the fluid can settle, at the cost of higher per-step compute and less persistent small-scale motion.
+    ``hessian_determinant_epsilon`` skips local updates with smaller Hessian determinants. Larger values reject more
+    numerically weak solves but may suppress valid updates; smaller values preserve more updates with less protection
+    from roundoff amplification. ``max_solver_iterations`` controls convergence work without changing that energy.
     """
 
     dt: PositiveFloat | None = None
     gravity: Vec3FType | None = None
 
-    alpha: PositiveFloat = 1e-6
+    alpha: NonNegativeFloat = 1e-6
+    is_artificial_damping_enabled: bool = True
     hessian_determinant_epsilon: PositiveFloat = 1e-7
     particle_size: PositiveFloat = 0.02
     max_solver_iterations: PositiveInt = 10
