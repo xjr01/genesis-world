@@ -171,7 +171,8 @@ def _accumulate_density_constraint(
     density = mass_i * _cubic_kernel(0.0, support_radius)
     gradient = qd.Vector.zero(gs.qd_float, 3)
     hessian = qd.Matrix.zero(gs.qd_float, 3, 3)
-    grid = spatial_hasher.pos_to_grid(pos_i)
+    pos_reference_i = particles[particle_idx, env_idx].pos_reference
+    grid = spatial_hasher.pos_to_grid(pos_reference_i)
     for offset in qd.grouped(qd.ndrange((-1, 2), (-1, 2), (-1, 2))):
         slot_idx = spatial_hasher.grid_to_slot(grid + offset)
         slot_start = spatial_hasher.slot_start[slot_idx, env_idx]
@@ -185,14 +186,18 @@ def _accumulate_density_constraint(
                 pos_j = particles[neighbor_idx, env_idx].pos
                 delta = pos_i - pos_j
                 distance = delta.norm()
-                if distance < support_radius and not _is_separated_by_static_colliders(
-                    env_idx,
-                    pos_i,
-                    pos_j,
-                    particle_radius,
-                    static_colliders_pos,
-                    static_colliders_quat,
-                    static_colliders,
+                pos_reference_j = particles[neighbor_idx, env_idx].pos_reference
+                if (
+                    (pos_reference_i - pos_reference_j).norm() < support_radius
+                    and not _is_separated_by_static_colliders(
+                        env_idx,
+                        pos_i,
+                        pos_j,
+                        particle_radius,
+                        static_colliders_pos,
+                        static_colliders_quat,
+                        static_colliders,
+                    )
                 ):
                     mass_j = particles_info[neighbor_idx, env_idx].mass
                     density += mass_j * _cubic_kernel(distance, support_radius)
@@ -225,7 +230,8 @@ def _accumulate_neighbor_density_energy(
 ):
     pos_i = particles[particle_idx, env_idx].pos
     mass_i = particles_info[particle_idx, env_idx].mass
-    grid = spatial_hasher.pos_to_grid(pos_i)
+    pos_reference_i = particles[particle_idx, env_idx].pos_reference
+    grid = spatial_hasher.pos_to_grid(pos_reference_i)
     for offset in qd.grouped(qd.ndrange((-1, 2), (-1, 2), (-1, 2))):
         slot_idx = spatial_hasher.grid_to_slot(grid + offset)
         slot_start = spatial_hasher.slot_start[slot_idx, env_idx]
@@ -235,9 +241,9 @@ def _accumulate_neighbor_density_energy(
                 constraint = particles[neighbor_idx, env_idx].density_constraint
                 pos_j = particles[neighbor_idx, env_idx].pos
                 delta = pos_i - pos_j
-                distance = delta.norm()
+                pos_reference_j = particles[neighbor_idx, env_idx].pos_reference
                 if (
-                    distance < support_radius
+                    (pos_reference_i - pos_reference_j).norm() < support_radius
                     and not _is_separated_by_static_colliders(
                         env_idx,
                         pos_i,
@@ -279,6 +285,8 @@ def _kernel_reorder_particles(
         if particles_status[particle_idx, env_idx].active:
             reordered_idx = particles_status[particle_idx, env_idx].reordered_idx
             particles_reordered[reordered_idx, env_idx] = particles[particle_idx, env_idx]
+            # The reference position matches the position used to build the hash grid for the full local solve.
+            particles_reordered[reordered_idx, env_idx].pos_reference = particles[particle_idx, env_idx].pos
             particles_info_reordered[reordered_idx, env_idx] = particles_info[particle_idx]
             particles_status_reordered[reordered_idx, env_idx].active = True
 
@@ -358,7 +366,7 @@ def _kernel_predict_positions(
     particles_info: qd.template(),
 ):
     for particle_idx, env_idx in qd.ndrange(n_particles, particles.shape[1]):
-        if particles_status[particle_idx, env_idx].active and not particles_info[particle_idx, env_idx].is_fixed:
+        if particles_status[particle_idx, env_idx].active and not particles_info[particle_idx].is_fixed:
             pos = particles[particle_idx, env_idx].pos
             pos_predicted = pos + substep_dt * particles[particle_idx, env_idx].vel
             pos_predicted += substep_dt * substep_dt * gravity[env_idx]
@@ -530,6 +538,7 @@ def _kernel_add_particles(
             particles[particle_idx, env_idx].pos[axis] = pos[particle_idx_local, axis]
         particles[particle_idx, env_idx].pos_prev = particles[particle_idx, env_idx].pos
         particles[particle_idx, env_idx].pos_predicted = particles[particle_idx, env_idx].pos
+        particles[particle_idx, env_idx].pos_reference = particles[particle_idx, env_idx].pos
         particles[particle_idx, env_idx].vel = qd.Vector.zero(gs.qd_float, 3)
 
     for particle_idx_local in range(n_particles):
@@ -789,6 +798,7 @@ class IPBSTFSolver(Solver):
             pos=gs.qd_vec3,
             pos_prev=gs.qd_vec3,
             pos_predicted=gs.qd_vec3,
+            pos_reference=gs.qd_vec3,
             delta_pos=gs.qd_vec3,
             vel=gs.qd_vec3,
             density=gs.qd_float,
@@ -931,19 +941,17 @@ class IPBSTFSolver(Solver):
         if not self.is_active:
             return
 
-        self._reorder_particles()
         _kernel_predict_positions(
             self._n_particles,
             self._substep_dt,
             self._gravity,
-            self.particles_reordered,
-            self.particles_status_reordered,
-            self.particles_info_reordered,
+            self.particles,
+            self.particles_status,
+            self.particles_info,
         )
-        _kernel_copy_from_reordered(self._n_particles, self.particles, self.particles_status, self.particles_reordered)
+        self._reorder_particles()
 
         for _ in range(self._max_solver_iterations):
-            self._reorder_particles()
             self._compute_density_constraints()
             _kernel_assemble_density_local_systems(
                 self._n_particles,
@@ -979,11 +987,7 @@ class IPBSTFSolver(Solver):
                 self._static_colliders,
                 self._errno,
             )
-            _kernel_copy_from_reordered(
-                self._n_particles, self.particles, self.particles_status, self.particles_reordered
-            )
 
-        self._reorder_particles()
         _kernel_update_velocities(
             self._n_particles,
             self._substep_dt,

@@ -37,11 +37,12 @@ else:
     )
 
 CASE_DAM_BREAK = "dam_break"
-CASES = (*PBSTF_CASES, CASE_DAM_BREAK)
+CASE_DOUBLE_DAM_BREAK = "double_dam_break"
+CASES = (*PBSTF_CASES, CASE_DAM_BREAK, CASE_DOUBLE_DAM_BREAK)
 
 
 def _liquid_material(case):
-    sampler = "regular" if case in (CASE_TAP, CASE_TEAPOT) else "staggered"
+    sampler = "regular" if case in (CASE_TAP, CASE_TEAPOT, CASE_DAM_BREAK, CASE_DOUBLE_DAM_BREAK) else "staggered"
     return gs.materials.IPBSTF.Liquid(sampler=sampler)
 
 
@@ -55,46 +56,57 @@ def build_scene(
     show_boundary=True,
 ):
     """Build an implicit position-based fluid example scene."""
-    if case == CASE_DAM_BREAK:
+    if case in (CASE_DAM_BREAK, CASE_DOUBLE_DAM_BREAK):
+        is_double_dam_break = case == CASE_DOUBLE_DAM_BREAK
         if scale is None:
-            scale = 20
+            scale = 48 if is_double_dam_break else 20
         if scale <= 0:
             raise ValueError("IPBSTF particle scale must be positive")
         if dt is None:
-            dt = 0.005
+            dt = 1.0 / 240.0 if is_double_dam_break else 0.005
         if dt <= 0.0:
             raise ValueError("IPBSTF time step must be positive")
 
         particle_size = 2.0 / scale
-        boundary_thickness = 2.0 * particle_size
+        particle_radius = 0.5 * particle_size
+        boundary_thickness = 4.0 * particle_size
+        container_height = 5.8 if is_double_dam_break else 4.0
+        container_half_depth = 0.3 if is_double_dam_break else 2.0
+        liquid_half_depth = (container_half_depth - particle_radius) * 0.9 if is_double_dam_break else 1.5
+        camera_pos = (0.0, 2.9, 9.0) if is_double_dam_break else (3.2, 2.2, 4.0)
+        camera_lookat = (0.0, 2.9, 0.0) if is_double_dam_break else (0.4, 0.6, 0.0)
         # The padded hash-grid domain keeps its projection boundary beyond the solid particle layers.
         domain_padding = 3.0 * boundary_thickness
         # Each solid particle layer is paired with an analytic box collider of identical extent so the boundary
         # combines the frozen-fluid density response with a strict project-out.
         solid_bounds = (
             (
-                (-2.0 - boundary_thickness, -boundary_thickness, -2.0 - boundary_thickness),
-                (2.0 + boundary_thickness, 0.0, 2.0 + boundary_thickness),
+                (-2.0 - boundary_thickness, -boundary_thickness, -container_half_depth - boundary_thickness),
+                (2.0 + boundary_thickness, 0.0, container_half_depth + boundary_thickness),
             ),
             (
-                (-2.0 - boundary_thickness, 0.0, -2.0 - boundary_thickness),
-                (-2.0, 4.0, 2.0 + boundary_thickness),
+                (-2.0 - boundary_thickness, 0.0, -container_half_depth - boundary_thickness),
+                (-2.0, container_height, container_half_depth + boundary_thickness),
             ),
             (
-                (2.0, 0.0, -2.0 - boundary_thickness),
-                (2.0 + boundary_thickness, 4.0, 2.0 + boundary_thickness),
+                (2.0, 0.0, -container_half_depth - boundary_thickness),
+                (2.0 + boundary_thickness, container_height, container_half_depth + boundary_thickness),
             ),
             (
-                (-2.0, 0.0, -2.0 - boundary_thickness),
-                (2.0, 4.0, -2.0),
+                (-2.0, 0.0, -container_half_depth - boundary_thickness),
+                (2.0, container_height, -container_half_depth),
             ),
             (
-                (-2.0, 0.0, 2.0),
-                (2.0, 4.0, 2.0 + boundary_thickness),
+                (-2.0, 0.0, container_half_depth),
+                (2.0, container_height, container_half_depth + boundary_thickness),
             ),
             (
-                (-2.0 - boundary_thickness, 4.0, -2.0 - boundary_thickness),
-                (2.0 + boundary_thickness, 4.0 + boundary_thickness, 2.0 + boundary_thickness),
+                (-2.0 - boundary_thickness, container_height, -container_half_depth - boundary_thickness),
+                (
+                    2.0 + boundary_thickness,
+                    container_height + boundary_thickness,
+                    container_half_depth + boundary_thickness,
+                ),
             ),
         )
         boundary_colliders = [
@@ -118,32 +130,44 @@ def build_scene(
                 lower_bound=(
                     -2.0 - domain_padding,
                     -domain_padding,
-                    -2.0 - domain_padding,
+                    -container_half_depth - domain_padding,
                 ),
                 upper_bound=(
                     2.0 + domain_padding,
-                    4.0 + domain_padding,
-                    2.0 + domain_padding,
+                    container_height + domain_padding,
+                    container_half_depth + domain_padding,
                 ),
             ),
             viewer_options=gs.options.ViewerOptions(
                 refresh_rate=round(1.0 / dt),
-                camera_pos=(3.2, 2.2, 4.0),
-                camera_lookat=(0.4, 0.6, 0.0),
+                camera_pos=camera_pos,
+                camera_lookat=camera_lookat,
                 camera_up=(0.0, 1.0, 0.0),
                 camera_fov=40,
             ),
             show_viewer=show_viewer,
         )
-        liquid = scene.add_entity(
-            morph=gs.morphs.Box(
-                lower=(-1.5, 0.1, -1.5),
-                upper=(0.0, 2.0, 1.5),
-            ),
-            material=_liquid_material(CASE_DAM_BREAK),
-        )
+        if is_double_dam_break:
+            liquid_bounds = (
+                ((-2.0 + particle_radius, particle_radius, -liquid_half_depth), (-1.0, 5.3, liquid_half_depth)),
+                ((1.0, particle_radius, -liquid_half_depth), (2.0 - particle_radius, 5.3, liquid_half_depth)),
+            )
+        else:
+            liquid_bounds = (
+                ((-1.5, 0.1, -liquid_half_depth), (0.0, 2.0, liquid_half_depth)),
+            )
+        entities = [
+            scene.add_entity(
+                morph=gs.morphs.Box(
+                    lower=lower,
+                    upper=upper,
+                ),
+                material=_liquid_material(case),
+            )
+            for lower, upper in liquid_bounds
+        ]
         solid_material = gs.materials.IPBSTF.Solid(
-            sampler="staggered",
+            sampler="regular",
         )
         solid_surface = gs.surfaces.Default(
             color=(0.7, 0.75, 0.8, 0.35 if show_boundary else 0.0),
@@ -159,7 +183,7 @@ def build_scene(
                 surface=solid_surface,
             )
         scene.build()
-        return scene, (liquid,)
+        return scene, tuple(entities)
 
     settings = case_settings(case)
     if scale is None:
@@ -263,9 +287,9 @@ def main():
         max_solver_iterations=args.iterations,
         show_boundary=args.show_boundary,
     )
-    if args.case == CASE_DAM_BREAK:
+    if args.case in (CASE_DAM_BREAK, CASE_DOUBLE_DAM_BREAK):
         settings = None
-        steps = 240 if args.steps is None else args.steps
+        steps = (360 if args.case == CASE_DOUBLE_DAM_BREAK else 240) if args.steps is None else args.steps
     else:
         settings = case_settings(args.case)
         steps = settings.steps if args.steps is None else args.steps

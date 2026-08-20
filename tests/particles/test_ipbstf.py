@@ -49,6 +49,28 @@ def test_unilateral_density_energy(n_envs, show_viewer):
             sampler="staggered",
         ),
     )
+    moving_boundary_liquid = scene.add_entity(
+        morph=gs.morphs.Particles(
+            positions=((-1.5, 0.0, 0.0),),
+        ),
+        material=gs.materials.IPBSTF.Liquid(
+            sampler="staggered",
+        ),
+    )
+    moving_boundary_positions = tuple(
+        (-1.5 + x_offset, 1.0 + y_offset, z_offset)
+        for x_offset in (0.05, 0.1)
+        for y_offset in (-0.05, 0.0, 0.05)
+        for z_offset in (-0.05, 0.0, 0.05)
+    )
+    moving_boundary = scene.add_entity(
+        morph=gs.morphs.Particles(
+            positions=moving_boundary_positions,
+        ),
+        material=gs.materials.IPBSTF.Solid(
+            sampler="staggered",
+        ),
+    )
     scene.build(n_envs=n_envs)
 
     pos_initial = tensor_to_array(liquid.get_state().pos)
@@ -59,15 +81,19 @@ def test_unilateral_density_energy(n_envs, show_viewer):
     collider_pos_expected[..., 0] = 1.0
     collider_pos_expected[..., 1] = -0.05
     assert_allclose(collider_pos, collider_pos_expected, atol=1e-6)
+    moving_boundary_liquid_pos_initial = tensor_to_array(moving_boundary_liquid.get_state().pos)
 
     center = pos_initial.mean(axis=1, keepdims=True)
     pos_compressed = center + 0.65 * (pos_initial - center)
     liquid.set_particles_pos(pos_compressed)
+    moving_boundary.set_particles_pos(tuple((x, y - 1.0, z) for x, y, z in moving_boundary_positions))
     scene.step()
     pos_expanded = tensor_to_array(liquid.get_state().pos)
+    moving_boundary_liquid_pos = tensor_to_array(moving_boundary_liquid.get_state().pos)
 
     assert_allclose(pos_expanded.mean(axis=1), center[..., 0, :], atol=1e-5)
     assert (np.ptp(pos_expanded, axis=1) > 1.1 * np.ptp(pos_compressed, axis=1)).all()
+    assert (moving_boundary_liquid_pos[..., 0] < moving_boundary_liquid_pos_initial[..., 0] - 0.01).all()
 
 
 @pytest.mark.required
