@@ -44,7 +44,7 @@ REC_DIR = os.path.join(EXPERIMENTS_DIR, "recordings", "phase5_shovel_wet_sdf")
 VIDEO_PATH = os.path.join(EXPERIMENTS_DIR, "videos", "phase5_shovel_wet_sdf.mp4")
 
 DT = 1.0 / 60.0
-KEYFRAME_STEPS = [0, 299, 390, 546, 616, 760, 895]
+KEYFRAME_STEPS = [0, 299, 410, 522, 592, 740, 872]
 
 PARTICLE_RADIUS = 3.125e-3
 BOX_LOWER = (-0.35, -0.30, 0.0)

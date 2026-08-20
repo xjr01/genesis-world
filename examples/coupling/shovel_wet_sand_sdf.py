@@ -82,21 +82,24 @@ DT = 1.0 / 60.0
 N_SETTLE_STEPS = 300  # 5 s: droplet falls and is absorbed
 # user request (2026-08-20): same geometric path, but 0.75x speed (steps x4/3) and shifted 0.04 m
 # toward -x ("scoop further back"); the phase displacements are unchanged from the validated run
-N_DESCEND_STEPS = 48  # 0.80 s: tip descends 0.072 m until it touches the deeper bed's surface (0.201)
-N_INSERT_STEPS = 128  # 2.13 s
+# user request (2026-08-21): descend 0.02 m further so the tip is already 2 cm INTO the bed when
+# the oblique insert starts, and insert at 50 deg (more vertical than the 40 deg blade). The
+# steeper insert spends the whole depth budget (0.181 -> 0.047), so its horizontal reach shortens
+# to 0.112 m: the tip ends at (-0.013, 0.047), right under the wet clump's center.
+N_DESCEND_STEPS = 60  # 1.00 s: tip descends 0.092 m until it is 2 cm into the bed
+N_INSERT_STEPS = 93  # 1.55 s
 N_ROTATE_STEPS = 140  # 2.33 s
 N_LIFT_STEPS = 200  # 3.33 s
 N_HOLD_STEPS = 80  # 1.33 s
-DESCEND_VEL = (0.0, 0.0, -0.09)  # straight down until the leading tip touches the sand surface
-# (tip (-0.125, 0.273) -> (-0.125, 0.201), surface of the 0.20 m bed)
-INSERT_VEL = (0.08625, 0.0, -0.0723)  # 0.1125 m/s along the 40 deg blade direction: the tip slides
-# into the sand to (0.059, 0.008), nearly grazing the floor, underneath the wet clump
+DESCEND_VEL = (0.0, 0.0, -0.092)  # straight down: tip (-0.125, 0.273) -> (-0.125, 0.181)
+INSERT_VEL = (0.0723, 0.0, -0.0862)  # 0.1125 m/s at 50 deg below horizontal (steeper than the
+# 40 deg blade): the tip slides to (-0.013, 0.047), nearly grazing the floor, under the wet clump
 ROTATE_VEL = (0.015375, 0.0, 0.042225)  # trailing-edge-pivot emulation: v_center = -omega x r_pivot
-# (mid-rotation value), keeps the trailing (handle-side) edge near (-0.171, 0.201) fixed so the tip
+# (mid-rotation value), keeps the trailing (handle-side) edge near (-0.243, 0.239) fixed so the tip
 # sweeps up along a circular arc through the sand, scooping the wet clump onto the blade
 ROTATE_OMEGA = (0.0, -math.radians(40.0) / (140.0 / 60.0), 0.0)  # 40 deg -> flat about the blade center
 LIFT_VEL = (0.0, 0.0, 0.075)
-KEYFRAME_STEPS = [0, 299, 390, 546, 616, 760, 895]
+KEYFRAME_STEPS = [0, 299, 410, 522, 592, 740, 872]
 WET_EVERY = 3
 
 PARTICLE_RADIUS = 3.125e-3  # sand particle diameter 6.25 mm = 0.8 / 128, matching the FLIP grid dx
