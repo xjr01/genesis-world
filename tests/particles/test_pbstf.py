@@ -14,18 +14,22 @@ from examples.teapot.pbstf_surface_tension import (
     CASE_CONE,
     CASE_MERGE,
     CASE_MOP,
+    CASE_SWEEP,
     CASE_TAP,
     CASE_TEAPOT,
     CASES,
     build_scene,
     case_settings,
     draw_case_colliders,
+    get_wipe_settings,
     teapot_pose,
-    update_mop_case,
     update_teapot_manipulator,
+    update_wipe_case,
+    wipe_pose,
 )
 import genesis as gs
 from genesis.engine.boundaries import (
+    AbsorbentBoxStaticCollider,
     BoxStaticCollider,
     ConeStaticCollider,
     StaticCollider,
@@ -171,6 +175,15 @@ def test_analytic_static_collider_geometry():
     assert_equal(inside, (True, False, False, False, False, False))
     assert_equal(separated, (True, False))
 
+    absorbent_box = AbsorbentBoxStaticCollider(
+        lower=(-1.0, -2.0, -3.0),
+        upper=(1.0, 2.0, 3.0),
+        absorption_rate=8.0,
+        absorption_capacity_fraction=0.25,
+    )
+    assert isinstance(absorbent_box, BoxStaticCollider)
+    assert absorbent_box.type == "absorbent_box"
+
     with pytest.raises(gs.GenesisException, match="greater than"):
         gs.options.PBSTFBoxStaticColliderOptions(
             lower=(-1.0, -1.0, -1.0),
@@ -184,11 +197,12 @@ def test_analytic_static_collider_geometry():
 @pytest.mark.required
 @pytest.mark.parametrize("backend", [gs.cuda])
 @pytest.mark.parametrize("n_envs", [0, 2])
-def test_mesh_static_collider_pose(asset_tmp_path, n_envs, show_viewer):
+def test_static_collider_pose_and_absorption(asset_tmp_path, n_envs, show_viewer):
     mesh_path = asset_tmp_path / f"pbstf_static_collider_box_{n_envs}.obj"
     trimesh.creation.box().export(mesh_path)
     target_pos = (1.0, 2.0, 3.0)
-    target_quat = (math.sqrt(0.5), math.sqrt(0.5), 0.0, 0.0)
+    mesh_target_quat = (math.sqrt(0.5), math.sqrt(0.5), 0.0, 0.0)
+    absorbent_pos = (2.0, 0.0, 0.0)
     collider_options = [
         gs.options.PBSTFMeshStaticColliderOptions(
             file=str(mesh_path),
@@ -197,6 +211,18 @@ def test_mesh_static_collider_pose(asset_tmp_path, n_envs, show_viewer):
         gs.options.PBSTFMeshStaticColliderOptions(
             file=str(mesh_path),
             sdf_res=16,
+        ),
+        gs.options.PBSTFBoxStaticColliderOptions(
+            pos=(-2.0, 0.0, 0.0),
+            lower=(-0.3, -0.3, -0.3),
+            upper=(0.3, 0.3, 0.3),
+        ),
+        gs.options.PBSTFAbsorbentBoxStaticColliderOptions(
+            pos=absorbent_pos,
+            lower=(-0.3, -0.3, -0.3),
+            upper=(0.3, 0.3, 0.3),
+            absorption_rate=100.0,
+            absorption_capacity_fraction=0.4,
         ),
     ]
     scene = gs.Scene(
@@ -214,13 +240,19 @@ def test_mesh_static_collider_pose(asset_tmp_path, n_envs, show_viewer):
         ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(6.0, 6.0, 6.0),
-            camera_lookat=(1.0, 2.0, 3.0),
+            camera_lookat=(0.0, 0.5, 1.0),
         ),
         show_viewer=show_viewer,
     )
     liquid = scene.add_entity(
         morph=gs.morphs.Particles(
-            positions=(target_pos,),
+            positions=(
+                target_pos,
+                (-2.0, 0.0, 0.0),
+                (2.0, -2.0, -2.0),
+                (2.0, 2.0, -2.0),
+                (2.0, -2.0, 2.0),
+            ),
         ),
         material=gs.materials.PBSTF.Liquid(
             sampler="regular",
@@ -230,31 +262,138 @@ def test_mesh_static_collider_pose(asset_tmp_path, n_envs, show_viewer):
 
     scene.pbstf_solver.set_static_colliders_pose(
         pos=target_pos,
-        quat=target_quat,
+        quat=mesh_target_quat,
         colliders_idx=1,
         envs_idx=n_envs - 1 if n_envs else None,
     )
+    liquid.set_particles_pos((1.65, -0.15, -0.15), particles_idx_local=(2, 3, 4))
 
-    colliders_pos = qd_to_numpy(scene.pbstf_solver._static_colliders_pos, transpose=True)
-    colliders_quat = qd_to_numpy(scene.pbstf_solver._static_colliders_quat, transpose=True)
-    expected_pos = np.zeros((max(n_envs, 1), 2, 3), dtype=gs.np_float)
-    expected_quat = np.zeros((max(n_envs, 1), 2, 4), dtype=gs.np_float)
+    solver = scene.pbstf_solver
+    solver_state = solver.get_state(0)
+    colliders_pos = tensor_to_array(solver_state.static_colliders_pos)
+    colliders_quat = tensor_to_array(solver_state.static_colliders_quat)
+    expected_pos = np.zeros((max(n_envs, 1), 4, 3), dtype=gs.np_float)
+    expected_quat = np.zeros((max(n_envs, 1), 4, 4), dtype=gs.np_float)
     expected_quat[..., 0] = 1.0
     expected_pos[-1, 1] = target_pos
-    expected_quat[-1, 1] = target_quat
+    expected_quat[-1, 1] = mesh_target_quat
+    expected_pos[:, 2] = (-2.0, 0.0, 0.0)
+    expected_pos[:, 3] = absorbent_pos
+    initial_wetness = tensor_to_array(solver.get_static_collider_wetness(3))
+    if n_envs == 0:
+        initial_wetness = initial_wetness[None]
 
-    assert liquid.n_particles == 1
+    assert liquid.n_particles == 5
     assert_allclose(colliders_pos, expected_pos, atol=1e-6)
     assert_allclose(colliders_quat, expected_quat, atol=1e-6)
+    assert_equal(initial_wetness, np.zeros((max(n_envs, 1), 2, 2, 2)))
+    with pytest.raises(gs.GenesisException, match="not absorbent"):
+        solver.get_static_collider_wetness(2)
 
     scene.step()
     particles_pos = tensor_to_array(liquid.get_particles_pos())
-    if n_envs:
-        assert_equal(particles_pos[:-1, 0], (target_pos,))
-        projected_pos = particles_pos[-1, 0]
+    if n_envs == 0:
+        particles_pos = particles_pos[None]
     else:
-        projected_pos = particles_pos[0]
-    assert np.linalg.norm(projected_pos - target_pos) > 0.4
+        assert_equal(particles_pos[:-1, 0], (target_pos,))
+    assert np.linalg.norm(particles_pos[-1, 0] - target_pos) > 0.4
+    assert np.linalg.norm(particles_pos[:, 1] - (-2.0, 0.0, 0.0), axis=-1).min() > 0.3
+
+    solver_state = solver.get_state(0)
+    progress = tensor_to_array(solver_state.absorption_progress)
+    local_pos = tensor_to_array(solver_state.absorption_local_pos)
+    target_local_pos = tensor_to_array(solver_state.absorption_target_local_pos)
+    is_captured = progress > 0.0
+    beta = 1.0 - math.exp(-collider_options[3].absorption_rate * 1e-3)
+    wetness = tensor_to_array(solver.get_static_collider_wetness(3))
+    if n_envs == 0:
+        wetness = wetness[None]
+    expected_wetness = np.zeros((max(n_envs, 1), 2, 2, 2))
+    expected_wetness[:, 0, 0, 0] = beta
+    expected_wetness[:, 1, 0, 0] = beta
+    expected_local_start = np.array((-0.35, -0.15, -0.15))
+
+    assert_equal(is_captured.sum(axis=-1), 2)
+    assert_allclose(progress[is_captured], beta, atol=1e-6)
+    assert_allclose(
+        local_pos[is_captured],
+        expected_local_start + beta * (target_local_pos[is_captured] - expected_local_start),
+        atol=1e-6,
+    )
+    assert_allclose(wetness, expected_wetness, atol=1e-6)
+    assert ((0.0 <= wetness) & (wetness <= 1.0)).all()
+    assert liquid.get_particles_active().all()
+    assert_allclose(particles_pos[..., 2:5, 0].min(axis=-1), 1.65, atol=1e-6)
+
+    moved_pos = (2.5, 0.3, 0.2)
+    moved_quat = (math.sqrt(0.5), 0.0, 0.0, math.sqrt(0.5))
+    solver.set_static_colliders_pose(
+        pos=moved_pos,
+        quat=moved_quat,
+        colliders_idx=3,
+    )
+    scene.step()
+    particles_moved = tensor_to_array(liquid.get_particles_pos())
+    if n_envs == 0:
+        particles_moved = particles_moved[None]
+    progress_expected = progress + beta * (1.0 - progress)
+    local_pos_expected = local_pos + beta * (target_local_pos - local_pos)
+    for env_idx in range(max(n_envs, 1)):
+        expected_world = geom_utils.transform_by_quat(
+            local_pos_expected[env_idx, is_captured[env_idx]], np.array(moved_quat)
+        )
+        expected_world += moved_pos
+        assert_allclose(particles_moved[env_idx, is_captured[env_idx]], expected_world, atol=1e-5)
+    solver_state = solver.get_state(0)
+    assert_allclose(
+        tensor_to_array(solver_state.absorption_progress)[is_captured], progress_expected[is_captured], atol=1e-6
+    )
+
+    saved_state = scene.get_state()
+    positions_saved = particles_moved.copy()
+    wetness_saved = tensor_to_array(solver.get_static_collider_wetness(3))
+    solver.set_static_colliders_pose(
+        pos=(-2.5, -0.3, -0.2),
+        quat=(1.0, 0.0, 0.0, 0.0),
+        colliders_idx=3,
+    )
+    scene.step()
+    scene.reset(saved_state)
+    positions_restored = tensor_to_array(liquid.get_particles_pos())
+    if n_envs == 0:
+        positions_restored = positions_restored[None]
+    restored_state = solver.get_state(0)
+    assert_allclose(positions_restored, positions_saved, atol=1e-6)
+    assert_allclose(solver.get_static_collider_wetness(3), wetness_saved, atol=1e-6)
+    assert_allclose(tensor_to_array(restored_state.static_colliders_pos)[:, 3], moved_pos, atol=1e-6)
+    assert_allclose(tensor_to_array(restored_state.static_colliders_quat)[:, 3], moved_quat, atol=1e-6)
+
+    wetness_sum = tensor_to_array(solver.get_static_collider_wetness(3))
+    if n_envs == 0:
+        wetness_sum = wetness_sum[None]
+    wetness_sum = wetness_sum.sum(axis=(1, 2, 3))
+    if n_envs:
+        particles_idx_local = np.argmax(is_captured, axis=-1)[:, None]
+    else:
+        particles_idx_local = np.argmax(is_captured[0])
+    for setter, value in (
+        (liquid.set_particles_pos, (0.0, 0.0, 0.0)),
+        (liquid.set_particles_vel, (0.0, 0.0, 0.0)),
+        (liquid.set_particles_active, False),
+    ):
+        scene.reset(saved_state)
+        setter(value, particles_idx_local=particles_idx_local)
+        wetness_sum_unbound = tensor_to_array(solver.get_static_collider_wetness(3))
+        if n_envs == 0:
+            wetness_sum_unbound = wetness_sum_unbound[None]
+        wetness_sum_unbound = wetness_sum_unbound.sum(axis=(1, 2, 3))
+        assert (wetness_sum_unbound < wetness_sum).all()
+
+    saved_solver_state = saved_state.solvers_state[scene.solvers.index(solver)]
+    saved_solver_state.absorption_progress[:] = math.nan
+    scene.reset(saved_state)
+    with pytest.raises(gs.GenesisException, match="non-finite fluid or absorption"):
+        solver.check_errno()
 
 
 @pytest.mark.required
@@ -355,8 +494,8 @@ def test_teapot_initial_particles_pose_and_case_time_steps():
     assert particles[:, 2].max() > 5.0
     for case in CASES:
         settings = case_settings(case)
-        expected_scale = 20 if case in (CASE_MOP, CASE_TAP, CASE_TEAPOT) else 10
-        expected_dt = 0.01 if case in (CASE_MOP, CASE_TEAPOT) else 1.0 / 30.0
+        expected_scale = 20 if case in (CASE_MOP, CASE_SWEEP, CASE_TAP, CASE_TEAPOT) else 10
+        expected_dt = 0.01 if case in (CASE_MOP, CASE_SWEEP, CASE_TEAPOT) else 1.0 / 30.0
         assert_equal(settings.scale, expected_scale)
         assert_equal(settings.dt, expected_dt)
     for time, angle_degrees in ((0.0, 0.0), (18.0, 27.0), (28.0, 27.0), (29.6, 19.0), (35.0, 19.0)):
@@ -384,7 +523,7 @@ def test_teapot_initial_particles_pose_and_case_time_steps():
 
 @pytest.mark.required
 @pytest.mark.parametrize("backend", [gs.cpu])
-def test_tap_case_settings():
+def test_case_settings():
     settings = case_settings(CASE_TAP)
     assert CASE_TAP in CASES
     assert settings.scale == 20
@@ -404,6 +543,30 @@ def test_tap_case_settings():
     assert_equal(settings.emitter.droplet_size, 2.0)
     assert_equal(settings.emitter.generation_speed, 3.0)
     assert_equal(settings.emitter.initial_speed, 0.0)
+
+    mop_settings = case_settings(CASE_MOP)
+    sweep_settings = case_settings(CASE_SWEEP)
+    mop = get_wipe_settings(mop_settings)
+    sweep = get_wipe_settings(sweep_settings)
+    assert CASE_MOP != CASE_SWEEP
+    assert CASE_MOP in CASES
+    assert CASE_SWEEP in CASES
+    assert mop_settings.mop is mop
+    assert mop_settings.sweep is None
+    assert sweep_settings.mop is None
+    assert sweep_settings.sweep is sweep
+    assert mop is not sweep
+    assert mop == sweep
+    assert isinstance(mop_settings.static_colliders[1], gs.options.PBSTFAbsorbentBoxStaticColliderOptions)
+    assert type(sweep_settings.static_colliders[1]) is gs.options.PBSTFBoxStaticColliderOptions
+    assert_equal(mop_settings.static_colliders[1].lower, sweep_settings.static_colliders[1].lower)
+    assert_equal(mop_settings.static_colliders[1].upper, sweep_settings.static_colliders[1].upper)
+    assert_equal(mop_settings.static_colliders[1].pos, sweep_settings.static_colliders[1].pos)
+    assert_equal(mop_settings.static_colliders[1].quat, sweep_settings.static_colliders[1].quat)
+    assert_equal(mop_settings.static_colliders[1].absorption_rate, 8.0)
+    assert_equal(mop_settings.static_colliders[1].absorption_capacity_fraction, 0.25)
+    for time in (0.0, mop.settle_time, mop.settle_time + 0.5 * mop.wipe_time, 20.0):
+        assert_equal(wipe_pose(time, mop), wipe_pose(time, sweep))
 
 
 @pytest.mark.required
@@ -792,41 +955,32 @@ def test_pbstf_cpp_drop_hits_cone_tip(show_viewer):
 
 @pytest.mark.required
 @pytest.mark.parametrize("backend", [gs.cuda])
-def test_mop_box_pushes_water(show_viewer):
-    settings = case_settings(CASE_MOP)
-    assert settings.mop is not None
-    mop = settings.mop
-    mop_mesh = mesh_utils.load_mesh(os.path.join(gs.utils.get_assets_dir(), mop.asset))
-
-    assert mop_mesh.is_watertight
-    assert mop_mesh.is_winding_consistent
-    assert mop_mesh.volume > 0.0
-    assert_allclose(mop_mesh.bounds, ((-0.6, 0.02, -2.2), (0.6, 0.85, 2.2)), atol=1e-8)
-    assert_allclose(mop_mesh.bounds, (mop.collider_lower, mop.collider_upper), atol=1e-8)
+def test_sweep_box_pushes_water(show_viewer):
+    settings = case_settings(CASE_SWEEP)
+    sweep = get_wipe_settings(settings)
     assert len(settings.static_colliders) == 2
-    assert all(
-        isinstance(collider_options, gs.options.PBSTFBoxStaticColliderOptions)
-        for collider_options in settings.static_colliders
-    )
+    assert type(settings.static_colliders[1]) is gs.options.PBSTFBoxStaticColliderOptions
 
-    scene, (liquid,) = build_scene(case=CASE_MOP, show_viewer=show_viewer)
-    mop_debug_object = draw_case_colliders(scene, CASE_MOP)
-    mop_debug_transform = geom_utils.trans_quat_to_T(np.array(mop.start_pos), np.array(mop.quat))
-    scene.update_debug_objects((mop_debug_object,), (mop_debug_transform,))
+    scene, (liquid,) = build_scene(case=CASE_SWEEP, show_viewer=show_viewer)
+    sweep_debug_object = draw_case_colliders(scene, CASE_SWEEP)
+    sweep_debug_transform = geom_utils.trans_quat_to_T(np.array(sweep.start_pos), np.array(sweep.quat))
+    scene.update_debug_objects((sweep_debug_object,), (sweep_debug_transform,))
     positions_initial = tensor_to_array(liquid.get_particles_pos())
-    assert liquid.n_particles == 6000
-    assert liquid.material.collider_friction == 0.1
+    assert liquid.n_particles == 840
+    assert liquid.material.collider_friction == 0.5
+    with pytest.raises(gs.GenesisException, match="not absorbent"):
+        scene.pbstf_solver.get_static_collider_wetness(1)
 
     for _ in range(5):
         scene.step()
     for step_idx in range(70):
-        time = mop.settle_time + mop.wipe_time * step_idx / 69
-        update_mop_case(scene.pbstf_solver, time, mop)
+        time = sweep.settle_time + sweep.wipe_time * step_idx / 69
+        update_wipe_case(scene.pbstf_solver, time, sweep)
         scene.step()
 
     positions = tensor_to_array(liquid.get_particles_pos())
     displacement_x = positions[:, 0] - positions_initial[:, 0]
-    is_ahead_of_initial_water = positions[:, 0] > mop.liquid_upper[0]
+    is_ahead_of_initial_water = positions[:, 0] > sweep.liquid_upper[0]
 
     assert np.isfinite(positions).all()
     assert positions[:, 1].min() >= -1e-5

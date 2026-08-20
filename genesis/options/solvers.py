@@ -4,7 +4,15 @@ import numpy as np
 from pydantic import Field, PrivateAttr, StrictBool, StrictInt, model_validator
 
 import genesis as gs
-from genesis.typing import NonNegativeFloat, NonNegativeInt, PositiveFloat, PositiveInt, UnitVec4FType, Vec3FType
+from genesis.typing import (
+    NonNegativeFloat,
+    NonNegativeInt,
+    PositiveFloat,
+    PositiveInt,
+    UnitInterval,
+    UnitVec4FType,
+    Vec3FType,
+)
 
 from .options import Options
 
@@ -783,6 +791,31 @@ class PBSTFBoxStaticColliderOptions(PBSTFStaticColliderOptions):
         return self
 
 
+class PBSTFAbsorbentStaticColliderOptionsMixin(Options):
+    """Absorption controls for a position-based surface tension flow (PBSTF) static collider.
+
+    ``absorption_rate`` is the exponential inward-motion rate in inverse seconds. A higher value draws captured liquid
+    inward faster but produces a more abrupt local trajectory; a lower value takes longer and moves liquid more
+    gradually. ``absorption_capacity_fraction`` is the fraction of collider volume available for liquid at rest. A
+    higher value stores more liquid before saturation, while a lower value resumes ordinary collision behavior sooner.
+    """
+
+    absorption_rate: PositiveFloat
+    absorption_capacity_fraction: UnitInterval
+
+    @model_validator(mode="after")
+    def _validate_absorption_capacity(self):
+        if self.absorption_capacity_fraction <= 0.0:
+            gs.raise_exception("PBSTF absorbent collider `absorption_capacity_fraction` must be positive.")
+        return self
+
+
+class PBSTFAbsorbentBoxStaticColliderOptions(PBSTFAbsorbentStaticColliderOptionsMixin, PBSTFBoxStaticColliderOptions):
+    """Finite analytic position-based surface tension flow (PBSTF) box that captures liquid into local voxels."""
+
+    type: Literal["absorbent_box"] = "absorbent_box"
+
+
 class PBSTFConeStaticColliderOptions(PBSTFStaticColliderOptions):
     """Finite analytic cone collider.
 
@@ -816,7 +849,10 @@ class PBSTFMeshStaticColliderOptions(PBSTFStaticColliderOptions):
 
 
 PBSTFStaticColliderOptionsType = Annotated[
-    PBSTFBoxStaticColliderOptions | PBSTFConeStaticColliderOptions | PBSTFMeshStaticColliderOptions,
+    PBSTFAbsorbentBoxStaticColliderOptions
+    | PBSTFBoxStaticColliderOptions
+    | PBSTFConeStaticColliderOptions
+    | PBSTFMeshStaticColliderOptions,
     Field(discriminator="type"),
 ]
 

@@ -286,10 +286,70 @@ class IPBSTFSolverState(_ParticleFluidSolverState):
 
 
 class PBSTFSolverState(_ParticleFluidSolverState):
-    """Dynamic state queried from a PBSTFSolver."""
+    """Dynamic state queried from a position-based surface tension flow (PBSTF) solver."""
 
     def __init__(self, scene):
         super().__init__(scene, scene.sim.pbstf_solver)
+        solver = scene.sim.pbstf_solver
+        args = {
+            "dtype": gs.tc_float,
+            "requires_grad": False,
+            "scene": scene,
+        }
+        self._static_colliders_pos = gs.zeros((scene.sim._B, solver._n_static_colliders, 3), **args)
+        self._static_colliders_quat = gs.zeros((scene.sim._B, solver._n_static_colliders, 4), **args)
+        self._absorbed_collider_idx = None
+        self._absorbed_voxel_idx = None
+        self._absorption_local_pos = None
+        self._absorption_target_local_pos = None
+        self._absorption_progress = None
+        if solver._n_absorbent_static_colliders > 0:
+            args["dtype"] = gs.tc_int
+            self._absorbed_collider_idx = gs.zeros((scene.sim._B, solver.n_particles), **args)
+            self._absorbed_voxel_idx = gs.zeros((scene.sim._B, solver.n_particles), **args)
+            args["dtype"] = gs.tc_float
+            self._absorption_local_pos = gs.zeros((scene.sim._B, solver.n_particles, 3), **args)
+            self._absorption_target_local_pos = gs.zeros((scene.sim._B, solver.n_particles, 3), **args)
+            self._absorption_progress = gs.zeros((scene.sim._B, solver.n_particles), **args)
+
+    def serializable(self):
+        super().serializable()
+        self._static_colliders_pos = self._static_colliders_pos.detach()
+        self._static_colliders_quat = self._static_colliders_quat.detach()
+        if self._absorbed_collider_idx is not None:
+            self._absorbed_collider_idx = self._absorbed_collider_idx.detach()
+            self._absorbed_voxel_idx = self._absorbed_voxel_idx.detach()
+            self._absorption_local_pos = self._absorption_local_pos.detach()
+            self._absorption_target_local_pos = self._absorption_target_local_pos.detach()
+            self._absorption_progress = self._absorption_progress.detach()
+
+    @property
+    def static_colliders_pos(self):
+        return self._static_colliders_pos
+
+    @property
+    def static_colliders_quat(self):
+        return self._static_colliders_quat
+
+    @property
+    def absorbed_collider_idx(self):
+        return self._absorbed_collider_idx
+
+    @property
+    def absorbed_voxel_idx(self):
+        return self._absorbed_voxel_idx
+
+    @property
+    def absorption_local_pos(self):
+        return self._absorption_local_pos
+
+    @property
+    def absorption_target_local_pos(self):
+        return self._absorption_target_local_pos
+
+    @property
+    def absorption_progress(self):
+        return self._absorption_progress
 
 
 class PBDSolverState:

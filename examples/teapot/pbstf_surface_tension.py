@@ -41,22 +41,24 @@ __all__ = (
     "CASE_CUBE",
     "CASE_MERGE",
     "CASE_MOP",
+    "CASE_SWEEP",
     "CASE_TAP",
     "CASE_TEAPOT",
-    "MopSettings",
     "TeapotSettings",
+    "WipeSettings",
     "add_case_entities",
     "build_scene",
     "case_settings",
     "draw_case_colliders",
-    "mop_pose",
+    "get_wipe_settings",
     "sample_teapot_particles",
     "start_viewer_recording",
     "stop_viewer",
     "teapot_pose",
-    "update_mop_case",
     "update_rigid_teapot",
     "update_teapot_manipulator",
+    "update_wipe_case",
+    "wipe_pose",
 )
 
 CASE_CUBE = "cube"
@@ -64,9 +66,10 @@ CASE_MERGE = "merge"
 CASE_BOUNCE = "bounce"
 CASE_CONE = "cone"
 CASE_MOP = "mop"
+CASE_SWEEP = "sweep"
 CASE_TAP = "tap"
 CASE_TEAPOT = "teapot"
-CASES = (CASE_CUBE, CASE_MERGE, CASE_BOUNCE, CASE_CONE, CASE_MOP, CASE_TAP, CASE_TEAPOT)
+CASES = (CASE_CUBE, CASE_MERGE, CASE_BOUNCE, CASE_CONE, CASE_MOP, CASE_SWEEP, CASE_TAP, CASE_TEAPOT)
 
 DEFAULT_CASE_DT = 1.0 / 30.0
 
@@ -80,8 +83,7 @@ class TapEmitterSettings(NamedTuple):
     max_particles: int
 
 
-class MopSettings(NamedTuple):
-    asset: str
+class WipeSettings(NamedTuple):
     collider_idx: int
     collider_lower: tuple[float, float, float]
     collider_upper: tuple[float, float, float]
@@ -112,7 +114,8 @@ class CaseSettings(NamedTuple):
     steps: int
     teapot: TeapotSettings | None
     emitter: TapEmitterSettings | None
-    mop: MopSettings | None = None
+    mop: WipeSettings | None = None
+    sweep: WipeSettings | None = None
 
 
 def _liquid_material(
@@ -178,7 +181,7 @@ def _case_liquid_material(case):
             collider_adhesion_compliance=20.0,
             collider_friction=0.01,
         )
-    if case == CASE_MOP:
+    if case in (CASE_MOP, CASE_SWEEP):
         return _liquid_material(
             sampler="regular",
             density_compliance=150.0,
@@ -273,9 +276,8 @@ def case_settings(case):
             teapot=None,
             emitter=None,
         )
-    if case == CASE_MOP:
-        mop = MopSettings(
-            asset="meshes/mop.obj",
+    if case in (CASE_MOP, CASE_SWEEP):
+        wipe = WipeSettings(
             collider_idx=1,
             collider_lower=(-0.6, 0.02, -1.2),
             collider_upper=(0.6, 0.85, 1.2),
@@ -289,6 +291,22 @@ def case_settings(case):
             settle_time=1.0,
             wipe_time=5.0,
         )
+        if case == CASE_MOP:
+            wipe_collider = gs.options.PBSTFAbsorbentBoxStaticColliderOptions(
+                pos=wipe.start_pos,
+                quat=wipe.quat,
+                lower=wipe.collider_lower,
+                upper=wipe.collider_upper,
+                absorption_rate=8.0,
+                absorption_capacity_fraction=0.25,
+            )
+        else:
+            wipe_collider = gs.options.PBSTFBoxStaticColliderOptions(
+                pos=wipe.start_pos,
+                quat=wipe.quat,
+                lower=wipe.collider_lower,
+                upper=wipe.collider_upper,
+            )
         return CaseSettings(
             scale=20,
             dt=0.01,
@@ -299,17 +317,12 @@ def case_settings(case):
             camera_lookat=(0.0, 0.4, 0.0),
             static_colliders=(
                 gs.options.PBSTFBoxStaticColliderOptions(
-                    pos=mop.table_pos,
-                    quat=mop.quat,
-                    lower=tuple(-0.5 * size for size in mop.table_size),
-                    upper=tuple(0.5 * size for size in mop.table_size),
+                    pos=wipe.table_pos,
+                    quat=wipe.quat,
+                    lower=tuple(-0.5 * size for size in wipe.table_size),
+                    upper=tuple(0.5 * size for size in wipe.table_size),
                 ),
-                gs.options.PBSTFBoxStaticColliderOptions(
-                    pos=mop.start_pos,
-                    quat=mop.quat,
-                    lower=mop.collider_lower,
-                    upper=mop.collider_upper,
-                ),
+                wipe_collider,
             ),
             max_solver_iterations=10,
             max_surface_neighbors=128,
@@ -318,7 +331,8 @@ def case_settings(case):
             steps=1000,
             teapot=None,
             emitter=None,
-            mop=mop,
+            mop=wipe if case == CASE_MOP else None,
+            sweep=wipe if case == CASE_SWEEP else None,
         )
     if case == CASE_TAP:
         return CaseSettings(
@@ -375,6 +389,15 @@ def case_settings(case):
     raise ValueError(f"Unknown PBSTF example case: {case}")
 
 
+def get_wipe_settings(settings):
+    """Return the active MOP or SWEEP trajectory settings for one case."""
+    if settings.mop is not None:
+        return settings.mop
+    if settings.sweep is not None:
+        return settings.sweep
+    gs.raise_exception("The selected case requires wipe settings.")
+
+
 def add_case_entities(scene, case, particle_size, settings, material_factory):
     if case == CASE_CUBE:
         liquid = scene.add_entity(
@@ -426,14 +449,12 @@ def add_case_entities(scene, case, particle_size, settings, material_factory):
         )
         return ((liquid, (0.0, -4.0, 0.0)),)
 
-    if case == CASE_MOP:
-        mop = settings.mop
-        if mop is None:
-            gs.raise_exception("The mop case requires mop settings.")
+    if case in (CASE_MOP, CASE_SWEEP):
+        wipe = get_wipe_settings(settings)
         liquid = scene.add_entity(
             morph=gs.morphs.Box(
-                lower=mop.liquid_lower,
-                upper=mop.liquid_upper,
+                lower=wipe.liquid_lower,
+                upper=wipe.liquid_upper,
             ),
             material=material_factory(case),
         )
@@ -464,17 +485,17 @@ def add_case_entities(scene, case, particle_size, settings, material_factory):
     raise ValueError(f"Unknown PBSTF example case: {case}")
 
 
-def mop_pose(time, settings):
-    """Return the mop translation along its single wiping stroke."""
+def wipe_pose(time, settings):
+    """Return the collider translation along its single wiping stroke."""
     progress = min(max((time - settings.settle_time) / settings.wipe_time, 0.0), 1.0)
     return tuple(
         settings.start_pos[axis] + progress * (settings.end_pos[axis] - settings.start_pos[axis]) for axis in range(3)
     )
 
 
-def update_mop_case(solver, time, settings):
-    """Move the one-way mop collider and return its current position."""
-    pos = mop_pose(time, settings)
+def update_wipe_case(solver, time, settings):
+    """Move the active MOP or SWEEP collider and return its current position."""
+    pos = wipe_pose(time, settings)
     solver.set_static_colliders_pose(pos=pos, quat=settings.quat, colliders_idx=settings.collider_idx)
     return pos
 
@@ -500,19 +521,17 @@ def draw_case_colliders(scene, case):
         scene.draw_debug_mesh(cone, T=transform)
         return None
 
-    if case == CASE_MOP:
-        mop = case_settings(case).mop
-        if mop is None:
-            gs.raise_exception("The mop case requires mop settings.")
-        table_mesh = mesh_utils.create_box(extents=mop.table_size, color=(0.36, 0.24, 0.14, 1.0))
-        table_transform = geom_utils.trans_quat_to_T(np.array(mop.table_pos), np.array(mop.quat))
+    if case in (CASE_MOP, CASE_SWEEP):
+        wipe = get_wipe_settings(case_settings(case))
+        table_mesh = mesh_utils.create_box(extents=wipe.table_size, color=(0.36, 0.24, 0.14, 1.0))
+        table_transform = geom_utils.trans_quat_to_T(np.array(wipe.table_pos), np.array(wipe.quat))
         scene.draw_debug_mesh(table_mesh, T=table_transform)
-        mop_mesh = mesh_utils.create_box(
-            bounds=(mop.collider_lower, mop.collider_upper),
+        wipe_mesh = mesh_utils.create_box(
+            bounds=(wipe.collider_lower, wipe.collider_upper),
             color=(0.85, 0.2, 0.08, 0.35),
         )
-        mop_transform = geom_utils.trans_quat_to_T(np.array(mop_pose(0.0, mop)), np.array(mop.quat))
-        return scene.draw_debug_mesh(mop_mesh, T=mop_transform)
+        wipe_transform = geom_utils.trans_quat_to_T(np.array(wipe_pose(0.0, wipe)), np.array(wipe.quat))
+        return scene.draw_debug_mesh(wipe_mesh, T=wipe_transform)
 
     return None
 
@@ -623,16 +642,16 @@ def main():
     scene, _ = build_scene(case=args.case, scale=args.scale, show_viewer=is_viewer_shown, dt=args.dt)
     teapot_settings = settings.teapot
     emitter_settings = settings.emitter
-    mop_settings = settings.mop
+    wipe_settings = get_wipe_settings(settings) if args.case in (CASE_MOP, CASE_SWEEP) else None
     emitter = scene.emitters[0] if emitter_settings is not None else None
     teapot = scene.get_entity(name=teapot_settings.entity_name) if teapot_settings is not None else None
-    if mop_settings is not None and is_viewer_shown:
+    if wipe_settings is not None and is_viewer_shown:
         scene.clear_debug_objects()
-        mop_debug_object = draw_case_colliders(scene, args.case)
-        mop_debug_transform = geom_utils.trans_quat_to_T(np.zeros(3), np.array(mop_settings.quat))
+        wipe_debug_object = draw_case_colliders(scene, args.case)
+        wipe_debug_transform = geom_utils.trans_quat_to_T(np.zeros(3), np.array(wipe_settings.quat))
     else:
-        mop_debug_object = None
-        mop_debug_transform = None
+        wipe_debug_object = None
+        wipe_debug_transform = None
     if teapot_settings is None:
         kuka = None
         kuka_qpos = None
@@ -665,11 +684,11 @@ def main():
                     teapot_settings,
                     kuka_qpos,
                 )
-            if mop_settings is not None:
-                mop_pos = update_mop_case(scene.pbstf_solver, scene.cur_t, mop_settings)
-                if mop_debug_object is not None:
-                    mop_debug_transform[:3, 3] = mop_pos
-                    scene.update_debug_objects((mop_debug_object,), (mop_debug_transform,))
+            if wipe_settings is not None:
+                wipe_pos = update_wipe_case(scene.pbstf_solver, scene.cur_t, wipe_settings)
+                if wipe_debug_object is not None:
+                    wipe_debug_transform[:3, 3] = wipe_pos
+                    scene.update_debug_objects((wipe_debug_object,), (wipe_debug_transform,))
             scene.step()
     finally:
         stop_viewer(scene, is_viewer_shown)

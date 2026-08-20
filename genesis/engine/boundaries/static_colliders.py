@@ -72,6 +72,60 @@ class BoxStaticCollider(StaticCollider):
         )
 
 
+class AbsorbentStaticCollider:
+    """Absorption parameters and compact voxel metadata for a position-based surface tension flow (PBSTF) collider."""
+
+    def __init__(self, absorption_rate, absorption_capacity_fraction):
+        self.absorption_rate = absorption_rate
+        self.absorption_capacity_fraction = absorption_capacity_fraction
+        self.grid_res = None
+        self.grid_res_qd = None
+        self.voxel_size = None
+        self.voxel_size_qd = None
+        self.voxel_capacity = None
+        self.voxel_start = 0
+        self.n_voxels = 0
+        self.total_capacity = 0
+
+        if self.absorption_rate <= 0.0:
+            gs.raise_exception("Absorbent static collider `absorption_rate` must be positive.")
+        if not 0.0 < self.absorption_capacity_fraction <= 1.0:
+            gs.raise_exception("Absorbent static collider `absorption_capacity_fraction` must be in (0, 1].")
+
+
+class AbsorbentBoxStaticCollider(BoxStaticCollider, AbsorbentStaticCollider):
+    """Finite analytic box that captures position-based surface tension flow (PBSTF) particles into local voxels."""
+
+    type = "absorbent_box"
+
+    def __init__(
+        self,
+        lower,
+        upper,
+        absorption_rate,
+        absorption_capacity_fraction,
+        pos=(0.0, 0.0, 0.0),
+        quat=(1.0, 0.0, 0.0, 0.0),
+    ):
+        BoxStaticCollider.__init__(self, lower=lower, upper=upper, pos=pos, quat=quat)
+        AbsorbentStaticCollider.__init__(
+            self,
+            absorption_rate=absorption_rate,
+            absorption_capacity_fraction=absorption_capacity_fraction,
+        )
+
+    @classmethod
+    def from_options(cls, options):
+        return cls(
+            lower=options.lower,
+            upper=options.upper,
+            absorption_rate=options.absorption_rate,
+            absorption_capacity_fraction=options.absorption_capacity_fraction,
+            pos=options.pos,
+            quat=options.quat,
+        )
+
+
 class ConeStaticCollider(StaticCollider):
     """Finite analytic cone whose geometry is fixed in the collider's local frame."""
 
@@ -430,6 +484,7 @@ def static_collider_separates(
 
 _STATIC_COLLIDER_TYPES = {
     BoxStaticCollider.type: BoxStaticCollider,
+    AbsorbentBoxStaticCollider.type: AbsorbentBoxStaticCollider,
     ConeStaticCollider.type: ConeStaticCollider,
     MeshStaticCollider.type: MeshStaticCollider,
 }
@@ -445,6 +500,8 @@ def create_static_collider(options) -> StaticCollider:
 
 __all__ = [
     "StaticCollider",
+    "AbsorbentStaticCollider",
+    "AbsorbentBoxStaticCollider",
     "BoxStaticCollider",
     "ConeStaticCollider",
     "MeshStaticCollider",
