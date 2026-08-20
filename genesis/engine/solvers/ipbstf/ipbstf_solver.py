@@ -501,6 +501,66 @@ def _kernel_update_velocities(
 
 
 @qd.kernel
+def _kernel_compute_viscosity_velocity_updates(
+    n_particles: qd.i32,
+    viscosity: float,
+    support_radius: float,
+    particles: qd.template(),
+    particles_status: qd.template(),
+    particles_info: qd.template(),
+    spatial_hasher: qd.template(),
+):
+    for particle_idx, env_idx in qd.ndrange(n_particles, particles.shape[1]):
+        if particles_status[particle_idx, env_idx].active and not particles_info[particle_idx, env_idx].is_fixed:
+            particle = particles[particle_idx, env_idx]
+            delta_vel = qd.Vector.zero(gs.qd_float, 3)
+            grid = spatial_hasher.pos_to_grid(particle.pos_reference)
+            for offset in qd.grouped(qd.ndrange((-1, 2), (-1, 2), (-1, 2))):
+                slot_idx = spatial_hasher.grid_to_slot(grid + offset)
+                slot_start = spatial_hasher.slot_start[slot_idx, env_idx]
+                slot_end = slot_start + spatial_hasher.slot_size[slot_idx, env_idx]
+                for neighbor_idx in range(slot_start, slot_end):
+                    if (
+                        neighbor_idx != particle_idx
+                        and particles_status[neighbor_idx, env_idx].active
+                        and not particles_info[neighbor_idx, env_idx].is_fixed
+                    ):
+                        neighbor = particles[neighbor_idx, env_idx]
+                        if (
+                            (particle.pos_reference - neighbor.pos_reference).norm() < support_radius
+                            and neighbor.density > gs.EPS
+                        ):
+                            distance = (particle.pos - neighbor.pos).norm()
+                            delta_vel += (
+                                particles_info[neighbor_idx, env_idx].mass
+                                / neighbor.density
+                                * (neighbor.vel - particle.vel)
+                                * _cubic_kernel(distance, support_radius)
+                            )
+            particles[particle_idx, env_idx].delta_vel = viscosity * delta_vel
+
+
+@qd.kernel
+def _kernel_apply_viscosity_velocity_updates(
+    n_particles: qd.i32,
+    particles: qd.template(),
+    particles_status: qd.template(),
+    particles_info: qd.template(),
+    errno: qd.Tensor,
+):
+    for particle_idx, env_idx in qd.ndrange(n_particles, particles.shape[1]):
+        if particles_status[particle_idx, env_idx].active and not particles_info[particle_idx, env_idx].is_fixed:
+            velocity = particles[particle_idx, env_idx].vel + particles[particle_idx, env_idx].delta_vel
+            is_valid = True
+            for axis in qd.static(range(3)):
+                is_valid = is_valid and not qd.math.isnan(velocity[axis]) and not qd.math.isinf(velocity[axis])
+            if is_valid:
+                particles[particle_idx, env_idx].vel = velocity
+            else:
+                errno[env_idx] = ErrorCode.INVALID_IPBSTF_STATE_NAN
+
+
+@qd.kernel
 def _kernel_set_static_colliders_pose(
     colliders_idx: qd.types.ndarray(),
     envs_idx: qd.types.ndarray(),
@@ -787,10 +847,10 @@ class IPBSTFSolver(Solver):
             gs.raise_exception("IPBSTFSolver requires at least one liquid entity.")
         self._material = liquid_entities[0].material
         for entity in liquid_entities[1:]:
-            if entity.material.rho != self._material.rho:
+            if entity.material.rho != self._material.rho or entity.material.viscosity != self._material.viscosity:
                 gs.raise_exception(
-                    "All entities in one IPBSTFSolver must use the same rest density because the current solver is "
-                    "single-phase."
+                    "All liquid entities in one IPBSTFSolver must use the same rest density and viscosity because the "
+                    "current solver is single-phase."
                 )
 
         self.sh.build(self._B)
@@ -800,6 +860,7 @@ class IPBSTFSolver(Solver):
             pos_predicted=gs.qd_vec3,
             pos_reference=gs.qd_vec3,
             delta_pos=gs.qd_vec3,
+            delta_vel=gs.qd_vec3,
             vel=gs.qd_vec3,
             density=gs.qd_float,
             density_constraint=gs.qd_float,
@@ -996,6 +1057,24 @@ class IPBSTFSolver(Solver):
             self.particles_info_reordered,
             self._errno,
         )
+        if self._material.viscosity > 0.0:
+            self._compute_density_constraints()
+            _kernel_compute_viscosity_velocity_updates(
+                self._n_particles,
+                self._material.viscosity,
+                self._support_radius,
+                self.particles_reordered,
+                self.particles_status_reordered,
+                self.particles_info_reordered,
+                self.sh,
+            )
+            _kernel_apply_viscosity_velocity_updates(
+                self._n_particles,
+                self.particles_reordered,
+                self.particles_status_reordered,
+                self.particles_info_reordered,
+                self._errno,
+            )
 
     def substep_pre_coupling_grad(self, f):
         pass

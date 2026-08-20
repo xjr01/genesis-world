@@ -1,4 +1,5 @@
 import argparse
+import functools
 import os
 
 import genesis as gs
@@ -41,9 +42,12 @@ CASE_DOUBLE_DAM_BREAK = "double_dam_break"
 CASES = (*PBSTF_CASES, CASE_DAM_BREAK, CASE_DOUBLE_DAM_BREAK)
 
 
-def _liquid_material(case):
+def _liquid_material(case, viscosity=0.0):
     sampler = "regular" if case in (CASE_TAP, CASE_TEAPOT, CASE_DAM_BREAK, CASE_DOUBLE_DAM_BREAK) else "staggered"
-    return gs.materials.IPBSTF.Liquid(sampler=sampler)
+    return gs.materials.IPBSTF.Liquid(
+        sampler=sampler,
+        viscosity=viscosity,
+    )
 
 
 def build_scene(
@@ -52,6 +56,7 @@ def build_scene(
     show_viewer=False,
     dt=None,
     alpha=1e-6,
+    viscosity=0.0,
     max_solver_iterations=10,
     show_boundary=True,
 ):
@@ -162,7 +167,7 @@ def build_scene(
                     lower=lower,
                     upper=upper,
                 ),
-                material=_liquid_material(case),
+                material=_liquid_material(case, viscosity),
             )
             for lower, upper in liquid_bounds
         ]
@@ -230,7 +235,8 @@ def build_scene(
         ),
         show_viewer=show_viewer,
     )
-    entities_and_velocities = add_case_entities(scene, case, particle_size, settings, _liquid_material)
+    material_factory = functools.partial(_liquid_material, viscosity=viscosity)
+    entities_and_velocities = add_case_entities(scene, case, particle_size, settings, material_factory)
     scene.build()
     for entity, velocity in entities_and_velocities:
         if velocity is not None:
@@ -250,6 +256,12 @@ def main():
     parser.add_argument("--dt", type=float, default=None, help="Override the case's default time step")
     parser.add_argument("--steps", type=int, default=None, help="Override the case's default simulation horizon")
     parser.add_argument("--alpha", type=float, default=1e-6, help="Inertial energy weight")
+    parser.add_argument(
+        "--viscosity",
+        type=float,
+        default=0.0,
+        help="Neighborhood velocity blending coefficient; larger values damp relative liquid motion",
+    )
     parser.add_argument("--iterations", type=int, default=10, help="Local Newton iterations per step")
     parser.add_argument("-v", "--vis", dest="show_viewer", action="store_true", default=False)
     parser.add_argument(
@@ -274,6 +286,8 @@ def main():
         parser.error("--steps must be non-negative")
     if args.alpha <= 0.0:
         parser.error("--alpha must be positive")
+    if args.viscosity < 0.0:
+        parser.error("--viscosity must be non-negative")
     if args.iterations <= 0:
         parser.error("--iterations must be positive")
 
@@ -284,6 +298,7 @@ def main():
         show_viewer=args.show_viewer or args.is_recording,
         dt=args.dt,
         alpha=args.alpha,
+        viscosity=args.viscosity,
         max_solver_iterations=args.iterations,
         show_boundary=args.show_boundary,
     )

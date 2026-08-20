@@ -9,7 +9,7 @@ from tests.utils import assert_allclose, assert_equal
 @pytest.mark.required
 @pytest.mark.parametrize("backend", [gs.cuda])
 @pytest.mark.parametrize("n_envs", [0, 2])
-def test_unilateral_density_energy(n_envs, show_viewer):
+def test_unilateral_density_energy_and_viscosity(n_envs, show_viewer):
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
             dt=0.01,
@@ -32,30 +32,34 @@ def test_unilateral_density_energy(n_envs, show_viewer):
         ),
         show_viewer=show_viewer,
     )
+    liquid_material = gs.materials.IPBSTF.Liquid(
+        sampler="staggered",
+        viscosity=1.0,
+    )
     liquid = scene.add_entity(
         morph=gs.morphs.Box(
             lower=(-0.25, -0.25, -0.25),
             upper=(0.25, 0.25, 0.25),
         ),
-        material=gs.materials.IPBSTF.Liquid(
-            sampler="staggered",
-        ),
+        material=liquid_material,
     )
     collider_liquid = scene.add_entity(
         morph=gs.morphs.Particles(
             positions=((1.0, 0.02, 0.0),),
         ),
-        material=gs.materials.IPBSTF.Liquid(
-            sampler="staggered",
-        ),
+        material=liquid_material,
     )
     moving_boundary_liquid = scene.add_entity(
         morph=gs.morphs.Particles(
             positions=((-1.5, 0.0, 0.0),),
         ),
-        material=gs.materials.IPBSTF.Liquid(
-            sampler="staggered",
+        material=liquid_material,
+    )
+    viscous_pair = scene.add_entity(
+        morph=gs.morphs.Particles(
+            positions=((-0.05, -1.5, 0.0), (0.05, -1.5, 0.0)),
         ),
+        material=liquid_material,
     )
     moving_boundary_positions = tuple(
         (-1.5 + x_offset, 1.0 + y_offset, z_offset)
@@ -72,10 +76,14 @@ def test_unilateral_density_energy(n_envs, show_viewer):
         ),
     )
     scene.build(n_envs=n_envs)
+    viscous_pair.set_particles_vel(((1.0, 0.0, 0.0), (-1.0, 0.0, 0.0)))
 
     pos_initial = tensor_to_array(liquid.get_state().pos)
     scene.step()
+    viscous_pair_vel = tensor_to_array(viscous_pair.get_state().vel)
     assert_allclose(tensor_to_array(liquid.get_state().pos), pos_initial, atol=1e-6)
+    assert_allclose(viscous_pair_vel.mean(axis=-2), 0.0, atol=1e-6)
+    assert (np.ptp(viscous_pair_vel[..., 0], axis=-1) < 2.0).all()
     collider_pos = tensor_to_array(collider_liquid.get_state().pos)
     collider_pos_expected = np.zeros_like(collider_pos)
     collider_pos_expected[..., 0] = 1.0
