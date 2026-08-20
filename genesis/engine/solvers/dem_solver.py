@@ -181,6 +181,10 @@ class DEMSolver(Solver):
         self.sdfo_quat = qd.field(gs.qd_vec4, shape=(self._B,))  # (w, x, y, z)
         self.sdfo_enabled = qd.field(gs.qd_int, shape=(self._B,))
         self.sdfo_val = qd.field(gs.qd_float, shape=(SDFO_MAX_CELLS,))
+        # per-node SDF gradient (numpy np.gradient), trilinearly interpolated for obstacle normals:
+        # FD-differencing the trilinear value field is noisy at cell-boundary creases, which heats
+        # the granular bed; the interpolated node gradient is smooth by construction
+        self.sdfo_grad = qd.field(gs.qd_vec3, shape=(SDFO_MAX_CELLS,))
         self.sdfo_dims = qd.field(gs.qd_int, shape=(3,))  # (nx, ny, nz)
         self.sdfo_origin = qd.field(gs.qd_vec3, shape=(self._B,))  # grid min corner (local frame)
         self.sdfo_cell = qd.field(gs.qd_vec3, shape=(self._B,))  # cell size (local frame)
@@ -378,7 +382,9 @@ class DEMSolver(Solver):
         return self.tilt_quat.to_numpy()
 
     @gs.assert_built
-    def set_sdf_obstacle(self, sdf_val, dims, origin, cell_size, pos, quat=(1.0, 0.0, 0.0, 0.0), vel=(0.0, 0.0, 0.0)):
+    def set_sdf_obstacle(
+        self, sdf_val, dims, origin, cell_size, pos, quat=(1.0, 0.0, 0.0, 0.0), vel=(0.0, 0.0, 0.0), sdf_grad=None
+    ):
         """
         Place (or replace) a mesh-SDF obstacle (a voxelized real asset) and enable it.
 
@@ -402,18 +408,32 @@ class DEMSolver(Solver):
             Orientation of the local frame as a quaternion (w, x, y, z); normalized internally.
         vel : tuple, shape (3,), optional
             Velocity of the obstacle in m/s. Defaults to zero.
+        sdf_grad : ndarray, shape (nx, ny, nz, 3), optional
+            Per-node SDF gradient (outward normal direction), trilinearly interpolated by the contact
+            kernel. Smooth across cell boundaries, unlike finite-differencing the value field in the
+            kernel (the trilinear value field has creases at cell faces, and FD normals there inject
+            tangential noise that heats the grain bed). If None, computed here with np.gradient.
         """
         val = np.asarray(sdf_val, dtype=gs.np_float).reshape(-1)
         dims_np = np.asarray(dims, dtype=gs.np_int)
         assert val.size == int(np.prod(dims_np)), f"sdf_val size {val.size} != dims {dims_np}"
         assert val.size <= SDFO_MAX_CELLS, f"sdf_val size {val.size} exceeds capacity {SDFO_MAX_CELLS}"
+        cell_np = np.asarray(cell_size, dtype=gs.np_float)
+        if sdf_grad is None:
+            gx, gy, gz = np.gradient(sdf_val.reshape(tuple(dims_np)), cell_np[0], cell_np[1], cell_np[2])
+            grad = np.stack([gx, gy, gz], axis=-1)
+        else:
+            grad = np.asarray(sdf_grad, dtype=gs.np_float)
+        assert grad.shape == tuple(dims_np) + (3,), f"sdf_grad shape {grad.shape} != {tuple(dims_np) + (3,)}"
         # write into the prefix of the build-time-allocated field (post-build field replacement is
         # NOT visible to already-materialized kernels)
         buf = np.zeros((SDFO_MAX_CELLS,), dtype=gs.np_float)
         buf[: val.size] = val
         self.sdfo_val.from_numpy(buf)
+        gbuf = np.zeros((SDFO_MAX_CELLS, 3), dtype=gs.np_float)
+        gbuf[: val.size] = grad.reshape(-1, 3)
+        self.sdfo_grad.from_numpy(gbuf)
         self.sdfo_dims.from_numpy(dims_np)
-        cell_np = np.asarray(cell_size, dtype=gs.np_float)
         origin_np = np.asarray(origin, dtype=gs.np_float)
         self.sdfo_cell.from_numpy(np.tile(cell_np, (self._B, 1)))
         self.sdfo_inv_cell.from_numpy(np.tile(1.0 / cell_np, (self._B, 1)))
@@ -469,6 +489,26 @@ class DEMSolver(Solver):
         out = np.full(len(pts), np.nan, dtype=gs.np_float)
         self._kernel_query_sdfo(pts, out)
         return out
+
+    def query_sdf_obstacle_normal(self, points):
+        """
+        Debug/verification helper: evaluate the mesh-SDF obstacle's outward normal (trilinear
+        interpolation of the per-node SDF gradient) at the given world points. Returns an array
+        of shape (n_points, 3) with NaN where the obstacle is disabled.
+        """
+        pts = np.asarray(points, dtype=gs.np_float).reshape(-1, 3)
+        out = np.full((len(pts), 3), np.nan, dtype=gs.np_float)
+        self._kernel_query_sdfo_normal(pts, out)
+        return out
+
+    @qd.kernel
+    def _kernel_query_sdfo_normal(self, pts: qd.types.ndarray(), out: qd.types.ndarray()):
+        for i in range(pts.shape[0]):
+            p = qd.Vector([pts[i, 0], pts[i, 1], pts[i, 2]])
+            if self.sdfo_enabled[0] == 1:
+                n = self._func_sdfo_normal(p, 0)
+                for a in qd.static(range(3)):
+                    out[i, a] = n[a]
 
     @qd.kernel
     def _kernel_query_sdfo(self, pts: qd.types.ndarray(), out: qd.types.ndarray()):
@@ -804,14 +844,30 @@ class DEMSolver(Solver):
 
     @qd.func
     def _func_sdfo_normal(self, pos, i_b: qd.i32):
-        # inward normal of the mesh-SDF obstacle by central differences (same FD convention as the
-        # tilt box / sieve normals)
-        eps = gs.qd_float(1e-5)
-        n = qd.Vector.zero(gs.qd_float, 3)
+        # outward normal of the mesh-SDF obstacle: trilinear interpolation of the per-node SDF
+        # gradient (smooth across cell boundaries, unlike FD of the value field)
+        rel = pos - self.sdfo_pos[i_b]
+        q = self.sdfo_quat[i_b]
+        q_conj = qd.Vector([q[0], -q[1], -q[2], -q[3]])
+        p = qd_transform_by_quat_fast(rel, q_conj)
+        g = qd.Vector.zero(gs.qd_float, 3)
         for a in qd.static(range(3)):
-            dp = qd.Vector.zero(gs.qd_float, 3)
-            dp[a] = eps
-            n[a] = self._func_sdfo_sdf(pos + dp, i_b) - self._func_sdfo_sdf(pos - dp, i_b)
+            ga = (p[a] - self.sdfo_origin[i_b][a]) * self.sdfo_inv_cell[i_b][a] - 0.5
+            gmax = gs.qd_float(self.sdfo_dims[a] - 1) - 1e-4
+            g[a] = min(max(ga, 0.0), gmax)
+        x0 = int(qd.floor(g[0]))
+        y0 = int(qd.floor(g[1]))
+        z0 = int(qd.floor(g[2]))
+        fx = g[0] - x0
+        fy = g[1] - y0
+        fz = g[2] - z0
+        ny = self.sdfo_dims[1]
+        nz = self.sdfo_dims[2]
+        n = qd.Vector.zero(gs.qd_float, 3)
+        for i, j, k in qd.static(qd.ndrange(2, 2, 2)):
+            w = (fx if i == 1 else 1.0 - fx) * (fy if j == 1 else 1.0 - fy) * (fz if k == 1 else 1.0 - fz)
+            idx = (x0 + i) * (ny * nz) + (y0 + j) * nz + (z0 + k)
+            n = n + w * self.sdfo_grad[idx]
         norm = n.norm()
         if norm > gs.EPS:
             n = n / norm

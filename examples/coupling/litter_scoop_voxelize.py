@@ -47,6 +47,49 @@ def main():
     sdf = sdf.reshape(dims).astype(np.float32)
     print(f"igl.signed_distance: {time.time() - t0:.0f}s, sdf range [{sdf.min():.4f}, {sdf.max():.4f}]", flush=True)
 
+    # fill the slots in the PHYSICS SDF (the visual mesh keeps them): our grains (6.25 mm) are half
+    # the slot width — they jam into the slots, sift through, then get crushed under the pan and
+    # erupt. Union in an analytic thin plate covering the pan floor slab (z ~0.008..0.018).
+    PLATE_X = (-0.145, 0.140)
+    PLATE_Y = (-0.110, 0.110)
+    PLATE_Z = (0.008, 0.018)
+    # exact box SDF: outside distance + inside (max of signed face distances)
+    dx = np.maximum(PLATE_X[0] - pts[:, 0], pts[:, 0] - PLATE_X[1])
+    dy = np.maximum(PLATE_Y[0] - pts[:, 1], pts[:, 1] - PLATE_Y[1])
+    dz = np.maximum(PLATE_Z[0] - pts[:, 2], pts[:, 2] - PLATE_Z[1])
+    plate = np.sqrt(np.maximum(dx, 0)**2 + np.maximum(dy, 0)**2 + np.maximum(dz, 0)**2) + np.minimum(np.maximum(dx, np.maximum(dy, dz)), 0.0)
+    sdf = np.minimum(sdf, plate.reshape(dims).astype(np.float32))
+    print(f"slots filled with a plate {PLATE_X}x{PLATE_Y}x{PLATE_Z}; sdf range now [{sdf.min():.4f}, {sdf.max():.4f}]", flush=True)
+
+    # Topological sign correction: the pseudo-normal sign is unreliable on this asset — it paints a
+    # wrong-sign NEGATIVE halo around the handle in open space (~56k cells, reachable from the grid
+    # boundary), which violently ejects grains that touch it. The magnitude from igl is fine, so fix
+    # the sign topologically: cells with |phi| <= 1 cell are barriers; flood fill the rest from the
+    # grid boundary — reachable => positive (outside), unreachable => negative (inside solid);
+    # barrier cells inherit the sign of their nearest non-barrier cell.
+    from scipy import ndimage
+
+    free = np.abs(sdf) > 1.0 * CELL
+    lab, _ = ndimage.label(free)
+    bnd = set(
+        np.unique(
+            np.concatenate(
+                [
+                    lab[0, :, :].ravel(), lab[-1, :, :].ravel(),
+                    lab[:, 0, :].ravel(), lab[:, -1, :].ravel(),
+                    lab[:, :, 0].ravel(), lab[:, :, -1].ravel(),
+                ]
+            )
+        )
+    )
+    bnd.discard(0)
+    outside_free = np.isin(lab, list(bnd))
+    ind = ndimage.distance_transform_edt(~free, return_distances=False, return_indices=True)
+    outside = outside_free[tuple(ind)]
+    n_flip = int(np.count_nonzero((sdf < 0) & outside) + np.count_nonzero((sdf > 0) & ~outside))
+    sdf = np.where(outside, np.abs(sdf), -np.abs(sdf)).astype(np.float32)
+    print(f"flood-fill sign fix: {n_flip} cells flipped; sdf range now [{sdf.min():.4f}, {sdf.max():.4f}]", flush=True)
+
     np.savez_compressed(
         OUT_NPZ,
         sdf_val=sdf,
