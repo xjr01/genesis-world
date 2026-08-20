@@ -9,6 +9,7 @@ grid nodes are at origin + (i + 0.5) * cell, matching the kernel's -0.5 offset c
 """
 
 import os
+import sys
 import time
 
 import numpy as np
@@ -18,6 +19,14 @@ import igl
 HERE = os.path.dirname(os.path.abspath(__file__))
 MESH_GLB = os.path.join(HERE, "assets", "litter_scoop_aligned.glb")
 OUT_NPZ = os.path.join(HERE, "assets", "litter_scoop_sdf.npz")
+
+# argv[1] = "noplate": keep the true slotted pan floor (no analytic plate fill) and write to
+# litter_scoop_sdf_slots.npz — the grains (6.25 mm) may then sieve through the slots like real
+# cat litter (which is what a litter scoop is for), instead of resting on an invisible plate
+# ~5 mm above the visual floor and poking through the slots.
+NO_PLATE = len(sys.argv) > 1 and sys.argv[1] == "noplate"
+if NO_PLATE:
+    OUT_NPZ = os.path.join(HERE, "assets", "litter_scoop_sdf_slots.npz")
 
 PARTICLE_RADIUS = 3.125e-3
 CELL = 1.5e-3  # ~half particle radius: resolves the pan walls (3-4 mm)
@@ -50,16 +59,19 @@ def main():
     # fill the slots in the PHYSICS SDF (the visual mesh keeps them): our grains (6.25 mm) are half
     # the slot width — they jam into the slots, sift through, then get crushed under the pan and
     # erupt. Union in an analytic thin plate covering the pan floor slab (z ~0.008..0.018).
-    PLATE_X = (-0.145, 0.140)
-    PLATE_Y = (-0.110, 0.110)
-    PLATE_Z = (0.008, 0.018)
-    # exact box SDF: outside distance + inside (max of signed face distances)
-    dx = np.maximum(PLATE_X[0] - pts[:, 0], pts[:, 0] - PLATE_X[1])
-    dy = np.maximum(PLATE_Y[0] - pts[:, 1], pts[:, 1] - PLATE_Y[1])
-    dz = np.maximum(PLATE_Z[0] - pts[:, 2], pts[:, 2] - PLATE_Z[1])
-    plate = np.sqrt(np.maximum(dx, 0)**2 + np.maximum(dy, 0)**2 + np.maximum(dz, 0)**2) + np.minimum(np.maximum(dx, np.maximum(dy, dz)), 0.0)
-    sdf = np.minimum(sdf, plate.reshape(dims).astype(np.float32))
-    print(f"slots filled with a plate {PLATE_X}x{PLATE_Y}x{PLATE_Z}; sdf range now [{sdf.min():.4f}, {sdf.max():.4f}]", flush=True)
+    if not NO_PLATE:
+        PLATE_X = (-0.145, 0.140)
+        PLATE_Y = (-0.110, 0.110)
+        PLATE_Z = (0.008, 0.018)
+        # exact box SDF: outside distance + inside (max of signed face distances)
+        dx = np.maximum(PLATE_X[0] - pts[:, 0], pts[:, 0] - PLATE_X[1])
+        dy = np.maximum(PLATE_Y[0] - pts[:, 1], pts[:, 1] - PLATE_Y[1])
+        dz = np.maximum(PLATE_Z[0] - pts[:, 2], pts[:, 2] - PLATE_Z[1])
+        plate = np.sqrt(np.maximum(dx, 0)**2 + np.maximum(dy, 0)**2 + np.maximum(dz, 0)**2) + np.minimum(np.maximum(dx, np.maximum(dy, dz)), 0.0)
+        sdf = np.minimum(sdf, plate.reshape(dims).astype(np.float32))
+        print(f"slots filled with a plate {PLATE_X}x{PLATE_Y}x{PLATE_Z}; sdf range now [{sdf.min():.4f}, {sdf.max():.4f}]", flush=True)
+    else:
+        print("noplate: keeping the true slotted pan floor", flush=True)
 
     # Topological sign correction: the pseudo-normal sign is unreliable on this asset — it paints a
     # wrong-sign NEGATIVE halo around the handle in open space (~56k cells, reachable from the grid

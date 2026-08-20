@@ -14,7 +14,7 @@ Outputs (separate from the tilt-box run):
 Wet-sand scoop demo: drip water onto sand, then descend, insert, pivot up, and lift the wet clump.
 
 Scene: a walled box (interior = DEM domain bounds, x in [-0.35, 0.35], y in [-0.30, 0.30]) with a
-sand layer (0.68 x 0.58 x 0.16 m, fcc) covering its floor; the four walls are kinematic
+sand layer (0.68 x 0.58 x 0.20 m, fcc) covering its floor; the four walls are kinematic
 visualization-only entities. At t = 0 a water droplet (radius 0.04 m) is released at (0.02, 0)
 right at the sand surface (z = 0.205, contact release) -- centered over the horizontal blade's
 span after the pivot, clear of the vertical descent path -- and is absorbed during the 5 s settle
@@ -24,7 +24,7 @@ the capillary (liquid-bridge) forces.
 The shovel (0.3 x 0.24 x 0.02 m blade + 0.3 m handle, one unioned SDF obstacle, blade at 40 deg)
 then:
   1. descends vertically (vel = (0, 0, -0.12) m/s) for 0.92 s until the leading tip touches the
-     sand surface at (-0.085, 0.163),
+     sand surface at (-0.085, 0.201),
   2. inserts diagonally along the blade direction (vel = (0.115, 0, -0.0964) m/s, i.e. 40 deg
      down) for 1.6 s, ending with the tip at (0.099, 0.008), nearly grazing the floor,
      underneath the wet clump,
@@ -72,19 +72,21 @@ VIDEO_PATH = os.path.join(EXPERIMENTS_DIR, "videos", "phase5_shovel_wet_sdf.mp4"
 VIDEO_WET_PATH = os.path.join(EXPERIMENTS_DIR, "videos", "phase5_shovel_wet_sdf_sandwet.mp4")
 WET_RAW_DIR = os.path.join(FRAMES_DIR, "phase5_shovel_wet_sdf_sandwet_raw")
 REC_DIR = os.path.join(EXPERIMENTS_DIR, "recordings", "phase5_shovel_wet_sdf")
-SDF_NPZ = os.path.join(EXPERIMENTS_DIR, "assets", "litter_scoop_sdf.npz")
+SDF_NPZ = os.path.join(
+    EXPERIMENTS_DIR, "assets", sys.argv[2] if len(sys.argv) > 2 else "litter_scoop_sdf_slots.npz"
+)  # default: true slotted pan floor (exact mesh geometry); argv[2] litter_scoop_sdf.npz = plate-filled variant
 
 MAX_STEPS = int(sys.argv[1]) if len(sys.argv) > 1 else None  # debug: cap the total steps
 
 DT = 1.0 / 60.0
 N_SETTLE_STEPS = 300  # 5 s: droplet falls and is absorbed
-N_DESCEND_STEPS = 55  # 0.92 s
+N_DESCEND_STEPS = 36  # 0.60 s: tip descends 0.072 m until it touches the deeper bed's surface (0.201)
 N_INSERT_STEPS = 96  # 1.6 s
 N_ROTATE_STEPS = 105  # 1.75 s
 N_LIFT_STEPS = 150  # 2.5 s
 N_HOLD_STEPS = 60  # 1 s
 DESCEND_VEL = (0.0, 0.0, -0.12)  # straight down until the leading tip touches the sand surface
-# (tip (-0.085, 0.273) -> (-0.085, 0.163))
+# (tip (-0.085, 0.273) -> (-0.085, 0.201), surface of the 0.20 m bed)
 INSERT_VEL = (0.115, 0.0, -0.0964)  # 0.15 m/s along the 40 deg blade direction: the tip slides
 # into the sand to (0.099, 0.008), nearly grazing the floor, underneath the wet clump
 ROTATE_VEL = (0.0205, 0.0, 0.0563)  # trailing-edge-pivot emulation: v_center = -omega x r_pivot
@@ -99,7 +101,7 @@ PARTICLE_RADIUS = 3.125e-3  # sand particle diameter 6.25 mm = 0.8 / 128, matchi
 BOX_LOWER = (-0.35, -0.30, 0.0)
 BOX_UPPER = (0.35, 0.30, 0.80)
 WALL_THICK = 0.01
-WALL_HEIGHT = 0.18
+WALL_HEIGHT = 0.24  # taller than the 0.20 m sand bed
 
 # blade box matched to the litter-scoop pan (objaverse 'Litter scoop/貓砂鏟'):
 # pan depth 0.30 m along x, pan width 0.234 m along y
@@ -110,8 +112,7 @@ HANDLE_LEN = 0.3
 HANDLE_HALF_THICK = 0.015
 HANDLE_ANGLE = math.radians(40.0)
 
-DROPLET_POS = (0.02, 0.0, 0.205)  # contact release at the sand surface (user-selected over the
-# z = 0.55 falling release: same drag coefficient infiltrates deeper and spreads less)
+DROPLET_POS = (0.02, 0.0, 0.245)  # contact release at the (deeper, 0.20 m) sand surface
 DROPLET_RADIUS = 0.04
 
 # 0.5 was tried and is marginally unstable at this fine particle size (NaN in the full run, 10x
@@ -172,6 +173,9 @@ def main():
 
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(dt=DT, substeps=1, gravity=(0.0, 0.0, -9.8)),
+        # user request (2026-08-20): deeper sand bed (0.20 m) so the scoop no longer grazes the
+        # domain floor at the insert end (tip ends ~0.047 m above it, ~7 grain layers) --
+        # the tilt-box-era trajectory pinched grains against the floor and erupted
         dem_options=gs.options.DEMOptions(
             particle_size=2.0 * PARTICLE_RADIUS,
             ddt_safety=0.5,
@@ -224,8 +228,8 @@ def main():
     )
     sand = scene.add_entity(
         morph=gs.morphs.Box(
-            pos=(0.0, 0.0, 0.081),
-            size=(0.68, 0.58, 0.16),
+            pos=(0.0, 0.0, 0.1005),
+            size=(0.68, 0.58, 0.20),
         ),
         material=gs.materials.DEM.Sand(sampler="fcc", rho=2.5, max_ratio=MAX_RATIO),
         surface=gs.surfaces.Default(color=(0.87, 0.72, 0.53)),
