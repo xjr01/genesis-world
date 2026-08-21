@@ -1,0 +1,271 @@
+# PBSTF Surface Tension Demo Configuration
+
+This document describes the `teapot`, `sweep`, and `mop` cases in
+[`pbstf_surface_tension.py`](pbstf_surface_tension.py). Position-based surface tension flow (PBSTF) uses the Y axis as
+the vertical axis in these three cases, so gravity is `(0.0, -9.8, 0.0)`. Positions are in world space unless a field
+is explicitly described as collider-local. Quaternions use W-X-Y-Z order.
+
+## Running the cases
+
+Run from the repository root:
+
+```shell
+python examples/teapot/pbstf_surface_tension.py --case teapot --vis
+python examples/teapot/pbstf_surface_tension.py --case sweep --vis
+python examples/teapot/pbstf_surface_tension.py --case mop --vis
+```
+
+The command-line options are:
+
+| Option | Meaning |
+| --- | --- |
+| `--case` | Selects a case. This document covers `teapot`, `sweep`, and `mop`. |
+| `--scale` | Sets particle radius to `1 / scale` and particle diameter to `2 / scale`. |
+| `--dt` | Overrides the simulation step duration in seconds. |
+| `--steps` | Overrides the number of simulation steps. |
+| `-v`, `--vis` | Opens the viewer. |
+| `--record` | Opens the viewer, records it, and prompts for an output path when the run ends. |
+
+Higher `scale` gives smaller particles and more spatial detail, with particle count, memory, and runtime generally
+growing approximately cubically. The `teapot` case requires `scale >= 20` so its initial liquid sampling remains dense
+enough. The motion schedules use simulated seconds, so changing `dt` changes how many steps each motion phase takes.
+Changing `steps` changes the total simulated duration without changing the schedule itself.
+
+`--scale`, `--dt`, and `--steps` are the only command-line parameter overrides. Geometry, material, trajectory, and
+absorption values are configured in `case_settings()` and `_case_liquid_material()`. Teapot geometry and manipulator
+values are configured in [`fluid_helper.py`](fluid_helper.py).
+
+## Shared solver defaults
+
+`build_scene()` converts `scale` to `particle_size = 2 / scale` and uses a topology rebuild interval of 10 steps.
+
+| Setting | `teapot` | `sweep` and `mop` |
+| --- | ---: | ---: |
+| `scale` | `20` | `20` |
+| `particle_size` | `0.1` | `0.1` |
+| `dt` | `0.01` | `0.01` |
+| gravity | `(0.0, -9.8, 0.0)` | `(0.0, -9.8, 0.0)` |
+| lower bound | `(-20.0, -6.04186, -20.0)` | `(-6.0, -1.0, -4.0)` |
+| upper bound | `(20.0, 15.0, 20.0)` | `(6.0, 4.0, 4.0)` |
+| solver iterations | `5` | `10` |
+| surface-neighbor capacity | `128` | `128` |
+| local-mesh-neighbor capacity | `64` | `64` |
+| principal component analysis normals | disabled | disabled |
+| default steps | `10000` | `1000` |
+| default simulated duration | `100 s` | `10 s` |
+
+The liquid material parameters are:
+
+| Setting | `teapot` | `sweep` and `mop` |
+| --- | ---: | ---: |
+| sampler | `regular` | `regular` |
+| rest density | `1000.0` | `1000.0` |
+| density compliance | `150.0` | `150.0` |
+| surface-tension compliance | `3.0` | `1.0` |
+| surface-distance compliance | `40.0` | `40.0` |
+| interior-distance compliance | `180.0` | `180.0` |
+| surface viscosity | `0.2` | `0.5` |
+| interior viscosity | `0.05` | `0.5` |
+| collider adhesion and friction | enabled | enabled |
+| collider-adhesion compliance | `20.0` | `20.0` |
+| collider friction | `0.01` | `0.5` |
+
+Compliance values trade enforcement strength for softness: lower values enforce the corresponding condition more
+strongly. Higher viscosity damps relative particle motion more strongly. Collider friction only affects unabsorbed
+particles because absorbed particles follow the absorbent collider directly.
+
+## Teapot case
+
+The `teapot` case fills a transformed Utah teapot mesh with liquid, represents the teapot wall with a moving mesh
+static collider, and updates a KUKA arm and Shadow Hand to follow the authored grasp pose.
+
+### Teapot geometry and liquid seed
+
+These values come from `create_teapot_settings()` in `fluid_helper.py`:
+
+| Field | Default | Effect |
+| --- | --- | --- |
+| `asset` | `meshes/utah_teapot_modified.obj` | Visual mesh, cavity sampling mesh, and collider source. |
+| `mesh_scale` | `2.25` | Uniformly scales the teapot and its local grasp position. |
+| `offset` | `(0.0, -3.79, 0.0)` | Initial world position. |
+| `quat` | `(sqrt(0.5), 0.0, -sqrt(0.5), 0.0)` | Initial world orientation. |
+| collider `sdf_res` | `150` | Signed distance field resolution for the teapot wall. |
+| `particles_seed` | `(0.0, -3.15, 0.0)` | Seed point used to find the interior liquid cavity. |
+| `particles_max_height` | `0.7` | Highest world-Y level filled with liquid. |
+| `particles_vel` | `(0.0, 0.0, 0.0)` | Initial liquid velocity. |
+
+The cavity sampler keeps half a particle diameter of clearance from the wall. Raising `particles_max_height` adds
+liquid if the seed remains connected to the desired cavity. Moving `particles_seed` outside that connected cavity can
+select the wrong region or produce no useful sample.
+
+The mesh collider is collider index 0. `update_teapot_case()` moves this collider and the transparent visual mesh to
+the pose from `teapot_pose()`. The arm pose is recomputed with inverse kinematics from the same teapot-local grasp.
+
+### Teapot motion schedule
+
+The teapot rotates around the world-X line through `turning_axis_pos`. That point is derived from the local grasp
+position, `mesh_scale`, `offset`, and `quat`.
+
+| Simulated time | Motion |
+| --- | --- |
+| `0.0` to `18.0 s` | Rotate at `1.5 deg/s` to `27 deg`. |
+| `18.0` to `28.0 s` | Hold at `27 deg`. |
+| `28.0` to `29.6 s` | Rotate back at `5 deg/s` to `19 deg`. |
+| after `29.6 s` | Hold at `19 deg`. |
+
+Edit `turning_rate_initial`, `stop_angle_initial`, `hold_end`, `turning_rate_final`, and `stop_angle_final` in
+`teapot_pose()` to change this schedule. Keep the returned linear and angular velocities consistent with the pose so
+the moving collider supplies the intended wall velocity to the fluid.
+
+### Manipulator parameters
+
+`TeapotManipulatorSettings` in `fluid_helper.py` groups the following controls:
+
+- KUKA asset, scale, base pose, end-effector link, and initial joint positions.
+- Shadow Hand asset, scale, mount transform, and initial joint positions.
+- Teapot-local `grasp_pos` and `grasp_quat`.
+- End-effector `tool_center_point` used by inverse kinematics.
+- Viewer `camera_pos` and `camera_lookat`.
+
+Use [`pbstf_teapot_grasp_editor.py`](pbstf_teapot_grasp_editor.py) when authoring or checking the grasp transform. The
+arm and hand have collision disabled in this demo; the PBSTF mesh static collider is the fluid boundary.
+
+## Sweep and mop cases
+
+`sweep` and `mop` intentionally use the same table, liquid region, moving-box geometry, and trajectory. Their only
+behavioral difference is the moving collider type:
+
+- `sweep` uses `PBSTFBoxStaticColliderOptions`, so the box remains impermeable and pushes the water.
+- `mop` uses `PBSTFAbsorbentBoxStaticColliderOptions`, so available voxels capture contacting particles.
+
+Both cases use these `WipeSettings` values:
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `collider_idx` | `1` | Moving box index; the table is collider index 0. |
+| `collider_lower` | `(-0.6, 0.02, -1.2)` | Moving box local lower corner. |
+| `collider_upper` | `(0.6, 0.85, 1.2)` | Moving box local upper corner. |
+| `table_pos` | `(0.0, -0.25, 0.0)` | Table world position. |
+| `table_size` | `(12.0, 0.5, 8.0)` | Table dimensions. Its top surface is at world Y = 0. |
+| `liquid_lower` | `(-2.5, 0.05, -0.7)` | Initial liquid lower corner. |
+| `liquid_upper` | `(-0.5, 0.35, 0.7)` | Initial liquid upper corner. |
+| `start_pos` | `(-3.5, 0.0, 0.0)` | Moving box position before the stroke. |
+| `end_pos` | `(3.5, 0.0, 0.0)` | Moving box position after the stroke. |
+| `quat` | `(1.0, 0.0, 0.0, 0.0)` | Moving box and table orientation. |
+| `settle_time` | `1.0 s` | Time allowed for the initial liquid to settle. |
+| `wipe_time` | `5.0 s` | Duration of the linear wiping stroke. |
+
+`wipe_pose()` keeps the box at `start_pos` through `settle_time`, linearly interpolates to `end_pos` during
+`wipe_time`, and keeps it at `end_pos` afterward. With the default `dt`, settling lasts 100 steps and the stroke ends
+at step 600. `update_wipe_case()` applies the pose to collider index 1 before each simulation step.
+
+The viewer draws the moving box with opacity `0.35`, which keeps captured mop particles visible inside it.
+
+## Configuring the absorbent box
+
+The default mop collider is configured in `case_settings()` as follows:
+
+```python
+wipe_collider = gs.options.PBSTFAbsorbentBoxStaticColliderOptions(
+    pos=wipe.start_pos,
+    quat=wipe.quat,
+    lower=wipe.collider_lower,
+    upper=wipe.collider_upper,
+    absorption_rate=8.0,
+    absorption_capacity_fraction=0.25,
+)
+```
+
+`lower` and `upper` define the box in collider-local coordinates. `pos` and `quat` place that local box in world
+space. The two absorption fields control different parts of the behavior.
+
+### `absorption_rate`
+
+`absorption_rate` is a positive exponential rate in inverse seconds. For each simulation substep:
+
+```text
+beta = 1 - exp(-absorption_rate * dt)
+progress_new = progress + beta * (1 - progress)
+local_pos_new = local_pos + beta * (target_local_pos - local_pos)
+```
+
+The time constant is `1 / absorption_rate`. At the default `8.0 s^-1`, the time constant is `0.125 s`: a captured
+particle completes about 63 percent of its inward path in `0.125 s` and about 98 percent in `0.5 s`.
+
+- Raise the rate for faster pickup and a more abrupt inward trajectory.
+- Lower the rate for slower pickup and a smoother inward trajectory.
+- The value must be greater than zero.
+
+### `absorption_capacity_fraction`
+
+`absorption_capacity_fraction` is the fraction of the box volume available for liquid at rest. It is greater than zero
+and at most one. Total capacity is converted to an integer particle count:
+
+```text
+particle_rest_volume = particle_mass / liquid_rest_density
+total_capacity = floor(
+    absorption_capacity_fraction * box_volume / particle_rest_volume
+)
+```
+
+The default box has volume `1.2 * 0.83 * 2.4 = 2.3904`, so a fraction of `0.25` reserves `0.5976` units of rest-liquid
+volume before conversion to particle slots. The exact particle count depends on PBSTF mass calibration and particle
+resolution.
+
+- Raise the fraction to absorb more liquid and delay saturation.
+- Lower the fraction to saturate sooner and make the box push additional water sooner.
+- Use a normal `PBSTFBoxStaticColliderOptions` when no absorption is desired, as the `sweep` case does.
+
+### Voxel layout and saturation
+
+The box is divided automatically using the PBSTF support radius:
+
+```text
+grid_res = ceil((upper - lower) / support_radius)
+```
+
+At the default `scale=20`, `particle_size=0.1` and `support_radius=0.3`. The default mop box therefore uses a
+`(4, 3, 8)` grid. Integer slot counts are distributed uniformly over these 96 voxels while preserving the exact total
+capacity.
+
+When a particle contacts the box, the contact normal chooses an entering face. The solver searches inward along that
+voxel column and reserves the first available slot. Once the local column is full, the same contact receives ordinary
+box collision behavior and the box pushes that particle. This makes saturation local rather than global.
+
+Captured particles remain active and visible. They follow box translation and rotation while converging to their
+voxel targets, and they leave density, surface, distance, viscosity, adhesion, and friction processing. This simplified
+model has no voxel-to-voxel diffusion and no automatic release. Explicitly setting a captured particle's position,
+velocity, or active state releases its absorption binding. Scene state save and restore includes all bindings, progress,
+local targets, and dynamic collider poses; wetness is rebuilt from the restored binding progress.
+
+Changing `scale` also changes `particle_size`, support radius, voxel count, calibrated particle volume, and therefore
+the integer capacity distribution. Retune `absorption_capacity_fraction` after a large resolution change. The rate is
+defined in seconds and keeps the same continuous-time meaning when `dt` changes, although a smaller `dt` resolves
+contacts and motion more finely.
+
+### Reading wetness
+
+Wetness is available from the solver after the scene is built:
+
+```python
+from examples.teapot.pbstf_surface_tension import CASE_MOP, build_scene, case_settings, get_wipe_settings
+
+settings = case_settings(CASE_MOP)
+wipe = get_wipe_settings(settings)
+scene, _ = build_scene(case=CASE_MOP)
+
+wetness = scene.pbstf_solver.get_static_collider_wetness(
+    collider_idx=wipe.collider_idx,
+)
+```
+
+Every value lies in `[0, 1]` and equals the summed capture progress divided by that voxel's slot capacity, clamped to
+the valid range. Axes follow local X, Y, and Z from `lower` to `upper`.
+
+- A single-environment scene returns `[nx, ny, nz]`.
+- A batched scene returns `[B, nx, ny, nz]`.
+- Pass `envs_idx` to request selected batched environments.
+- Calling the getter for the table or a normal sweep box raises an error because those colliders have no wetness.
+
+For live inspection, call `get_static_collider_wetness()` after `scene.step()`. The returned tensor is a fresh value and
+can be used for visualization or logging without modifying the solver's internal wetness field.
