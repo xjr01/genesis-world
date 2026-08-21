@@ -151,7 +151,7 @@ def main():
     )
     cam = scene.add_camera(
         res=(1280, 720),
-        pos=(1.05, -1.05, 0.75),
+        pos=(1.05, -1.05, 1.00),  # user request (2026-08-21): raise the viewpoint (was z=0.75)
         lookat=(0.0, 0.0, 0.18),
         fov=45,
     )
@@ -170,6 +170,11 @@ def main():
         slices.append((ent.particle_start, ent.particle_end))
 
     raw_dir = os.path.join(FRAMES_DIR, "phase8d_sandwet_native_raw")
+    # wipe stale frames: ffmpeg globs frame_*.png, so leftovers from a longer earlier run
+    # would be appended to the video (the 2026-08-21 "wrong last frames" bug)
+    if os.path.isdir(raw_dir):
+        for stale in os.listdir(raw_dir):
+            os.remove(os.path.join(raw_dir, stale))
     os.makedirs(raw_dir, exist_ok=True)
 
     keyframe_idx = 0

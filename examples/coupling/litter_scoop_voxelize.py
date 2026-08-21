@@ -28,8 +28,15 @@ NO_PLATE = len(sys.argv) > 1 and sys.argv[1] == "noplate"
 if NO_PLATE:
     OUT_NPZ = os.path.join(HERE, "assets", "litter_scoop_sdf_slots.npz")
 
-PARTICLE_RADIUS = 3.125e-3
-CELL = 1.5e-3  # ~half particle radius: resolves the pan walls (3-4 mm)
+# argv[2] = uniform scale factor for the mesh (Phase 9: 0.5 for the half-size Franka scene).
+# Everything derived (cell, pad, output name) scales with it; the flood-fill sign fix and the
+# kernel-side sampling are scale-agnostic (thresholds are in CELL units).
+SCALE = float(sys.argv[2]) if len(sys.argv) > 2 else 1.0
+if SCALE != 1.0:
+    OUT_NPZ = OUT_NPZ.replace(".npz", f"_s{SCALE:g}.npz")
+
+PARTICLE_RADIUS = 3.125e-3 * SCALE
+CELL = 1.5e-3 * SCALE  # ~half particle radius: resolves the pan walls (3-4 mm)
 PAD = 2.0 * PARTICLE_RADIUS
 
 
@@ -37,9 +44,9 @@ def main():
     m = trimesh.load(MESH_GLB, force="mesh")
     # glTF Y-up file -> blade frame (z-up): rotate +90 deg about x
     m.apply_transform(trimesh.transformations.rotation_matrix(np.pi / 2.0, [1.0, 0.0, 0.0]))
-    V = np.asarray(m.vertices, dtype=np.float64)
+    V = np.asarray(m.vertices, dtype=np.float64) * SCALE
     F = np.asarray(m.faces)
-    lo, hi = m.bounds
+    lo, hi = m.bounds * SCALE
     print(f"mesh bounds (blade frame): {np.round(lo, 4).tolist()} .. {np.round(hi, 4).tolist()}", flush=True)
 
     origin = lo - PAD
