@@ -841,20 +841,26 @@ PBSTFStaticColliderOptionsType = Annotated[
 
 
 class IPBSTFOptions(Options):
-    """Options for the implicit position-based surface-tension fluid (IPBSTF) solver's density energy.
+    """Options for the implicit position-based surface-tension fluid (IPBSTF) solver.
 
     ``particle_size`` is the particle diameter. The cubic-spline support radius is ``2 * particle_size``: large
     enough to capture the full neighbor shell (including body-diagonal neighbors) for an isotropic density estimate,
     at the cost of more neighbors and heavier local-system assembly than a smaller ratio. The hash-grid cell defaults
     to the support radius, the minimum that keeps every kernel neighbor inside the 3x3x3 cell stencil.
 
-    ``alpha`` weights inertia against the density energy. Larger values keep particles closer to their unconstrained
-    predictions and produce a softer density response; smaller values enforce incompressibility more strongly at the
-    cost of larger Newton updates. ``is_artificial_damping_enabled`` removes excess kinetic energy from under-converged
-    stiff solves so the fluid can settle, at the cost of higher per-step compute and less persistent small-scale motion.
+    ``alpha`` scales inertia and surface energy together against the density energy. Larger values keep particles
+    closer to their unconstrained predictions and produce a softer density response while preserving surface tension
+    relative to inertia; smaller values enforce incompressibility more strongly at the cost of larger Newton updates.
+    ``is_artificial_damping_enabled`` removes excess kinetic energy from under-converged stiff solves so the fluid can
+    settle, at the cost of higher per-step compute and less persistent small-scale motion.
     ``hessian_determinant_epsilon`` skips local updates with smaller Hessian determinants. Larger values reject more
     numerically weak solves but may suppress valid updates; smaller values preserve more updates with less protection
     from roundoff amplification. ``max_solver_iterations`` controls convergence work without changing that energy.
+
+    ``max_surface_neighbors`` bounds projected candidates used to construct each local surface mesh. A higher value
+    preserves topology in crowded regions at the cost of scene memory and topology-rebuild time.
+    ``max_localmesh_neighbors`` bounds the final one-ring vertices. A higher value admits more irregular one-rings at
+    the cost of constraint memory and time. Its default is the smaller of 64 and ``max_surface_neighbors``.
     """
 
     dt: PositiveFloat | None = None
@@ -865,6 +871,8 @@ class IPBSTFOptions(Options):
     hessian_determinant_epsilon: PositiveFloat = 1e-7
     particle_size: PositiveFloat = 0.02
     max_solver_iterations: PositiveInt = 10
+    max_surface_neighbors: PositiveInt = 128
+    max_localmesh_neighbors: PositiveInt | None = None
     static_colliders: list[PBSTFStaticColliderOptionsType] = Field(default_factory=list)
 
     hash_grid_res: Vec3FType | None = None
@@ -882,11 +890,19 @@ class IPBSTFOptions(Options):
         particle_size = data.get("particle_size", 0.02)
         if data.get("hash_grid_cell_size") is None:
             data["hash_grid_cell_size"] = 2.0 * particle_size
+        if data.get("max_localmesh_neighbors") is None:
+            data["max_localmesh_neighbors"] = min(data.get("max_surface_neighbors", 128), 64)
         return data
 
     def model_post_init(self, context: Any) -> None:
         if not np.all(np.array(self.upper_bound) > np.array(self.lower_bound)):
             gs.raise_exception("Invalid pair of upper_bound and lower_bound.")
+        if self.max_surface_neighbors < 3:
+            gs.raise_exception("`max_surface_neighbors` must be at least 3.")
+        if self.max_localmesh_neighbors < 3:
+            gs.raise_exception("`max_localmesh_neighbors` must be at least 3.")
+        if self.max_localmesh_neighbors > self.max_surface_neighbors:
+            gs.raise_exception("`max_localmesh_neighbors` must be at most `max_surface_neighbors`.")
 
         self._support_radius = 2.0 * self.particle_size
         if self.hash_grid_cell_size < self._support_radius:

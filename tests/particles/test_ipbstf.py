@@ -119,6 +119,66 @@ def test_unilateral_density_energy_viscosity_and_artificial_damping(n_envs, is_a
 @pytest.mark.required
 @pytest.mark.parametrize("backend", [gs.cuda])
 @pytest.mark.parametrize("n_envs", [0, 2])
+def test_surface_tension_minimizes_local_mesh_area(n_envs, show_viewer):
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=0.01,
+            gravity=(0.0, 0.0, 0.0),
+        ),
+        ipbstf_options=gs.options.IPBSTFOptions(
+            alpha=0.01,
+            is_artificial_damping_enabled=False,
+            particle_size=0.1,
+            max_solver_iterations=1,
+            max_surface_neighbors=16,
+            max_localmesh_neighbors=12,
+            lower_bound=(-1.0, -1.0, -1.0),
+            upper_bound=(1.0, 1.0, 1.0),
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(1.8, 1.8, 1.4),
+            camera_lookat=(0.2, 0.0, 0.0),
+        ),
+        show_viewer=show_viewer,
+    )
+    liquid_material = gs.materials.IPBSTF.Liquid(
+        surface_tension=1000.0,
+    )
+    grid_coordinates = (-0.15, -0.05, 0.05, 0.15)
+    droplet = scene.add_entity(
+        morph=gs.morphs.Particles(
+            positions=tuple((x, y, z) for x in grid_coordinates for y in grid_coordinates for z in grid_coordinates),
+        ),
+        material=liquid_material,
+    )
+    under_connected = scene.add_entity(
+        morph=gs.morphs.Particles(
+            positions=((0.7, -0.05, 0.0), (0.7, 0.05, 0.0), (0.7, 0.0, 0.08)),
+        ),
+        material=liquid_material,
+    )
+    scene.build(n_envs=n_envs)
+
+    droplet_pos_initial = tensor_to_array(droplet.get_state().pos)
+    under_connected_pos_initial = tensor_to_array(under_connected.get_state().pos)
+    droplet_center_initial = droplet_pos_initial.mean(axis=1, keepdims=True)
+    droplet_radius_initial = np.linalg.norm(droplet_pos_initial - droplet_center_initial, axis=-1).mean(axis=1)
+
+    scene.step()
+
+    droplet_pos = tensor_to_array(droplet.get_state().pos)
+    droplet_center = droplet_pos.mean(axis=1, keepdims=True)
+    droplet_radius = np.linalg.norm(droplet_pos - droplet_center, axis=-1).mean(axis=1)
+    radial_contraction = droplet_radius_initial - droplet_radius
+    assert_allclose(droplet_center, droplet_center_initial, atol=1e-6)
+    assert (radial_contraction > 1e-3).all()
+    assert (radial_contraction < 3e-3).all()
+    assert_equal(tensor_to_array(under_connected.get_state().pos), under_connected_pos_initial)
+
+
+@pytest.mark.required
+@pytest.mark.parametrize("backend", [gs.cuda])
+@pytest.mark.parametrize("n_envs", [0, 2])
 def test_dam_break_spreads_under_gravity(n_envs, show_viewer):
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(

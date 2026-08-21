@@ -42,11 +42,12 @@ CASE_DOUBLE_DAM_BREAK = "double_dam_break"
 CASES = (*PBSTF_CASES, CASE_DAM_BREAK, CASE_DOUBLE_DAM_BREAK)
 
 
-def _liquid_material(case, viscosity=0.0):
+def _liquid_material(case, viscosity=0.0, surface_tension=0.0):
     sampler = "regular" if case in (CASE_TAP, CASE_TEAPOT, CASE_DAM_BREAK, CASE_DOUBLE_DAM_BREAK) else "staggered"
     return gs.materials.IPBSTF.Liquid(
         sampler=sampler,
         viscosity=viscosity,
+        surface_tension=surface_tension,
     )
 
 
@@ -58,6 +59,7 @@ def build_scene(
     alpha=0.0,
     is_artificial_damping_enabled=True,
     viscosity=0.0,
+    surface_tension=0.0,
     max_solver_iterations=10,
     show_boundary=True,
 ):
@@ -166,7 +168,7 @@ def build_scene(
                     lower=lower,
                     upper=upper,
                 ),
-                material=_liquid_material(case, viscosity),
+                material=_liquid_material(case, viscosity, surface_tension),
             )
             for lower, upper in liquid_bounds
         ]
@@ -235,7 +237,7 @@ def build_scene(
         ),
         show_viewer=show_viewer,
     )
-    material_factory = functools.partial(_liquid_material, viscosity=viscosity)
+    material_factory = functools.partial(_liquid_material, viscosity=viscosity, surface_tension=surface_tension)
     entities_and_velocities = add_case_entities(scene, case, particle_size, settings, material_factory)
     scene.build()
     for entity, velocity in entities_and_velocities:
@@ -255,7 +257,7 @@ def main():
     parser.add_argument("--scale", type=int, default=None, help="Particle scale (radius = 1 / scale)")
     parser.add_argument("--dt", type=float, default=None, help="Override the case's default time step")
     parser.add_argument("--steps", type=int, default=None, help="Override the case's default simulation horizon")
-    parser.add_argument("--alpha", type=float, default=0.0, help="Inertial energy weight")
+    parser.add_argument("--alpha", type=float, default=0.0, help="Shared inertia and surface-energy weight")
     parser.add_argument(
         "--damping",
         dest="is_artificial_damping_enabled",
@@ -268,6 +270,12 @@ def main():
         type=float,
         default=0.0,
         help="Neighborhood velocity blending coefficient; larger values damp relative liquid motion",
+    )
+    parser.add_argument(
+        "--surface-tension",
+        type=float,
+        default=0.0,
+        help="Surface-tension coefficient; effective area-energy weight is --alpha times this value",
     )
     parser.add_argument("--iterations", type=int, default=10, help="Local Newton iterations per step")
     parser.add_argument("-v", "--vis", dest="show_viewer", action="store_true", default=False)
@@ -295,6 +303,8 @@ def main():
         parser.error("--alpha must be non-negative")
     if args.viscosity < 0.0:
         parser.error("--viscosity must be non-negative")
+    if args.surface_tension < 0.0:
+        parser.error("--surface-tension must be non-negative")
     if args.iterations <= 0:
         parser.error("--iterations must be positive")
 
@@ -307,6 +317,7 @@ def main():
         alpha=args.alpha,
         is_artificial_damping_enabled=args.is_artificial_damping_enabled,
         viscosity=args.viscosity,
+        surface_tension=args.surface_tension,
         max_solver_iterations=args.iterations,
         show_boundary=args.show_boundary,
     )

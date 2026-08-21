@@ -7,6 +7,7 @@ import torch
 import quadrants as qd
 
 import genesis as gs
+import genesis.utils.geom as gu
 from genesis.engine.boundaries import (
     CubeBoundary,
     StaticCollider,
@@ -18,8 +19,7 @@ from genesis.engine.entities.ipbstf_entity import IPBSTFEntity
 from genesis.engine.solvers.base_solver import Solver
 from genesis.engine.states.solvers import IPBSTFSolverState
 from genesis.utils import particle
-from genesis.utils.array_class import ErrorCode
-import genesis.utils.geom as gu
+from genesis.utils.array_class import ErrorCode, V_ANNOTATION
 from genesis.utils.misc import (
     assign_indexed_tensor,
     broadcast_tensor,
@@ -28,6 +28,12 @@ from genesis.utils.misc import (
     qd_to_torch,
     sanitize_index,
 )
+
+
+_N_SURFACE_THETA = 18
+_N_SURFACE_PHI = 36
+_SURFACE_ILLUMINATED_THRESHOLD = 1.0 / 9.0
+_COS_PI_OVER_4 = 0.7071067811865476
 
 
 @dataclass(frozen=True)
@@ -100,6 +106,53 @@ def _hessian_column_norms(hessian):
             + hessian[2, column] * hessian[2, column]
         )
     return norms
+
+
+@qd.func
+def _angle_of_vec2(a, b):
+    angle = gs.qd_float(0.0)
+    a_norm = a.norm()
+    b_norm = b.norm()
+    if a_norm > gs.EPS and b_norm > gs.EPS:
+        angle = qd.acos(qd.max(-1.0, qd.min(1.0, a.dot(b) / (a_norm * b_norm))))
+    return angle
+
+
+@qd.func
+def _triangle_area_gradient_hessian(pos_a, pos_b, pos_c):
+    gradient = qd.Vector.zero(gs.qd_float, 3)
+    hessian = qd.Matrix.zero(gs.qd_float, 3, 3)
+    cross = (pos_b - pos_a).cross(pos_c - pos_a)
+    cross_norm = cross.norm()
+    if cross_norm > gs.EPS:
+        normal = cross / cross_norm
+        edge = pos_c - pos_b
+        gradient = 0.5 * normal.cross(edge)
+        hessian = 0.5 * edge.norm_sqr() / cross_norm * normal.outer_product(normal)
+    return gradient, hessian
+
+
+@qd.func
+def _is_local_mesh_vertex_removable(
+    particle_idx,
+    env_idx,
+    candidate_idx,
+    surface_neighbor_pos_projected: V_ANNOTATION,
+    local_mesh_chain_prev: V_ANNOTATION,
+    local_mesh_chain_next: V_ANNOTATION,
+):
+    is_removable = False
+    candidate_idx_prev = local_mesh_chain_prev[particle_idx, env_idx, candidate_idx]
+    candidate_idx_next = local_mesh_chain_next[particle_idx, env_idx, candidate_idx]
+    if candidate_idx_prev >= 0 and candidate_idx_next >= 0:
+        pos_prev = surface_neighbor_pos_projected[particle_idx, env_idx, candidate_idx_prev]
+        pos_candidate = surface_neighbor_pos_projected[particle_idx, env_idx, candidate_idx]
+        pos_next = surface_neighbor_pos_projected[particle_idx, env_idx, candidate_idx_next]
+        is_removable = (
+            _angle_of_vec2(-pos_prev, pos_candidate - pos_prev) + _angle_of_vec2(-pos_next, pos_candidate - pos_next)
+            > math.pi
+        )
+    return is_removable
 
 
 @qd.func
@@ -188,16 +241,15 @@ def _accumulate_density_constraint(
                 distance = delta.norm()
                 pos_reference_j = particles[neighbor_idx, env_idx].pos_reference
                 if (
-                    (pos_reference_i - pos_reference_j).norm() < support_radius
-                    and not _is_separated_by_static_colliders(
-                        env_idx,
-                        pos_i,
-                        pos_j,
-                        particle_radius,
-                        static_colliders_pos,
-                        static_colliders_quat,
-                        static_colliders,
-                    )
+                    pos_reference_i - pos_reference_j
+                ).norm() < support_radius and not _is_separated_by_static_colliders(
+                    env_idx,
+                    pos_i,
+                    pos_j,
+                    particle_radius,
+                    static_colliders_pos,
+                    static_colliders_quat,
+                    static_colliders,
                 ):
                     mass_j = particles_info[neighbor_idx, env_idx].mass
                     density += mass_j * _cubic_kernel(distance, support_radius)
@@ -243,16 +295,15 @@ def _accumulate_neighbor_density_energy(
                 delta = pos_i - pos_j
                 pos_reference_j = particles[neighbor_idx, env_idx].pos_reference
                 if (
-                    (pos_reference_i - pos_reference_j).norm() < support_radius
-                    and not _is_separated_by_static_colliders(
-                        env_idx,
-                        pos_i,
-                        pos_j,
-                        particle_radius,
-                        static_colliders_pos,
-                        static_colliders_quat,
-                        static_colliders,
-                    )
+                    pos_reference_i - pos_reference_j
+                ).norm() < support_radius and not _is_separated_by_static_colliders(
+                    env_idx,
+                    pos_i,
+                    pos_j,
+                    particle_radius,
+                    static_colliders_pos,
+                    static_colliders_quat,
+                    static_colliders,
                 ):
                     rho_rest_j = particles_info[neighbor_idx, env_idx].rho_rest
                     kernel_gradient, kernel_hessian = _cubic_gradient_hessian(delta, support_radius)
@@ -338,6 +389,446 @@ def _kernel_compute_density_constraints(
 
 
 @qd.kernel
+def _kernel_mark_surface_screen(
+    n_particles: qd.i32,
+    particle_radius: float,
+    support_radius: float,
+    surface_screen_blocked: V_ANNOTATION,
+    particles: qd.template(),
+    particles_status: qd.template(),
+    static_colliders_pos: V_ANNOTATION,
+    static_colliders_quat: V_ANNOTATION,
+    particles_info: qd.template(),
+    spatial_hasher: qd.template(),
+    static_colliders: _StaticColliderConfig,
+):
+    unit_theta = math.pi / _N_SURFACE_THETA
+    unit_phi = 2.0 * math.pi / _N_SURFACE_PHI
+    for particle_idx, env_idx in qd.ndrange(n_particles, particles.shape[1]):
+        if particles_status[particle_idx, env_idx].active and not particles_info[particle_idx, env_idx].is_fixed:
+            pos_i = particles[particle_idx, env_idx].pos
+            pos_reference_i = particles[particle_idx, env_idx].pos_reference
+            grid = spatial_hasher.pos_to_grid(pos_reference_i)
+            for offset in qd.grouped(qd.ndrange((-1, 2), (-1, 2), (-1, 2))):
+                slot_idx = spatial_hasher.grid_to_slot(grid + offset)
+                slot_start = spatial_hasher.slot_start[slot_idx, env_idx]
+                slot_end = slot_start + spatial_hasher.slot_size[slot_idx, env_idx]
+                for neighbor_idx in range(slot_start, slot_end):
+                    if neighbor_idx != particle_idx and particles_status[neighbor_idx, env_idx].active:
+                        pos_j = particles[neighbor_idx, env_idx].pos
+                        delta = pos_j - pos_i
+                        distance = delta.norm()
+                        pos_reference_j = particles[neighbor_idx, env_idx].pos_reference
+                        if (
+                            (pos_reference_i - pos_reference_j).norm() < support_radius
+                            and distance > gs.EPS
+                            and distance < support_radius
+                            and not _is_separated_by_static_colliders(
+                                env_idx,
+                                pos_i,
+                                pos_j,
+                                particle_radius,
+                                static_colliders_pos,
+                                static_colliders_quat,
+                                static_colliders,
+                            )
+                        ):
+                            block_radius = qd.min(particle_radius, 0.5 * distance)
+                            delta_angle = qd.asin(qd.min(block_radius / distance, 1.0))
+                            theta = qd.acos(qd.max(-1.0, qd.min(1.0, delta[1] / distance)))
+                            phi = qd.atan2(delta[2], delta[0])
+
+                            start_theta = qd.max(theta - delta_angle, 0.0)
+                            end_theta = qd.min(theta + delta_angle, math.pi)
+                            start_phi = phi - delta_angle
+                            end_phi = phi + delta_angle
+                            if start_phi < -math.pi:
+                                start_phi += 2.0 * math.pi
+                            if end_phi > math.pi:
+                                end_phi -= 2.0 * math.pi
+
+                            theta_start = qd.min(
+                                qd.cast(qd.floor(start_theta / unit_theta), gs.qd_int), _N_SURFACE_THETA - 1
+                            )
+                            theta_end = qd.min(qd.cast(qd.ceil(end_theta / unit_theta), gs.qd_int), _N_SURFACE_THETA)
+                            phi_start = qd.min(
+                                qd.cast(qd.floor((start_phi + math.pi) / unit_phi), gs.qd_int),
+                                _N_SURFACE_PHI - 1,
+                            )
+                            phi_end = qd.min(
+                                qd.cast(qd.ceil((end_phi + math.pi) / unit_phi), gs.qd_int), _N_SURFACE_PHI
+                            )
+
+                            if phi_start < phi_end:
+                                qd.atomic_add(surface_screen_blocked[particle_idx, env_idx, theta_start, phi_start], 1)
+                                qd.atomic_add(surface_screen_blocked[particle_idx, env_idx, theta_start, phi_end], -1)
+                                qd.atomic_add(surface_screen_blocked[particle_idx, env_idx, theta_end, phi_start], -1)
+                                qd.atomic_add(surface_screen_blocked[particle_idx, env_idx, theta_end, phi_end], 1)
+                            else:
+                                qd.atomic_add(surface_screen_blocked[particle_idx, env_idx, theta_start, phi_start], 1)
+                                qd.atomic_add(
+                                    surface_screen_blocked[particle_idx, env_idx, theta_start, _N_SURFACE_PHI], -1
+                                )
+                                qd.atomic_add(surface_screen_blocked[particle_idx, env_idx, theta_end, phi_start], -1)
+                                qd.atomic_add(
+                                    surface_screen_blocked[particle_idx, env_idx, theta_end, _N_SURFACE_PHI], 1
+                                )
+                                qd.atomic_add(surface_screen_blocked[particle_idx, env_idx, theta_start, 0], 1)
+                                qd.atomic_add(surface_screen_blocked[particle_idx, env_idx, theta_start, phi_end], -1)
+                                qd.atomic_add(surface_screen_blocked[particle_idx, env_idx, theta_end, 0], -1)
+                                qd.atomic_add(surface_screen_blocked[particle_idx, env_idx, theta_end, phi_end], 1)
+
+
+@qd.kernel
+def _kernel_classify_surface_particles(
+    n_particles: qd.i32,
+    surface_screen_blocked: V_ANNOTATION,
+    is_surface: V_ANNOTATION,
+    particles_status: qd.template(),
+    particles_info: qd.template(),
+):
+    for particle_idx, env_idx in qd.ndrange(n_particles, particles_status.shape[1]):
+        if particles_status[particle_idx, env_idx].active and not particles_info[particle_idx, env_idx].is_fixed:
+            illuminated = gs.qd_float(0.0)
+            total = gs.qd_float(0.0)
+            for theta_idx in range(_N_SURFACE_THETA):
+                weight = qd.sin(math.pi / _N_SURFACE_THETA * (theta_idx + 0.5))
+                for phi_idx in range(_N_SURFACE_PHI):
+                    if theta_idx > 0 and phi_idx > 0:
+                        surface_screen_blocked[particle_idx, env_idx, theta_idx, phi_idx] += (
+                            surface_screen_blocked[particle_idx, env_idx, theta_idx - 1, phi_idx]
+                            + surface_screen_blocked[particle_idx, env_idx, theta_idx, phi_idx - 1]
+                            - surface_screen_blocked[particle_idx, env_idx, theta_idx - 1, phi_idx - 1]
+                        )
+                    elif theta_idx > 0:
+                        surface_screen_blocked[particle_idx, env_idx, theta_idx, phi_idx] += surface_screen_blocked[
+                            particle_idx, env_idx, theta_idx - 1, phi_idx
+                        ]
+                    elif phi_idx > 0:
+                        surface_screen_blocked[particle_idx, env_idx, theta_idx, phi_idx] += surface_screen_blocked[
+                            particle_idx, env_idx, theta_idx, phi_idx - 1
+                        ]
+                    if surface_screen_blocked[particle_idx, env_idx, theta_idx, phi_idx] == 0:
+                        illuminated += weight
+                    total += weight
+            is_surface[particle_idx, env_idx] = illuminated >= _SURFACE_ILLUMINATED_THRESHOLD * total
+        else:
+            is_surface[particle_idx, env_idx] = False
+
+
+@qd.kernel
+def _kernel_compute_surface_normals(
+    n_particles: qd.i32,
+    particle_radius: float,
+    support_radius: float,
+    is_surface: V_ANNOTATION,
+    surface_normals: V_ANNOTATION,
+    has_surface_interior_neighbor: V_ANNOTATION,
+    surface_pca_covariance: V_ANNOTATION,
+    particles: qd.template(),
+    particles_status: qd.template(),
+    static_colliders_pos: V_ANNOTATION,
+    static_colliders_quat: V_ANNOTATION,
+    particles_info: qd.template(),
+    spatial_hasher: qd.template(),
+    static_colliders: _StaticColliderConfig,
+):
+    surface_normals.fill(0.0)
+    has_surface_interior_neighbor.fill(False)
+    surface_pca_covariance.fill(0.0)
+    for particle_idx, env_idx in qd.ndrange(n_particles, particles.shape[1]):
+        if (
+            particles_status[particle_idx, env_idx].active
+            and not particles_info[particle_idx, env_idx].is_fixed
+            and is_surface[particle_idx, env_idx]
+        ):
+            pos_i = particles[particle_idx, env_idx].pos
+            pos_reference_i = particles[particle_idx, env_idx].pos_reference
+            grid = spatial_hasher.pos_to_grid(pos_reference_i)
+            for offset in qd.grouped(qd.ndrange((-1, 2), (-1, 2), (-1, 2))):
+                slot_idx = spatial_hasher.grid_to_slot(grid + offset)
+                slot_start = spatial_hasher.slot_start[slot_idx, env_idx]
+                slot_end = slot_start + spatial_hasher.slot_size[slot_idx, env_idx]
+                for neighbor_idx in range(slot_start, slot_end):
+                    if (
+                        neighbor_idx != particle_idx
+                        and particles_status[neighbor_idx, env_idx].active
+                        and not particles_info[neighbor_idx, env_idx].is_fixed
+                    ):
+                        pos_j = particles[neighbor_idx, env_idx].pos
+                        delta = pos_j - pos_i
+                        distance = delta.norm()
+                        pos_reference_j = particles[neighbor_idx, env_idx].pos_reference
+                        if (
+                            (pos_reference_i - pos_reference_j).norm() < support_radius
+                            and distance < support_radius
+                            and not _is_separated_by_static_colliders(
+                                env_idx,
+                                pos_i,
+                                pos_j,
+                                particle_radius,
+                                static_colliders_pos,
+                                static_colliders_quat,
+                                static_colliders,
+                            )
+                        ):
+                            density_j = particles[neighbor_idx, env_idx].density
+                            if density_j > gs.EPS:
+                                kernel_gradient, unused_hessian = _cubic_gradient_hessian(-delta, support_radius)
+                                surface_normals[particle_idx, env_idx] -= (
+                                    kernel_gradient * particles_info[neighbor_idx, env_idx].mass / density_j
+                                )
+                            if is_surface[neighbor_idx, env_idx]:
+                                surface_pca_covariance[particle_idx, env_idx] += delta.outer_product(delta)
+                            else:
+                                has_surface_interior_neighbor[particle_idx, env_idx] = True
+
+    for particle_idx, env_idx in qd.ndrange(n_particles, particles.shape[1]):
+        if (
+            particles_status[particle_idx, env_idx].active
+            and not particles_info[particle_idx, env_idx].is_fixed
+            and is_surface[particle_idx, env_idx]
+        ):
+            raw_normal = surface_normals[particle_idx, env_idx]
+            raw_normal_norm = raw_normal.norm()
+            if raw_normal_norm <= 1.0:
+                is_surface[particle_idx, env_idx] = False
+                surface_normals[particle_idx, env_idx] = qd.Vector.zero(gs.qd_float, 3)
+            else:
+                normal = raw_normal / raw_normal_norm
+                if not has_surface_interior_neighbor[particle_idx, env_idx]:
+                    unused_eigenvalues, eigenvectors = qd.sym_eig(surface_pca_covariance[particle_idx, env_idx])
+                    normal_pca = qd.Vector([eigenvectors[0, 0], eigenvectors[1, 0], eigenvectors[2, 0]], dt=gs.qd_float)
+                    if normal.dot(normal_pca) < 0.0:
+                        normal_pca = -normal_pca
+                    if normal_pca.norm() > gs.EPS:
+                        normal = normal_pca.normalized()
+                surface_normals[particle_idx, env_idx] = normal
+
+
+@qd.kernel
+def _kernel_build_local_meshes(
+    n_particles: qd.i32,
+    particle_radius: float,
+    support_radius: float,
+    is_surface: V_ANNOTATION,
+    is_surface_topology_valid: V_ANNOTATION,
+    surface_normals: V_ANNOTATION,
+    surface_neighbor_pos_projected: V_ANNOTATION,
+    surface_neighbor_indices: V_ANNOTATION,
+    local_mesh_chain_prev: V_ANNOTATION,
+    local_mesh_chain_next: V_ANNOTATION,
+    local_mesh_neighbor_indices: V_ANNOTATION,
+    local_mesh_n_neighbors: V_ANNOTATION,
+    local_mesh_node_queue: V_ANNOTATION,
+    particles: qd.template(),
+    particles_status: qd.template(),
+    static_colliders_pos: V_ANNOTATION,
+    static_colliders_quat: V_ANNOTATION,
+    particles_info: qd.template(),
+    spatial_hasher: qd.template(),
+    static_colliders: _StaticColliderConfig,
+    max_surface_neighbors: qd.template(),
+    max_localmesh_neighbors: qd.template(),
+    errno: V_ANNOTATION,
+):
+    is_surface_topology_valid.fill(False)
+    local_mesh_n_neighbors.fill(0)
+    for particle_idx, env_idx in qd.ndrange(n_particles, particles.shape[1]):
+        if (
+            particles_status[particle_idx, env_idx].active
+            and not particles_info[particle_idx, env_idx].is_fixed
+            and is_surface[particle_idx, env_idx]
+        ):
+            normal_i = surface_normals[particle_idx, env_idx]
+            axis_x = qd.Vector([1.0, 0.0, 0.0], dt=gs.qd_float)
+            if axis_x.cross(normal_i).norm() < gs.EPS:
+                axis_x = qd.Vector([0.0, 1.0, 0.0], dt=gs.qd_float)
+            axis_x = axis_x.cross(normal_i).normalized()
+            axis_y = normal_i.cross(axis_x).normalized()
+
+            n_candidates = 0
+            has_candidate_overflow = False
+            pos_i = particles[particle_idx, env_idx].pos
+            pos_reference_i = particles[particle_idx, env_idx].pos_reference
+            grid = spatial_hasher.pos_to_grid(pos_reference_i)
+            for offset in qd.grouped(qd.ndrange((-1, 2), (-1, 2), (-1, 2))):
+                slot_idx = spatial_hasher.grid_to_slot(grid + offset)
+                slot_start = spatial_hasher.slot_start[slot_idx, env_idx]
+                slot_end = slot_start + spatial_hasher.slot_size[slot_idx, env_idx]
+                for neighbor_idx in range(slot_start, slot_end):
+                    if (
+                        neighbor_idx != particle_idx
+                        and particles_status[neighbor_idx, env_idx].active
+                        and not particles_info[neighbor_idx, env_idx].is_fixed
+                        and is_surface[neighbor_idx, env_idx]
+                    ):
+                        pos_j = particles[neighbor_idx, env_idx].pos
+                        delta = pos_j - pos_i
+                        distance = delta.norm()
+                        pos_reference_j = particles[neighbor_idx, env_idx].pos_reference
+                        if (
+                            (pos_reference_i - pos_reference_j).norm() < support_radius
+                            and distance < support_radius
+                            and not _is_separated_by_static_colliders(
+                                env_idx,
+                                pos_i,
+                                pos_j,
+                                particle_radius,
+                                static_colliders_pos,
+                                static_colliders_quat,
+                                static_colliders,
+                            )
+                        ):
+                            normal_j = surface_normals[neighbor_idx, env_idx]
+                            if normal_i.dot(normal_j) > _COS_PI_OVER_4 or (
+                                (normal_i - normal_j).dot(delta) > 0.0 and distance < 4.0 * particle_radius
+                            ):
+                                if n_candidates < max_surface_neighbors:
+                                    surface_neighbor_indices[particle_idx, env_idx, n_candidates] = neighbor_idx
+                                    projected = delta - delta.dot(normal_i) * normal_i
+                                    surface_neighbor_pos_projected[particle_idx, env_idx, n_candidates] = qd.Vector(
+                                        [projected.dot(axis_x), projected.dot(axis_y)], dt=gs.qd_float
+                                    )
+                                    n_candidates += 1
+                                elif not has_candidate_overflow:
+                                    qd.atomic_or(errno[env_idx], ErrorCode.OVERFLOW_IPBSTF_SURFACE_NEIGHBORS)
+                                    has_candidate_overflow = True
+
+            if not has_candidate_overflow:
+                for candidate_idx in range(n_candidates):
+                    local_mesh_node_queue[particle_idx, env_idx, candidate_idx] = candidate_idx
+                    local_mesh_chain_prev[particle_idx, env_idx, candidate_idx] = -1
+                    local_mesh_chain_next[particle_idx, env_idx, candidate_idx] = -1
+
+                for candidate_idx in range(1, n_candidates):
+                    cursor = candidate_idx
+                    while cursor > 0:
+                        candidate_idx_u = local_mesh_node_queue[particle_idx, env_idx, cursor - 1]
+                        candidate_idx_v = local_mesh_node_queue[particle_idx, env_idx, cursor]
+                        pos_u = surface_neighbor_pos_projected[particle_idx, env_idx, candidate_idx_u]
+                        pos_v = surface_neighbor_pos_projected[particle_idx, env_idx, candidate_idx_v]
+                        angle_u = qd.atan2(pos_u[1], pos_u[0])
+                        angle_v = qd.atan2(pos_v[1], pos_v[0])
+                        if angle_u > angle_v or (angle_u == angle_v and pos_u.norm() > pos_v.norm()):
+                            local_mesh_node_queue[particle_idx, env_idx, cursor - 1] = candidate_idx_v
+                            local_mesh_node_queue[particle_idx, env_idx, cursor] = candidate_idx_u
+                            cursor -= 1
+                        else:
+                            cursor = 0
+
+                if n_candidates >= 3:
+                    for candidate_idx in range(n_candidates - 1):
+                        candidate_idx_u = local_mesh_node_queue[particle_idx, env_idx, candidate_idx]
+                        candidate_idx_v = local_mesh_node_queue[particle_idx, env_idx, candidate_idx + 1]
+                        local_mesh_chain_next[particle_idx, env_idx, candidate_idx_u] = candidate_idx_v
+                        local_mesh_chain_prev[particle_idx, env_idx, candidate_idx_v] = candidate_idx_u
+                    candidate_idx_last = local_mesh_node_queue[particle_idx, env_idx, n_candidates - 1]
+                    candidate_idx_first = local_mesh_node_queue[particle_idx, env_idx, 0]
+                    local_mesh_chain_next[particle_idx, env_idx, candidate_idx_last] = candidate_idx_first
+                    local_mesh_chain_prev[particle_idx, env_idx, candidate_idx_first] = candidate_idx_last
+
+                    queue_start = 0
+                    queue_end = 0
+                    has_queue_overflow = False
+                    for candidate_idx in range(n_candidates):
+                        candidate_idx_u = local_mesh_node_queue[particle_idx, env_idx, candidate_idx]
+                        if _is_local_mesh_vertex_removable(
+                            particle_idx,
+                            env_idx,
+                            candidate_idx_u,
+                            surface_neighbor_pos_projected,
+                            local_mesh_chain_prev,
+                            local_mesh_chain_next,
+                        ):
+                            if queue_end < 3 * max_surface_neighbors:
+                                local_mesh_node_queue[particle_idx, env_idx, queue_end] = candidate_idx_u
+                                queue_end += 1
+                            else:
+                                has_queue_overflow = True
+
+                    while queue_start < queue_end:
+                        candidate_idx_u = local_mesh_node_queue[particle_idx, env_idx, queue_start]
+                        queue_start += 1
+                        if local_mesh_chain_next[particle_idx, env_idx, candidate_idx_u] >= 0 and (
+                            _is_local_mesh_vertex_removable(
+                                particle_idx,
+                                env_idx,
+                                candidate_idx_u,
+                                surface_neighbor_pos_projected,
+                                local_mesh_chain_prev,
+                                local_mesh_chain_next,
+                            )
+                        ):
+                            candidate_idx_prev = local_mesh_chain_prev[particle_idx, env_idx, candidate_idx_u]
+                            candidate_idx_next = local_mesh_chain_next[particle_idx, env_idx, candidate_idx_u]
+                            local_mesh_chain_next[particle_idx, env_idx, candidate_idx_prev] = candidate_idx_next
+                            local_mesh_chain_prev[particle_idx, env_idx, candidate_idx_next] = candidate_idx_prev
+                            if _is_local_mesh_vertex_removable(
+                                particle_idx,
+                                env_idx,
+                                candidate_idx_next,
+                                surface_neighbor_pos_projected,
+                                local_mesh_chain_prev,
+                                local_mesh_chain_next,
+                            ):
+                                if queue_end < 3 * max_surface_neighbors:
+                                    local_mesh_node_queue[particle_idx, env_idx, queue_end] = candidate_idx_next
+                                    queue_end += 1
+                                else:
+                                    has_queue_overflow = True
+                            if _is_local_mesh_vertex_removable(
+                                particle_idx,
+                                env_idx,
+                                candidate_idx_prev,
+                                surface_neighbor_pos_projected,
+                                local_mesh_chain_prev,
+                                local_mesh_chain_next,
+                            ):
+                                if queue_end < 3 * max_surface_neighbors:
+                                    local_mesh_node_queue[particle_idx, env_idx, queue_end] = candidate_idx_prev
+                                    queue_end += 1
+                                else:
+                                    has_queue_overflow = True
+                            local_mesh_chain_next[particle_idx, env_idx, candidate_idx_u] = -1
+                            local_mesh_chain_prev[particle_idx, env_idx, candidate_idx_u] = -1
+
+                    if has_queue_overflow:
+                        qd.atomic_or(errno[env_idx], ErrorCode.OVERFLOW_IPBSTF_LOCAL_MESH_QUEUE)
+
+                    candidate_idx_start = -1
+                    for candidate_idx in range(n_candidates):
+                        if candidate_idx_start < 0 and local_mesh_chain_next[particle_idx, env_idx, candidate_idx] >= 0:
+                            candidate_idx_start = candidate_idx
+
+                    ring_size = 0
+                    projected_area_twice = gs.qd_float(0.0)
+                    if candidate_idx_start >= 0:
+                        candidate_idx_u = candidate_idx_start
+                        is_walking = True
+                        while is_walking and ring_size < max_localmesh_neighbors:
+                            candidate_idx_next = local_mesh_chain_next[particle_idx, env_idx, candidate_idx_u]
+                            pos_u = surface_neighbor_pos_projected[particle_idx, env_idx, candidate_idx_u]
+                            pos_next = surface_neighbor_pos_projected[particle_idx, env_idx, candidate_idx_next]
+                            projected_area_twice += pos_u[0] * pos_next[1] - pos_u[1] * pos_next[0]
+                            local_mesh_neighbor_indices[particle_idx, env_idx, ring_size] = surface_neighbor_indices[
+                                particle_idx, env_idx, candidate_idx_u
+                            ]
+                            ring_size += 1
+                            candidate_idx_u = candidate_idx_next
+                            if candidate_idx_u == candidate_idx_start:
+                                is_walking = False
+
+                        if is_walking:
+                            qd.atomic_or(errno[env_idx], ErrorCode.OVERFLOW_IPBSTF_LOCAL_MESH_NEIGHBORS)
+                        elif not has_queue_overflow:
+                            is_surface_topology_valid[particle_idx, env_idx] = (
+                                ring_size >= 3 and qd.abs(projected_area_twice) > gs.EPS
+                            )
+                    local_mesh_n_neighbors[particle_idx, env_idx] = ring_size
+
+
+@qd.kernel
 def _kernel_reduce_max_density(
     n_particles: qd.i32,
     particles: qd.template(),
@@ -375,6 +866,52 @@ def _kernel_predict_positions(
             particles[particle_idx, env_idx].pos = pos_predicted
 
 
+@qd.func
+def _assemble_density_local_system(
+    particle_idx,
+    env_idx,
+    substep_dt,
+    alpha,
+    particle_radius,
+    support_radius,
+    particles: qd.template(),
+    particles_status: qd.template(),
+    static_colliders_pos: V_ANNOTATION,
+    static_colliders_quat: V_ANNOTATION,
+    particles_info: qd.template(),
+    spatial_hasher: qd.template(),
+    static_colliders: _StaticColliderConfig,
+):
+    particle = particles[particle_idx, env_idx]
+    inertia = alpha * particles_info[particle_idx, env_idx].mass / (substep_dt * substep_dt)
+    force = -inertia * (particle.pos - particle.pos_predicted)
+    hessian = inertia * qd.Matrix.identity(gs.qd_float, 3)
+
+    constraint = particle.density_constraint
+    gradient = particle.density_gradient
+    force -= constraint * gradient
+    hessian += gradient.outer_product(gradient)
+    for axis in qd.static(range(3)):
+        hessian[axis, axis] += constraint * particle.density_hessian_diag[axis]
+
+    force, hessian = _accumulate_neighbor_density_energy(
+        particle_idx,
+        env_idx,
+        particle_radius,
+        support_radius,
+        force,
+        hessian,
+        particles,
+        particles_status,
+        particles_info,
+        static_colliders_pos,
+        static_colliders_quat,
+        spatial_hasher,
+        static_colliders,
+    )
+    return force, hessian
+
+
 @qd.kernel
 def _kernel_assemble_density_local_systems(
     n_particles: qd.i32,
@@ -392,33 +929,82 @@ def _kernel_assemble_density_local_systems(
 ):
     for particle_idx, env_idx in qd.ndrange(n_particles, particles.shape[1]):
         if particles_status[particle_idx, env_idx].active and not particles_info[particle_idx, env_idx].is_fixed:
-            particle = particles[particle_idx, env_idx]
-            inertia = alpha * particles_info[particle_idx, env_idx].mass / (substep_dt * substep_dt)
-            force = -inertia * (particle.pos - particle.pos_predicted)
-            hessian = inertia * qd.Matrix.identity(gs.qd_float, 3)
-
-            constraint = particle.density_constraint
-            gradient = particle.density_gradient
-            force -= constraint * gradient
-            hessian += gradient.outer_product(gradient)
-            for axis in qd.static(range(3)):
-                hessian[axis, axis] += constraint * particle.density_hessian_diag[axis]
-
-            force, hessian = _accumulate_neighbor_density_energy(
+            force, hessian = _assemble_density_local_system(
                 particle_idx,
                 env_idx,
+                substep_dt,
+                alpha,
                 particle_radius,
                 support_radius,
-                force,
-                hessian,
                 particles,
                 particles_status,
-                particles_info,
                 static_colliders_pos,
                 static_colliders_quat,
+                particles_info,
                 spatial_hasher,
                 static_colliders,
             )
+            particles[particle_idx, env_idx].local_force = force
+            particles[particle_idx, env_idx].local_hessian = hessian
+
+
+@qd.kernel
+def _kernel_assemble_surface_local_systems(
+    n_particles: qd.i32,
+    substep_dt: float,
+    alpha: float,
+    surface_tension: float,
+    particle_radius: float,
+    support_radius: float,
+    is_surface_topology_valid: V_ANNOTATION,
+    local_mesh_neighbor_indices: V_ANNOTATION,
+    local_mesh_n_neighbors: V_ANNOTATION,
+    particles: qd.template(),
+    particles_status: qd.template(),
+    static_colliders_pos: V_ANNOTATION,
+    static_colliders_quat: V_ANNOTATION,
+    particles_info: qd.template(),
+    spatial_hasher: qd.template(),
+    static_colliders: _StaticColliderConfig,
+):
+    surface_energy_scale = alpha * surface_tension
+    for particle_idx, env_idx in qd.ndrange(n_particles, particles.shape[1]):
+        if particles_status[particle_idx, env_idx].active and not particles_info[particle_idx, env_idx].is_fixed:
+            force, hessian = _assemble_density_local_system(
+                particle_idx,
+                env_idx,
+                substep_dt,
+                alpha,
+                particle_radius,
+                support_radius,
+                particles,
+                particles_status,
+                static_colliders_pos,
+                static_colliders_quat,
+                particles_info,
+                spatial_hasher,
+                static_colliders,
+            )
+            if is_surface_topology_valid[particle_idx, env_idx]:
+                # Each local surface energy is owned by its center; see solver_math.md.
+                area_gradient = qd.Vector.zero(gs.qd_float, 3)
+                area_hessian = qd.Matrix.zero(gs.qd_float, 3, 3)
+                n_neighbors = local_mesh_n_neighbors[particle_idx, env_idx]
+                for neighbor_slot in range(n_neighbors):
+                    neighbor_slot_next = 0 if neighbor_slot == n_neighbors - 1 else neighbor_slot + 1
+                    neighbor_idx = local_mesh_neighbor_indices[particle_idx, env_idx, neighbor_slot]
+                    neighbor_idx_next = local_mesh_neighbor_indices[particle_idx, env_idx, neighbor_slot_next]
+                    triangle_gradient, triangle_hessian = _triangle_area_gradient_hessian(
+                        particles[particle_idx, env_idx].pos,
+                        particles[neighbor_idx, env_idx].pos,
+                        particles[neighbor_idx_next, env_idx].pos,
+                    )
+                    area_gradient += triangle_gradient
+                    area_hessian += triangle_hessian
+                force -= surface_energy_scale * area_gradient
+                area_hessian_diag = _hessian_column_norms(area_hessian)
+                for axis in qd.static(range(3)):
+                    hessian[axis, axis] += surface_energy_scale * area_hessian_diag[axis]
             particles[particle_idx, env_idx].local_force = force
             particles[particle_idx, env_idx].local_hessian = hessian
 
@@ -446,7 +1032,7 @@ def _kernel_solve_local_systems(
                 particles[particle_idx, env_idx].delta_pos = delta_pos
             else:
                 particles[particle_idx, env_idx].delta_pos = qd.Vector.zero(gs.qd_float, 3)
-                errno[env_idx] = ErrorCode.INVALID_IPBSTF_STATE_NAN
+                qd.atomic_or(errno[env_idx], ErrorCode.INVALID_IPBSTF_STATE_NAN)
 
 
 @qd.kernel
@@ -483,7 +1069,7 @@ def _kernel_apply_position_updates(
             else:
                 if qd.static(is_alternative_position):
                     alternative_positions[particle_idx, env_idx] = particles[particle_idx, env_idx].pos
-                errno[env_idx] = ErrorCode.INVALID_IPBSTF_STATE_NAN
+                qd.atomic_or(errno[env_idx], ErrorCode.INVALID_IPBSTF_STATE_NAN)
 
 
 @qd.kernel
@@ -524,7 +1110,7 @@ def _kernel_update_velocities(
             if is_valid:
                 particles[particle_idx, env_idx].vel = velocity
             else:
-                errno[env_idx] = ErrorCode.INVALID_IPBSTF_STATE_NAN
+                qd.atomic_or(errno[env_idx], ErrorCode.INVALID_IPBSTF_STATE_NAN)
 
 
 @qd.kernel
@@ -554,9 +1140,8 @@ def _kernel_compute_viscosity_velocity_updates(
                     ):
                         neighbor = particles[neighbor_idx, env_idx]
                         if (
-                            (particle.pos_reference - neighbor.pos_reference).norm() < support_radius
-                            and neighbor.density > gs.EPS
-                        ):
+                            particle.pos_reference - neighbor.pos_reference
+                        ).norm() < support_radius and neighbor.density > gs.EPS:
                             distance = (particle.pos - neighbor.pos).norm()
                             delta_vel += (
                                 particles_info[neighbor_idx, env_idx].mass
@@ -584,7 +1169,7 @@ def _kernel_apply_viscosity_velocity_updates(
             if is_valid:
                 particles[particle_idx, env_idx].vel = velocity
             else:
-                errno[env_idx] = ErrorCode.INVALID_IPBSTF_STATE_NAN
+                qd.atomic_or(errno[env_idx], ErrorCode.INVALID_IPBSTF_STATE_NAN)
 
 
 @qd.kernel
@@ -804,6 +1389,8 @@ class IPBSTFSolver(Solver):
         self._particle_radius = 0.5 * options.particle_size
         self._support_radius = options._support_radius
         self._max_solver_iterations = options.max_solver_iterations
+        self._max_surface_neighbors = options.max_surface_neighbors
+        self._max_localmesh_neighbors = options.max_localmesh_neighbors
         self._static_colliders = _StaticColliderConfig(
             tuple(create_static_collider(collider_options) for collider_options in options.static_colliders)
         )
@@ -820,8 +1407,22 @@ class IPBSTFSolver(Solver):
 
         self._default_mass = 1.0
         self._material = None
+        self._has_surface_tension = False
         self._errno = None
         self._alternative_positions = None
+        self._surface_screen_blocked = None
+        self._is_surface = None
+        self._is_surface_topology_valid = None
+        self._surface_normals = None
+        self._has_surface_interior_neighbor = None
+        self._surface_pca_covariance = None
+        self._surface_neighbor_pos_projected = None
+        self._surface_neighbor_indices = None
+        self._local_mesh_chain_prev = None
+        self._local_mesh_chain_next = None
+        self._local_mesh_neighbor_indices = None
+        self._local_mesh_n_neighbors = None
+        self._local_mesh_node_queue = None
 
     @property
     def is_active(self):
@@ -879,11 +1480,16 @@ class IPBSTFSolver(Solver):
             gs.raise_exception("IPBSTFSolver requires at least one liquid entity.")
         self._material = liquid_entities[0].material
         for entity in liquid_entities[1:]:
-            if entity.material.rho != self._material.rho or entity.material.viscosity != self._material.viscosity:
+            if (
+                entity.material.rho != self._material.rho
+                or entity.material.viscosity != self._material.viscosity
+                or entity.material.surface_tension != self._material.surface_tension
+            ):
                 gs.raise_exception(
-                    "All liquid entities in one IPBSTFSolver must use the same rest density and viscosity because the "
-                    "current solver is single-phase."
+                    "All liquid entities in one IPBSTFSolver must use the same rest density, viscosity, and surface "
+                    "tension because the current solver is single-phase."
                 )
+        self._has_surface_tension = self._material.surface_tension > 0.0
 
         self.sh.build(self._B)
         particle_state = qd.types.struct(
@@ -917,6 +1523,26 @@ class IPBSTFSolver(Solver):
             self._alternative_positions = qd.field(gs.qd_vec3, shape=shape)
         self._max_density = qd.field(gs.qd_float, shape=())
         self._errno = qd.field(gs.qd_int, shape=(self._B,))
+        if self._has_surface_tension:
+            self._surface_screen_blocked = qd.field(
+                gs.qd_int, shape=(self._n_particles, self._B, _N_SURFACE_THETA + 1, _N_SURFACE_PHI + 1)
+            )
+            self._is_surface = qd.field(gs.qd_bool, shape=shape)
+            self._is_surface_topology_valid = qd.field(gs.qd_bool, shape=shape)
+            self._surface_normals = qd.field(gs.qd_vec3, shape=shape)
+            self._has_surface_interior_neighbor = qd.field(gs.qd_bool, shape=shape)
+            self._surface_pca_covariance = qd.field(gs.qd_mat3, shape=shape)
+            surface_neighbor_shape = (self._n_particles, self._B, self._max_surface_neighbors)
+            self._surface_neighbor_pos_projected = qd.field(gs.qd_vec2, shape=surface_neighbor_shape)
+            self._surface_neighbor_indices = qd.field(gs.qd_int, shape=surface_neighbor_shape)
+            self._local_mesh_chain_prev = qd.field(gs.qd_int, shape=surface_neighbor_shape)
+            self._local_mesh_chain_next = qd.field(gs.qd_int, shape=surface_neighbor_shape)
+            local_mesh_shape = (self._n_particles, self._B, self._max_localmesh_neighbors)
+            self._local_mesh_neighbor_indices = qd.field(gs.qd_int, shape=local_mesh_shape)
+            self._local_mesh_n_neighbors = qd.field(gs.qd_int, shape=shape)
+            self._local_mesh_node_queue = qd.field(
+                gs.qd_int, shape=(self._n_particles, self._B, 3 * self._max_surface_neighbors)
+            )
 
         if self._n_static_colliders == 0:
             self._kernel_static_colliders_pos = self.particles.pos
@@ -988,22 +1614,42 @@ class IPBSTFSolver(Solver):
             is_fixed_influence_enabled,
         )
 
-    def _solve_density_positions(self, alpha, alternative_positions, is_alternative_position):
-        """Perform one parallel local Newton position update at the given compliance."""
-        _kernel_assemble_density_local_systems(
-            self._n_particles,
-            self._substep_dt,
-            alpha,
-            self._particle_radius,
-            self._support_radius,
-            self.particles_reordered,
-            self.particles_status_reordered,
-            self.particles_info_reordered,
-            self._kernel_static_colliders_pos,
-            self._kernel_static_colliders_quat,
-            self.sh,
-            self._static_colliders,
-        )
+    def _solve_positions(self, alpha, alternative_positions, is_alternative_position):
+        """Perform one parallel local Newton position update at the shared inertia and surface-energy weight."""
+        if self._has_surface_tension:
+            _kernel_assemble_surface_local_systems(
+                self._n_particles,
+                self._substep_dt,
+                alpha,
+                self._material.surface_tension,
+                self._particle_radius,
+                self._support_radius,
+                self._is_surface_topology_valid,
+                self._local_mesh_neighbor_indices,
+                self._local_mesh_n_neighbors,
+                self.particles_reordered,
+                self.particles_status_reordered,
+                self._kernel_static_colliders_pos,
+                self._kernel_static_colliders_quat,
+                self.particles_info_reordered,
+                self.sh,
+                self._static_colliders,
+            )
+        else:
+            _kernel_assemble_density_local_systems(
+                self._n_particles,
+                self._substep_dt,
+                alpha,
+                self._particle_radius,
+                self._support_radius,
+                self.particles_reordered,
+                self.particles_status_reordered,
+                self.particles_info_reordered,
+                self._kernel_static_colliders_pos,
+                self._kernel_static_colliders_quat,
+                self.sh,
+                self._static_colliders,
+            )
         _kernel_solve_local_systems(
             self._n_particles,
             self._hessian_determinant_epsilon,
@@ -1087,13 +1733,76 @@ class IPBSTFSolver(Solver):
 
         for iteration_idx in range(self._max_solver_iterations):
             self._compute_density_constraints()
+            if self._has_surface_tension:
+                self._surface_screen_blocked.fill(0)
+                _kernel_mark_surface_screen(
+                    self._n_particles,
+                    self._particle_radius,
+                    self._support_radius,
+                    self._surface_screen_blocked,
+                    self.particles_reordered,
+                    self.particles_status_reordered,
+                    self._kernel_static_colliders_pos,
+                    self._kernel_static_colliders_quat,
+                    self.particles_info_reordered,
+                    self.sh,
+                    self._static_colliders,
+                )
+                _kernel_classify_surface_particles(
+                    self._n_particles,
+                    self._surface_screen_blocked,
+                    self._is_surface,
+                    self.particles_status_reordered,
+                    self.particles_info_reordered,
+                )
+                _kernel_compute_surface_normals(
+                    self._n_particles,
+                    self._particle_radius,
+                    self._support_radius,
+                    self._is_surface,
+                    self._surface_normals,
+                    self._has_surface_interior_neighbor,
+                    self._surface_pca_covariance,
+                    self.particles_reordered,
+                    self.particles_status_reordered,
+                    self._kernel_static_colliders_pos,
+                    self._kernel_static_colliders_quat,
+                    self.particles_info_reordered,
+                    self.sh,
+                    self._static_colliders,
+                )
+                _kernel_build_local_meshes(
+                    self._n_particles,
+                    self._particle_radius,
+                    self._support_radius,
+                    self._is_surface,
+                    self._is_surface_topology_valid,
+                    self._surface_normals,
+                    self._surface_neighbor_pos_projected,
+                    self._surface_neighbor_indices,
+                    self._local_mesh_chain_prev,
+                    self._local_mesh_chain_next,
+                    self._local_mesh_neighbor_indices,
+                    self._local_mesh_n_neighbors,
+                    self._local_mesh_node_queue,
+                    self.particles_reordered,
+                    self.particles_status_reordered,
+                    self._kernel_static_colliders_pos,
+                    self._kernel_static_colliders_quat,
+                    self.particles_info_reordered,
+                    self.sh,
+                    self._static_colliders,
+                    self._max_surface_neighbors,
+                    self._max_localmesh_neighbors,
+                    self._errno,
+                )
             if self._is_artificial_damping_enabled and iteration_idx == self._max_solver_iterations - 1:
-                self._solve_density_positions(
+                self._solve_positions(
                     self._ARTIFICIAL_DAMPING_ALPHA,
                     self._alternative_positions,
                     is_alternative_position=True,
                 )
-            self._solve_density_positions(
+            self._solve_positions(
                 self._alpha,
                 self.particles_reordered.pos,
                 is_alternative_position=False,
@@ -1164,6 +1873,21 @@ class IPBSTFSolver(Solver):
 
     def check_errno(self):
         errno = np.bitwise_or.reduce(qd_to_numpy(self._errno, transpose=True))
+        if errno & ErrorCode.OVERFLOW_IPBSTF_SURFACE_NEIGHBORS:
+            gs.raise_exception(
+                "IPBSTF local mesh exceeded its projected neighbor capacity; increase "
+                f"`max_surface_neighbors` (currently {self._max_surface_neighbors})."
+            )
+        if errno & ErrorCode.OVERFLOW_IPBSTF_LOCAL_MESH_QUEUE:
+            gs.raise_exception(
+                "IPBSTF local mesh exceeded its queue capacity; increase "
+                f"`max_surface_neighbors` (currently {self._max_surface_neighbors})."
+            )
+        if errno & ErrorCode.OVERFLOW_IPBSTF_LOCAL_MESH_NEIGHBORS:
+            gs.raise_exception(
+                "IPBSTF local mesh exceeded its one-ring neighbor capacity; increase "
+                f"`max_localmesh_neighbors` (currently {self._max_localmesh_neighbors})."
+            )
         if errno & ErrorCode.INVALID_IPBSTF_STATE_NAN:
             gs.raise_exception(
                 "IPBSTF produced a non-finite position or velocity. Increase alpha, reduce the time step, or increase "
