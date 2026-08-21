@@ -86,18 +86,22 @@ N_SETTLE_STEPS = 300  # 5 s: droplet falls and is absorbed
 # the oblique insert starts, and insert at 50 deg (more vertical than the 40 deg blade). The
 # steeper insert spends the whole depth budget (0.181 -> 0.047), so its horizontal reach shortens
 # to 0.112 m: the tip ends at (-0.013, 0.047), right under the wet clump's center.
-N_DESCEND_STEPS = 60  # 1.00 s: tip descends 0.092 m until it is 2 cm into the bed
+# user request (2026-08-21, trajectory v4): initial blade tilt 40 deg -> 50 deg, still ending flat.
+# The insert direction (50 deg) is now parallel to the blade face, so the scoop slices in along its
+# own plane. Tip at rest: (-0.1436, 0.2541); the descend shortens to 0.0731 m to keep the tip 2 cm
+# into the bed (z = 0.181) when the insert starts. Insert end tip: (-0.0315, 0.0474).
+N_DESCEND_STEPS = 60  # 1.00 s: tip descends 0.0731 m until it is 2 cm into the bed
 N_INSERT_STEPS = 93  # 1.55 s
 N_ROTATE_STEPS = 140  # 2.33 s
 N_LIFT_STEPS = 200  # 3.33 s
 N_HOLD_STEPS = 80  # 1.33 s
-DESCEND_VEL = (0.0, 0.0, -0.092)  # straight down: tip (-0.125, 0.273) -> (-0.125, 0.181)
-INSERT_VEL = (0.0723, 0.0, -0.0862)  # 0.1125 m/s at 50 deg below horizontal (steeper than the
-# 40 deg blade): the tip slides to (-0.013, 0.047), nearly grazing the floor, under the wet clump
-ROTATE_VEL = (0.015375, 0.0, 0.042225)  # trailing-edge-pivot emulation: v_center = -omega x r_pivot
-# (mid-rotation value), keeps the trailing (handle-side) edge near (-0.243, 0.239) fixed so the tip
-# sweeps up along a circular arc through the sand, scooping the wet clump onto the blade
-ROTATE_OMEGA = (0.0, -math.radians(40.0) / (140.0 / 60.0), 0.0)  # 40 deg -> flat about the blade center
+DESCEND_VEL = (0.0, 0.0, -0.0731)  # straight down: tip (-0.144, 0.254) -> (-0.144, 0.181)
+INSERT_VEL = (0.0723, 0.0, -0.0862)  # 0.1125 m/s at 50 deg below horizontal, parallel to the 50 deg
+# blade face: the tip slides to (-0.032, 0.047), nearly grazing the floor, under the wet clump
+ROTATE_VEL = (0.0237, 0.0, 0.0508)  # trailing-edge-pivot emulation: v_center = -omega x r_pivot
+# (mid-rotation value at 25 deg), keeps the trailing (handle-side) edge near (-0.224, 0.277) fixed
+# so the tip sweeps up along a circular arc through the sand, scooping the wet clump onto the blade
+ROTATE_OMEGA = (0.0, -math.radians(50.0) / (140.0 / 60.0), 0.0)  # 50 deg -> flat about the blade center
 LIFT_VEL = (0.0, 0.0, 0.075)
 KEYFRAME_STEPS = [0, 299, 410, 522, 592, 740, 872]
 WET_EVERY = 3
@@ -111,8 +115,8 @@ WALL_HEIGHT = 0.24  # taller than the 0.20 m sand bed
 # blade box matched to the litter-scoop pan (objaverse 'Litter scoop/貓砂鏟'):
 # pan depth 0.30 m along x, pan width 0.234 m along y
 BLADE_HALF = (0.15, 0.117, 0.01)
-BLADE_ANGLE = math.radians(40.0)  # about +y: local +x edge descends toward +x (leading edge low)
-BLADE_POS0 = (-0.24, 0.0, 0.369)  # tip starts at (-0.125, 0.273) above the descent target point
+BLADE_ANGLE = math.radians(50.0)  # about +y: local +x edge descends toward +x (leading edge low)
+BLADE_POS0 = (-0.24, 0.0, 0.369)  # tip starts at (-0.144, 0.254) above the descent target point
 HANDLE_LEN = 0.3
 HANDLE_HALF_THICK = 0.015
 HANDLE_ANGLE = math.radians(40.0)
