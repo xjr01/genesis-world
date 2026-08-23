@@ -297,7 +297,7 @@ def case_settings(case):
                 quat=wipe.quat,
                 lower=wipe.collider_lower,
                 upper=wipe.collider_upper,
-                absorption_rate=800.0,
+                absorption_rate=2000.0,
                 absorption_capacity_fraction=1.0,
             )
         else:

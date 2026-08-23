@@ -794,10 +794,12 @@ class PBSTFBoxStaticColliderOptions(PBSTFStaticColliderOptions):
 class PBSTFAbsorbentStaticColliderOptionsMixin(Options):
     """Absorption controls for a position-based surface tension flow (PBSTF) static collider.
 
-    ``absorption_rate`` is the exponential inward-motion rate in inverse seconds. A higher value draws captured liquid
-    inward faster but produces a more abrupt local trajectory; a lower value takes longer and moves liquid more
-    gradually. ``absorption_capacity_fraction`` is the fraction of collider volume available for liquid at rest. A
-    higher value stores more liquid before saturation, while a lower value resumes ordinary collision behavior sooner.
+    ``absorption_rate`` limits sustained new captures per simulated second for each collider and environment, and sets
+    the nearest-voxel exponential inward-motion rate. Voxels farther from the contact move liquid inward progressively
+    more slowly. A higher value admits liquid faster but produces more abrupt local trajectories; a lower value reduces
+    throughput and preserves gradual motion. ``absorption_capacity_fraction`` is the fraction of collider volume
+    available for liquid at rest. A higher value stores more liquid before saturation, while a lower value resumes
+    ordinary collision behavior sooner.
     """
 
     absorption_rate: PositiveFloat
@@ -811,7 +813,7 @@ class PBSTFAbsorbentStaticColliderOptionsMixin(Options):
 
 
 class PBSTFAbsorbentBoxStaticColliderOptions(PBSTFAbsorbentStaticColliderOptionsMixin, PBSTFBoxStaticColliderOptions):
-    """Finite analytic position-based surface tension flow (PBSTF) box that captures liquid into local voxels."""
+    """Finite analytic position-based surface tension flow (PBSTF) box with rate-limited nearby-voxel capture."""
 
     type: Literal["absorbent_box"] = "absorbent_box"
 

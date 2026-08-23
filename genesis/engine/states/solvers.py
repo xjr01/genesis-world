@@ -300,17 +300,21 @@ class PBSTFSolverState(_ParticleFluidSolverState):
         self._static_colliders_quat = gs.zeros((scene.sim._B, solver._n_static_colliders, 4), **args)
         self._absorbed_collider_idx = None
         self._absorbed_voxel_idx = None
+        self._absorption_voxel_distance = None
         self._absorption_local_pos = None
         self._absorption_target_local_pos = None
         self._absorption_progress = None
+        self._absorption_capture_budget = None
         if solver._n_absorbent_static_colliders > 0:
             args["dtype"] = gs.tc_int
             self._absorbed_collider_idx = gs.zeros((scene.sim._B, solver.n_particles), **args)
             self._absorbed_voxel_idx = gs.zeros((scene.sim._B, solver.n_particles), **args)
+            self._absorption_voxel_distance = gs.zeros((scene.sim._B, solver.n_particles), **args)
             args["dtype"] = gs.tc_float
             self._absorption_local_pos = gs.zeros((scene.sim._B, solver.n_particles, 3), **args)
             self._absorption_target_local_pos = gs.zeros((scene.sim._B, solver.n_particles, 3), **args)
             self._absorption_progress = gs.zeros((scene.sim._B, solver.n_particles), **args)
+            self._absorption_capture_budget = gs.zeros((scene.sim._B, solver._n_absorbent_static_colliders), **args)
 
     def serializable(self):
         super().serializable()
@@ -319,9 +323,11 @@ class PBSTFSolverState(_ParticleFluidSolverState):
         if self._absorbed_collider_idx is not None:
             self._absorbed_collider_idx = self._absorbed_collider_idx.detach()
             self._absorbed_voxel_idx = self._absorbed_voxel_idx.detach()
+            self._absorption_voxel_distance = self._absorption_voxel_distance.detach()
             self._absorption_local_pos = self._absorption_local_pos.detach()
             self._absorption_target_local_pos = self._absorption_target_local_pos.detach()
             self._absorption_progress = self._absorption_progress.detach()
+            self._absorption_capture_budget = self._absorption_capture_budget.detach()
 
     @property
     def static_colliders_pos(self):
@@ -340,6 +346,10 @@ class PBSTFSolverState(_ParticleFluidSolverState):
         return self._absorbed_voxel_idx
 
     @property
+    def absorption_voxel_distance(self):
+        return self._absorption_voxel_distance
+
+    @property
     def absorption_local_pos(self):
         return self._absorption_local_pos
 
@@ -350,6 +360,10 @@ class PBSTFSolverState(_ParticleFluidSolverState):
     @property
     def absorption_progress(self):
         return self._absorption_progress
+
+    @property
+    def absorption_capture_budget(self):
+        return self._absorption_capture_budget
 
 
 class PBDSolverState:

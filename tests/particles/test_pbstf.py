@@ -252,6 +252,12 @@ def test_static_collider_pose_and_absorption(asset_tmp_path, n_envs, show_viewer
                 (2.0, -2.0, -2.0),
                 (2.0, 2.0, -2.0),
                 (2.0, -2.0, 2.0),
+                (2.0, 2.0, 2.0),
+                (3.0, -2.0, -2.0),
+                (3.0, 2.0, -2.0),
+                (3.0, -2.0, 2.0),
+                (3.0, 2.0, 2.0),
+                (0.0, 3.0, 3.0),
             ),
         ),
         material=gs.materials.PBSTF.Liquid(
@@ -266,7 +272,7 @@ def test_static_collider_pose_and_absorption(asset_tmp_path, n_envs, show_viewer
         colliders_idx=1,
         envs_idx=n_envs - 1 if n_envs else None,
     )
-    liquid.set_particles_pos((1.65, -0.15, -0.15), particles_idx_local=(2, 3, 4))
+    liquid.set_particles_pos((1.65, -0.15, -0.15), particles_idx_local=(2, 3, 4, 5, 6, 7, 8, 9, 10))
 
     solver = scene.pbstf_solver
     solver_state = solver.get_state(0)
@@ -283,10 +289,11 @@ def test_static_collider_pose_and_absorption(asset_tmp_path, n_envs, show_viewer
     if n_envs == 0:
         initial_wetness = initial_wetness[None]
 
-    assert liquid.n_particles == 5
+    assert liquid.n_particles == 11
     assert_allclose(colliders_pos, expected_pos, atol=1e-6)
     assert_allclose(colliders_quat, expected_quat, atol=1e-6)
     assert_equal(initial_wetness, np.zeros((max(n_envs, 1), 2, 2, 2)))
+    assert_equal(tensor_to_array(solver_state.absorption_capture_budget), np.zeros((max(n_envs, 1), 1)))
     with pytest.raises(gs.GenesisException, match="not absorbent"):
         solver.get_static_collider_wetness(2)
 
@@ -299,31 +306,61 @@ def test_static_collider_pose_and_absorption(asset_tmp_path, n_envs, show_viewer
     assert np.linalg.norm(particles_pos[-1, 0] - target_pos) > 0.4
     assert np.linalg.norm(particles_pos[:, 1] - (-2.0, 0.0, 0.0), axis=-1).min() > 0.3
 
+    pending_solver_state = solver.get_state(0)
+    assert_equal((tensor_to_array(pending_solver_state.absorption_progress) > 0.0).sum(axis=-1), 0)
+    assert_allclose(tensor_to_array(pending_solver_state.absorption_capture_budget), 0.1, atol=1e-6)
+
+    for _ in range(9):
+        scene.step()
+    first_solver_state = solver.get_state(0)
+    first_progress = tensor_to_array(first_solver_state.absorption_progress)
+    is_first_captured = first_progress > 0.0
+    assert_equal(is_first_captured.sum(axis=-1), 1)
+    assert_equal(tensor_to_array(first_solver_state.absorption_voxel_distance)[is_first_captured], 0)
+    assert_allclose(first_progress[is_first_captured], 1.0 - math.exp(-0.1), atol=1e-6)
+    assert_allclose(tensor_to_array(first_solver_state.absorption_capture_budget), 0.0, atol=1e-6)
+
+    for _ in range(70):
+        scene.step()
+    particles_pos = tensor_to_array(liquid.get_particles_pos())
+    if n_envs == 0:
+        particles_pos = particles_pos[None]
+
     solver_state = solver.get_state(0)
+    assert_allclose(tensor_to_array(solver_state.absorption_capture_budget), 0.0, atol=1e-6)
     progress = tensor_to_array(solver_state.absorption_progress)
+    voxel_idx = tensor_to_array(solver_state.absorbed_voxel_idx)
+    voxel_distances = tensor_to_array(solver_state.absorption_voxel_distance)
     local_pos = tensor_to_array(solver_state.absorption_local_pos)
     target_local_pos = tensor_to_array(solver_state.absorption_target_local_pos)
     is_captured = progress > 0.0
-    beta = 1.0 - math.exp(-collider_options[3].absorption_rate * 1e-3)
+    beta = np.zeros_like(progress)
+    beta[is_captured] = 1.0 - np.exp(-collider_options[3].absorption_rate * 1e-3 / (voxel_distances[is_captured] + 1))
     wetness = tensor_to_array(solver.get_static_collider_wetness(3))
     if n_envs == 0:
         wetness = wetness[None]
-    expected_wetness = np.zeros((max(n_envs, 1), 2, 2, 2))
-    expected_wetness[:, 0, 0, 0] = beta
-    expected_wetness[:, 1, 0, 0] = beta
     expected_local_start = np.array((-0.35, -0.15, -0.15))
 
-    assert_equal(is_captured.sum(axis=-1), 2)
-    assert_allclose(progress[is_captured], beta, atol=1e-6)
+    assert_equal(is_captured.sum(axis=-1), 8)
+    for env_idx in range(max(n_envs, 1)):
+        assert_equal(np.sort(voxel_idx[env_idx, is_captured[env_idx]]), tuple(range(8)))
+        assert_equal(
+            np.sort(voxel_distances[env_idx, is_captured[env_idx]]),
+            (0, 1, 1, 1, 2, 2, 2, 3),
+        )
+        assert_allclose(
+            np.sort(wetness[env_idx], axis=None),
+            np.sort(progress[env_idx, is_captured[env_idx]]),
+            atol=1e-6,
+        )
     assert_allclose(
         local_pos[is_captured],
-        expected_local_start + beta * (target_local_pos[is_captured] - expected_local_start),
+        expected_local_start + progress[is_captured][:, None] * (target_local_pos[is_captured] - expected_local_start),
         atol=1e-6,
     )
-    assert_allclose(wetness, expected_wetness, atol=1e-6)
     assert ((0.0 <= wetness) & (wetness <= 1.0)).all()
     assert liquid.get_particles_active().all()
-    assert_allclose(particles_pos[..., 2:5, 0].min(axis=-1), 1.65, atol=1e-6)
+    assert_allclose(particles_pos[..., 2:, 0].min(axis=-1), 1.65, atol=1e-6)
 
     moved_pos = (2.5, 0.3, 0.2)
     moved_quat = (math.sqrt(0.5), 0.0, 0.0, math.sqrt(0.5))
@@ -337,7 +374,7 @@ def test_static_collider_pose_and_absorption(asset_tmp_path, n_envs, show_viewer
     if n_envs == 0:
         particles_moved = particles_moved[None]
     progress_expected = progress + beta * (1.0 - progress)
-    local_pos_expected = local_pos + beta * (target_local_pos - local_pos)
+    local_pos_expected = local_pos + beta[..., None] * (target_local_pos - local_pos)
     for env_idx in range(max(n_envs, 1)):
         expected_world = geom_utils.transform_by_quat(
             local_pos_expected[env_idx, is_captured[env_idx]], np.array(moved_quat)
@@ -345,9 +382,11 @@ def test_static_collider_pose_and_absorption(asset_tmp_path, n_envs, show_viewer
         expected_world += moved_pos
         assert_allclose(particles_moved[env_idx, is_captured[env_idx]], expected_world, atol=1e-5)
     solver_state = solver.get_state(0)
+    capture_budget_saved = tensor_to_array(solver_state.absorption_capture_budget)
     assert_allclose(
         tensor_to_array(solver_state.absorption_progress)[is_captured], progress_expected[is_captured], atol=1e-6
     )
+    assert_allclose(capture_budget_saved, 0.1, atol=1e-6)
 
     saved_state = scene.get_state()
     positions_saved = particles_moved.copy()
@@ -367,6 +406,8 @@ def test_static_collider_pose_and_absorption(asset_tmp_path, n_envs, show_viewer
     assert_allclose(solver.get_static_collider_wetness(3), wetness_saved, atol=1e-6)
     assert_allclose(tensor_to_array(restored_state.static_colliders_pos)[:, 3], moved_pos, atol=1e-6)
     assert_allclose(tensor_to_array(restored_state.static_colliders_quat)[:, 3], moved_quat, atol=1e-6)
+    assert_equal(tensor_to_array(restored_state.absorption_voxel_distance), voxel_distances)
+    assert_allclose(tensor_to_array(restored_state.absorption_capture_budget), capture_budget_saved, atol=1e-6)
 
     wetness_sum = tensor_to_array(solver.get_static_collider_wetness(3))
     if n_envs == 0:
@@ -390,6 +431,11 @@ def test_static_collider_pose_and_absorption(asset_tmp_path, n_envs, show_viewer
         assert (wetness_sum_unbound < wetness_sum).all()
 
     saved_solver_state = saved_state.solvers_state[scene.solvers.index(solver)]
+    saved_solver_state.absorption_capture_budget[:] = math.nan
+    scene.reset(saved_state)
+    with pytest.raises(gs.GenesisException, match="non-finite fluid or absorption"):
+        solver.check_errno()
+    saved_solver_state.absorption_capture_budget[:] = 0.0
     saved_solver_state.absorption_progress[:] = math.nan
     scene.reset(saved_state)
     with pytest.raises(gs.GenesisException, match="non-finite fluid or absorption"):
@@ -564,7 +610,7 @@ def test_case_settings():
     assert_equal(mop_settings.static_colliders[1].pos, sweep_settings.static_colliders[1].pos)
     assert_equal(mop_settings.static_colliders[1].quat, sweep_settings.static_colliders[1].quat)
     assert_equal(mop_settings.static_colliders[1].absorption_rate, 8.0)
-    assert_equal(mop_settings.static_colliders[1].absorption_capacity_fraction, 0.25)
+    assert_equal(mop_settings.static_colliders[1].absorption_capacity_fraction, 1.0)
     for time in (0.0, mop.settle_time, mop.settle_time + 0.5 * mop.wipe_time, 20.0):
         assert_equal(wipe_pose(time, mop), wipe_pose(time, sweep))
 

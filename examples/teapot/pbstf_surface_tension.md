@@ -172,7 +172,7 @@ wipe_collider = gs.options.PBSTFAbsorbentBoxStaticColliderOptions(
     lower=wipe.collider_lower,
     upper=wipe.collider_upper,
     absorption_rate=8.0,
-    absorption_capacity_fraction=0.25,
+    absorption_capacity_fraction=1.0,
 )
 ```
 
@@ -181,19 +181,27 @@ space. The two absorption fields control different parts of the behavior.
 
 ### `absorption_rate`
 
-`absorption_rate` is a positive exponential rate in inverse seconds. For each simulation substep:
+`absorption_rate` controls both admission throughput and inward motion. Each absorbent collider in each environment
+earns `absorption_rate * dt` capture credit per simulation substep, and each new particle binding consumes one credit.
+With persistent contact and free capacity, the sustained upper bound is therefore approximately `absorption_rate`
+newly captured particles per simulated second. Idle credit is bounded to about one additional particle so a dry box
+cannot accumulate a large burst before it reaches water.
+
+After admission, a target at Manhattan voxel distance `d` uses:
 
 ```text
-beta = 1 - exp(-absorption_rate * dt)
+beta = 1 - exp(-absorption_rate * dt / (d + 1))
 progress_new = progress + beta * (1 - progress)
 local_pos_new = local_pos + beta * (target_local_pos - local_pos)
 ```
 
-The time constant is `1 / absorption_rate`. At the default `8.0 s^-1`, the time constant is `0.125 s`: a captured
-particle completes about 63 percent of its inward path in `0.125 s` and about 98 percent in `0.5 s`.
+The nearest-voxel time constant is `1 / absorption_rate`; a target at distance `d` has time constant
+`(d + 1) / absorption_rate`. At the default `8.0 s^-1`, persistent contacts admit about eight particles per simulated
+second. The corresponding motion time constants are `0.125 s` at distance zero, `0.25 s` at distance one, and `0.5 s`
+at distance three.
 
-- Raise the rate for faster pickup and a more abrupt inward trajectory.
-- Lower the rate for slower pickup and a smoother inward trajectory.
+- Raise the rate for more captures per second and a faster, more abrupt inward trajectory.
+- Lower the rate for fewer captures per second and a slower, smoother inward trajectory.
 - The value must be greater than zero.
 
 ### `absorption_capacity_fraction`
@@ -208,9 +216,8 @@ total_capacity = floor(
 )
 ```
 
-The default box has volume `1.2 * 0.83 * 2.4 = 2.3904`, so a fraction of `0.25` reserves `0.5976` units of rest-liquid
-volume before conversion to particle slots. The exact particle count depends on PBSTF mass calibration and particle
-resolution.
+The default box has volume `1.2 * 0.83 * 2.4 = 2.3904`. Its fraction of `1.0` makes that full volume available before
+conversion to particle slots. The exact particle count depends on PBSTF mass calibration and particle resolution.
 
 - Raise the fraction to absorb more liquid and delay saturation.
 - Lower the fraction to saturate sooner and make the box push additional water sooner.
@@ -228,20 +235,23 @@ At the default `scale=20`, `particle_size=0.1` and `support_radius=0.3`. The def
 `(4, 3, 8)` grid. Integer slot counts are distributed uniformly over these 96 voxels while preserving the exact total
 capacity.
 
-When a particle contacts the box, the contact normal chooses an entering face. The solver searches inward along that
-voxel column and reserves the first available slot. Once the local column is full, the same contact receives ordinary
-box collision behavior and the box pushes that particle. This makes saturation local rather than global.
+When a particle contacts the box, its collider-local position selects the nearest voxel. The solver examines
+precomputed offsets in breadth-first order: the contact voxel at Manhattan distance zero, its face-adjacent neighbors
+at distance one, and successive distance layers. It atomically reserves the first available slot. Equal-distance
+voxels use physical center distance and a fixed coordinate order as tie breakers. Ordinary box collision resumes only
+after every reachable voxel is full, so contacts can use capacity throughout the box.
 
 Captured particles remain active and visible. They follow box translation and rotation while converging to their
-voxel targets, and they leave density, surface, distance, viscosity, adhesion, and friction processing. This simplified
-model has no voxel-to-voxel diffusion and no automatic release. Explicitly setting a captured particle's position,
-velocity, or active state releases its absorption binding. Scene state save and restore includes all bindings, progress,
-local targets, and dynamic collider poses; wetness is rebuilt from the restored binding progress.
+voxel targets, and they leave density, surface, distance, viscosity, adhesion, and friction processing. Each capture
+remains assigned to its reserved target voxel. Explicitly setting a captured particle's position, velocity, or active
+state releases its absorption binding. Scene state save and restore includes all bindings, capture credit, voxel
+distances, progress, local targets, and dynamic collider poses; wetness is rebuilt from the restored binding progress.
 
-Changing `scale` also changes `particle_size`, support radius, voxel count, calibrated particle volume, and therefore
-the integer capacity distribution. Retune `absorption_capacity_fraction` after a large resolution change. The rate is
-defined in seconds and keeps the same continuous-time meaning when `dt` changes, although a smaller `dt` resolves
-contacts and motion more finely.
+Changing `scale` also changes `particle_size`, support radius, voxel count, graph distances, calibrated particle
+volume, and therefore the integer capacity distribution. Since the admission limit counts particles, its volumetric
+rate is `absorption_rate * particle_rest_volume`; retune `absorption_rate` inversely with particle rest volume to keep
+the same liquid volume per second after a resolution change. The rate keeps the same continuous-time meaning when `dt`
+changes, although a smaller `dt` resolves contacts and motion more finely.
 
 ### Reading wetness
 

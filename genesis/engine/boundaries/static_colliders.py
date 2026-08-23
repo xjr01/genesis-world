@@ -85,6 +85,8 @@ class AbsorbentStaticCollider:
         self.voxel_capacity = None
         self.voxel_start = 0
         self.n_voxels = 0
+        self.voxel_search_offset_start = 0
+        self.n_voxel_search_offsets = 0
         self.total_capacity = 0
 
         if self.absorption_rate <= 0.0:
@@ -94,7 +96,7 @@ class AbsorbentStaticCollider:
 
 
 class AbsorbentBoxStaticCollider(BoxStaticCollider, AbsorbentStaticCollider):
-    """Finite analytic box that captures position-based surface tension flow (PBSTF) particles into local voxels."""
+    """Finite analytic box with rate-limited nearby-voxel capture for position-based surface tension flow (PBSTF)."""
 
     type = "absorbent_box"
 

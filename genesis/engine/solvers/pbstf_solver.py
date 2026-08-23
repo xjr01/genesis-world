@@ -89,6 +89,8 @@ class PBSTFSolver(Solver):
         self._absorption_voxel_capacity = None
         self._absorption_voxel_occupancy = None
         self._absorption_voxel_wetness = None
+        self._absorption_voxel_search_offsets = None
+        self._absorption_capture_budget = None
         self._errno = None
 
     @property
@@ -344,12 +346,15 @@ class PBSTFSolver(Solver):
         absorption_particle_state = qd.types.struct(
             collider_idx=gs.qd_int,
             voxel_idx=gs.qd_int,
+            voxel_distance=gs.qd_int,
             local_pos=gs.qd_vec3,
             target_local_pos=gs.qd_vec3,
             progress=gs.qd_float,
         )
 
         voxel_start = 0
+        voxel_search_offset_start = 0
+        voxel_search_offsets = []
         for collider_idx in self._absorbent_static_colliders_idx:
             collider = self._static_colliders[collider_idx]
             collider.grid_res = np.ceil((collider.upper - collider.lower) / self._support_radius).astype(gs.np_int)
@@ -360,6 +365,27 @@ class PBSTFSolver(Solver):
             collider.n_voxels = int(np.prod(collider.grid_res))
             voxel_start += collider.n_voxels
 
+            axis_offsets = tuple(
+                np.arange(1 - collider.grid_res[axis], collider.grid_res[axis], dtype=gs.np_int) for axis in range(3)
+            )
+            collider_search_offsets = np.stack(np.meshgrid(*axis_offsets, indexing="ij"), axis=-1).reshape((-1, 3))
+            voxel_distances = np.abs(collider_search_offsets).sum(axis=-1)
+            physical_distance_sq = np.square(collider_search_offsets * collider.voxel_size).sum(axis=-1)
+            search_order = np.lexsort(
+                (
+                    collider_search_offsets[:, 2],
+                    collider_search_offsets[:, 1],
+                    collider_search_offsets[:, 0],
+                    physical_distance_sq,
+                    voxel_distances,
+                )
+            )
+            collider_search_offsets = collider_search_offsets[search_order]
+            collider.voxel_search_offset_start = voxel_search_offset_start
+            collider.n_voxel_search_offsets = len(collider_search_offsets)
+            voxel_search_offset_start += collider.n_voxel_search_offsets
+            voxel_search_offsets.append(collider_search_offsets)
+
         self._n_absorption_voxels = voxel_start
         shape = (self._n_particles, self._B)
         self._absorption_particles = absorption_particle_state.field(shape=shape, layout=qd.Layout.SOA)
@@ -367,9 +393,13 @@ class PBSTFSolver(Solver):
         self._absorption_voxel_capacity = qd.field(gs.qd_int, shape=(self._n_absorption_voxels,))
         self._absorption_voxel_occupancy = qd.field(gs.qd_int, shape=(self._n_absorption_voxels, self._B))
         self._absorption_voxel_wetness = qd.field(gs.qd_float, shape=(self._n_absorption_voxels, self._B))
+        self._absorption_voxel_search_offsets = qd.field(gs.qd_ivec3, shape=(voxel_search_offset_start,))
+        self._absorption_capture_budget = qd.field(gs.qd_float, shape=(self._n_absorbent_static_colliders, self._B))
         self._absorption_voxel_capacity.fill(0)
         self._absorption_voxel_occupancy.fill(0)
         self._absorption_voxel_wetness.fill(0.0)
+        self._absorption_voxel_search_offsets.from_numpy(np.concatenate(voxel_search_offsets))
+        self._absorption_capture_budget.fill(0.0)
         pbstf_absorption.kernel_initialize_absorption_particles(self._n_particles, self._absorption_particles)
         pbstf_absorption.kernel_initialize_absorption_particles(
             self._n_particles, self._absorption_particles_reordered
@@ -418,20 +448,22 @@ class PBSTFSolver(Solver):
 
     def _capture_absorbent_contacts(self):
         error_code = int(ErrorCode.INVALID_PBSTF_STATE_NAN)
-        for collider_idx in self._absorbent_static_colliders_idx:
+        for absorption_idx, collider_idx in enumerate(self._absorbent_static_colliders_idx):
             collider = self._static_colliders[collider_idx]
-            beta = 1.0 - math.exp(-collider.absorption_rate * self._substep_dt)
             pbstf_absorption.kernel_capture_particles(
                 self._n_particles,
                 collider_idx,
+                absorption_idx,
                 self._particle_radius,
                 self._substep_dt,
-                beta,
+                collider.absorption_rate,
                 self.particles_reordered,
                 self.particles_ng_reordered,
                 self._absorption_particles_reordered,
+                self._absorption_capture_budget,
                 self._absorption_voxel_capacity,
                 self._absorption_voxel_occupancy,
+                self._absorption_voxel_search_offsets,
                 self._static_colliders_pos,
                 self._static_colliders_quat,
                 collider,
@@ -446,7 +478,9 @@ class PBSTFSolver(Solver):
         pbstf_absorption.kernel_rebuild_voxels(
             self._n_particles,
             self._n_absorption_voxels,
+            self._n_absorbent_static_colliders,
             absorption_particles,
+            self._absorption_capture_budget,
             self._absorption_voxel_capacity,
             self._absorption_voxel_occupancy,
             self._absorption_voxel_wetness,
@@ -1348,15 +1382,34 @@ class PBSTFSolver(Solver):
 
         self._kernel_reorder_particles(f)
         if self._n_absorbent_static_colliders > 0:
+            absorption_capture_budget = None
+            if gs.use_zerocopy:
+                absorption_capture_budget = qd_to_torch(self._absorption_capture_budget, copy=False)
+            for absorption_idx, collider_idx in enumerate(self._absorbent_static_colliders_idx):
+                budget_increment = self._static_colliders[collider_idx].absorption_rate * self._substep_dt
+                # One carried token preserves fractional throughput and bounds the burst after an idle interval.
+                budget_limit = budget_increment + 1.0
+                if gs.use_zerocopy:
+                    collider_capture_budget = absorption_capture_budget[absorption_idx]
+                    collider_capture_budget.add_(budget_increment)
+                    collider_capture_budget.clamp_(min=0.0, max=budget_limit)
+                else:
+                    pbstf_absorption.kernel_replenish_capture_budget(
+                        absorption_idx,
+                        budget_increment,
+                        budget_limit,
+                        self._absorption_capture_budget,
+                    )
+            if gs.use_zerocopy and gs.backend == gs.metal:
+                torch.mps.synchronize()
             error_code = int(ErrorCode.INVALID_PBSTF_STATE_NAN)
             for collider_idx in self._absorbent_static_colliders_idx:
                 collider = self._static_colliders[collider_idx]
-                beta = 1.0 - math.exp(-collider.absorption_rate * self._substep_dt)
                 pbstf_absorption.kernel_update_absorbed_particles(
                     self._n_particles,
                     collider_idx,
                     self._substep_dt,
-                    beta,
+                    collider.absorption_rate,
                     self.particles_reordered,
                     self.particles_ng_reordered,
                     self._absorption_particles_reordered,
@@ -1465,11 +1518,18 @@ class PBSTFSolver(Solver):
                     self._static_colliders_quat,
                 )
             if self._n_absorbent_static_colliders > 0:
+                pbstf_absorption.kernel_set_absorption_capture_budget(
+                    self._n_absorbent_static_colliders,
+                    envs_idx,
+                    state.absorption_capture_budget,
+                    self._absorption_capture_budget,
+                )
                 pbstf_absorption.kernel_set_absorption_state(
                     self._n_particles,
                     envs_idx,
                     state.absorbed_collider_idx,
                     state.absorbed_voxel_idx,
+                    state.absorption_voxel_distance,
                     state.absorption_local_pos,
                     state.absorption_target_local_pos,
                     state.absorption_progress,
@@ -1507,11 +1567,17 @@ class PBSTFSolver(Solver):
                 state.static_colliders_quat,
             )
         if self._n_absorbent_static_colliders > 0:
+            pbstf_absorption.kernel_get_absorption_capture_budget(
+                self._n_absorbent_static_colliders,
+                self._absorption_capture_budget,
+                state.absorption_capture_budget,
+            )
             pbstf_absorption.kernel_get_absorption_state(
                 self._n_particles,
                 self._absorption_particles,
                 state.absorbed_collider_idx,
                 state.absorbed_voxel_idx,
+                state.absorption_voxel_distance,
                 state.absorption_local_pos,
                 state.absorption_target_local_pos,
                 state.absorption_progress,
