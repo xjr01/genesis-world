@@ -609,7 +609,7 @@ def test_case_settings():
     assert_equal(mop_settings.static_colliders[1].upper, sweep_settings.static_colliders[1].upper)
     assert_equal(mop_settings.static_colliders[1].pos, sweep_settings.static_colliders[1].pos)
     assert_equal(mop_settings.static_colliders[1].quat, sweep_settings.static_colliders[1].quat)
-    assert_equal(mop_settings.static_colliders[1].absorption_rate, 8.0)
+    assert_equal(mop_settings.static_colliders[1].absorption_rate, 2000.0)
     assert_equal(mop_settings.static_colliders[1].absorption_capacity_fraction, 1.0)
     for time in (0.0, mop.settle_time, mop.settle_time + 0.5 * mop.wipe_time, 20.0):
         assert_equal(wipe_pose(time, mop), wipe_pose(time, sweep))

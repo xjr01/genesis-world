@@ -171,7 +171,7 @@ wipe_collider = gs.options.PBSTFAbsorbentBoxStaticColliderOptions(
     quat=wipe.quat,
     lower=wipe.collider_lower,
     upper=wipe.collider_upper,
-    absorption_rate=8.0,
+    absorption_rate=2000.0,
     absorption_capacity_fraction=1.0,
 )
 ```
@@ -196,9 +196,9 @@ local_pos_new = local_pos + beta * (target_local_pos - local_pos)
 ```
 
 The nearest-voxel time constant is `1 / absorption_rate`; a target at distance `d` has time constant
-`(d + 1) / absorption_rate`. At the default `8.0 s^-1`, persistent contacts admit about eight particles per simulated
-second. The corresponding motion time constants are `0.125 s` at distance zero, `0.25 s` at distance one, and `0.5 s`
-at distance three.
+`(d + 1) / absorption_rate`. At the default `2000.0 s^-1`, persistent contacts admit about 2000 particles per
+simulated second. The corresponding motion time constants are `0.0005 s` at distance zero, `0.001 s` at distance one,
+and `0.002 s` at distance three.
 
 - Raise the rate for more captures per second and a faster, more abrupt inward trajectory.
 - Lower the rate for fewer captures per second and a slower, smoother inward trajectory.
