@@ -813,9 +813,25 @@ class PBSTFAbsorbentStaticColliderOptionsMixin(Options):
 
 
 class PBSTFAbsorbentBoxStaticColliderOptions(PBSTFAbsorbentStaticColliderOptionsMixin, PBSTFBoxStaticColliderOptions):
-    """Finite analytic position-based surface tension flow (PBSTF) box with rate-limited nearby-voxel capture."""
+    """Finite position-based surface tension flow (PBSTF) box with rate-limited nearby-voxel capture.
+
+    ``fem_entity_name`` optionally binds the collider geometry to a volumetric finite element method (FEM) entity.
+    Binding lets the collider and its material-space absorption targets follow deformation, at the cost of updating a
+    triangle surface and voxel search order whenever the FEM shape changes. ``sdf_res`` enables a signed distance field
+    (SDF) that can be built after deformation stops. Higher resolutions preserve smaller surface features at cubic
+    preprocessing and memory cost, while ``None`` keeps exact triangle queries. ``fem_entity_name=None`` uses
+    inexpensive analytic box geometry.
+    """
 
     type: Literal["absorbent_box"] = "absorbent_box"
+    fem_entity_name: str | None = None
+    sdf_res: StrictInt | None = Field(default=None, ge=16)
+
+    @model_validator(mode="after")
+    def _validate_sdf(self):
+        if self.sdf_res is not None and self.fem_entity_name is None:
+            gs.raise_exception("PBSTF absorbent box collider `sdf_res` requires `fem_entity_name`.")
+        return self
 
 
 class PBSTFConeStaticColliderOptions(PBSTFStaticColliderOptions):

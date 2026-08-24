@@ -61,6 +61,163 @@ def kernel_replenish_capture_budget(
 
 
 @qd.kernel
+def kernel_set_deformable_collider_geometry(
+    envs_idx: qd.types.ndarray(),
+    surface_positions: qd.types.ndarray(),
+    voxel_positions: qd.types.ndarray(),
+    voxel_search_order: qd.types.ndarray(),
+    collider: qd.template(),
+):
+    for surface_vertex_idx, env_idx_local in qd.ndrange(collider.n_surface_vertices, envs_idx.shape[0]):
+        env_idx = envs_idx[env_idx_local]
+        for axis in qd.static(range(3)):
+            collider.surface_vertices[surface_vertex_idx, env_idx][axis] = surface_positions[
+                env_idx_local, surface_vertex_idx, axis
+            ]
+    for voxel_idx, env_idx_local in qd.ndrange(collider.n_voxels, envs_idx.shape[0]):
+        env_idx = envs_idx[env_idx_local]
+        for axis in qd.static(range(3)):
+            collider.voxel_positions[voxel_idx, env_idx][axis] = voxel_positions[env_idx_local, voxel_idx, axis]
+    for origin_voxel_idx, search_idx, env_idx_local in qd.ndrange(
+        collider.n_voxels, collider.n_voxels, envs_idx.shape[0]
+    ):
+        env_idx = envs_idx[env_idx_local]
+        collider.voxel_search_order[origin_voxel_idx, search_idx, env_idx] = voxel_search_order[
+            env_idx_local, origin_voxel_idx, search_idx
+        ]
+
+
+@qd.kernel
+def kernel_disable_deformable_collider_sdf(envs_idx: qd.types.ndarray(), collider: qd.template()):
+    for env_idx_local in range(envs_idx.shape[0]):
+        collider.is_sdf_active[envs_idx[env_idx_local]] = False
+
+
+@qd.kernel
+def kernel_set_deformable_collider_sdf(
+    envs_idx: qd.types.ndarray(),
+    sdf: qd.types.ndarray(),
+    sdf_lower: qd.types.ndarray(),
+    sdf_inv_cell_size: qd.types.ndarray(),
+    collider: qd.template(),
+):
+    for x, y, z, env_idx_local in qd.ndrange(
+        collider.sdf_res, collider.sdf_res, collider.sdf_res, envs_idx.shape[0]
+    ):
+        collider.sdf[x, y, z, envs_idx[env_idx_local]] = sdf[env_idx_local, x, y, z]
+    for env_idx_local in range(envs_idx.shape[0]):
+        env_idx = envs_idx[env_idx_local]
+        collider.sdf_lower[env_idx] = sdf_lower[env_idx_local]
+        collider.sdf_inv_cell_size[env_idx] = sdf_inv_cell_size[env_idx_local]
+        collider.is_sdf_active[env_idx] = True
+
+
+@qd.kernel
+def kernel_get_deformable_collider_sdf_active(
+    sdf_state_idx: qd.i32,
+    is_sdf_active: qd.types.ndarray(),
+    collider: qd.template(),
+):
+    for env_idx in range(collider.is_sdf_active.shape[0]):
+        is_sdf_active[env_idx, sdf_state_idx] = collider.is_sdf_active[env_idx]
+
+
+@qd.kernel
+def kernel_get_deformable_collider_geometry(
+    surface_vertex_state_start: qd.i32,
+    voxel_state_start: qd.i32,
+    voxel_search_order_state_start: qd.i32,
+    surface_vertices: qd.types.ndarray(),
+    voxel_positions: qd.types.ndarray(),
+    voxel_search_order: qd.types.ndarray(),
+    collider: qd.template(),
+):
+    for surface_vertex_idx, env_idx in qd.ndrange(collider.n_surface_vertices, collider.surface_vertices.shape[1]):
+        for axis in qd.static(range(3)):
+            surface_vertices[env_idx, surface_vertex_state_start + surface_vertex_idx, axis] = (
+                collider.surface_vertices[surface_vertex_idx, env_idx][axis]
+            )
+    for voxel_idx, env_idx in qd.ndrange(collider.n_voxels, collider.voxel_positions.shape[1]):
+        for axis in qd.static(range(3)):
+            voxel_positions[env_idx, voxel_state_start + voxel_idx, axis] = collider.voxel_positions[
+                voxel_idx, env_idx
+            ][axis]
+    for origin_voxel_idx, search_idx, env_idx in qd.ndrange(
+        collider.n_voxels, collider.n_voxels, collider.voxel_search_order.shape[2]
+    ):
+        state_idx = voxel_search_order_state_start + origin_voxel_idx * collider.n_voxels + search_idx
+        voxel_search_order[env_idx, state_idx] = collider.voxel_search_order[
+            origin_voxel_idx, search_idx, env_idx
+        ]
+
+
+@qd.kernel
+def kernel_set_deformable_collider_state(
+    surface_vertex_state_start: qd.i32,
+    voxel_state_start: qd.i32,
+    voxel_search_order_state_start: qd.i32,
+    envs_idx: qd.types.ndarray(),
+    surface_vertices: qd.types.ndarray(),
+    voxel_positions: qd.types.ndarray(),
+    voxel_search_order: qd.types.ndarray(),
+    collider: qd.template(),
+):
+    for surface_vertex_idx, env_idx_local in qd.ndrange(collider.n_surface_vertices, envs_idx.shape[0]):
+        env_idx = envs_idx[env_idx_local]
+        for axis in qd.static(range(3)):
+            collider.surface_vertices[surface_vertex_idx, env_idx][axis] = surface_vertices[
+                env_idx, surface_vertex_state_start + surface_vertex_idx, axis
+            ]
+    for voxel_idx, env_idx_local in qd.ndrange(collider.n_voxels, envs_idx.shape[0]):
+        env_idx = envs_idx[env_idx_local]
+        for axis in qd.static(range(3)):
+            collider.voxel_positions[voxel_idx, env_idx][axis] = voxel_positions[
+                env_idx, voxel_state_start + voxel_idx, axis
+            ]
+    for origin_voxel_idx, search_idx, env_idx_local in qd.ndrange(
+        collider.n_voxels, collider.n_voxels, envs_idx.shape[0]
+    ):
+        env_idx = envs_idx[env_idx_local]
+        state_idx = voxel_search_order_state_start + origin_voxel_idx * collider.n_voxels + search_idx
+        collider.voxel_search_order[origin_voxel_idx, search_idx, env_idx] = voxel_search_order[env_idx, state_idx]
+
+
+@qd.kernel
+def kernel_check_deformable_collider_geometry(
+    collider: qd.template(),
+    error_code: qd.i32,
+    errno: qd.template(),
+):
+    for surface_vertex_idx, env_idx in qd.ndrange(collider.n_surface_vertices, collider.surface_vertices.shape[1]):
+        pos = collider.surface_vertices[surface_vertex_idx, env_idx]
+        is_valid = True
+        for axis in qd.static(range(3)):
+            is_valid = is_valid and not qd.math.isnan(pos[axis]) and not qd.math.isinf(pos[axis])
+        if not is_valid:
+            errno[env_idx] = error_code
+    for triangle_idx, env_idx in qd.ndrange(collider.n_surface_triangles, collider.surface_vertices.shape[1]):
+        face = collider.surface_faces[triangle_idx]
+        v0 = collider.surface_vertices[face[0], env_idx]
+        v1 = collider.surface_vertices[face[1], env_idx]
+        v2 = collider.surface_vertices[face[2], env_idx]
+        if (v1 - v0).cross(v2 - v0).norm_sqr() <= gs.EPS**2:
+            errno[env_idx] = error_code
+    for voxel_idx, env_idx in qd.ndrange(collider.n_voxels, collider.voxel_positions.shape[1]):
+        pos = collider.voxel_positions[voxel_idx, env_idx]
+        is_valid = True
+        for axis in qd.static(range(3)):
+            is_valid = is_valid and not qd.math.isnan(pos[axis]) and not qd.math.isinf(pos[axis])
+        if not is_valid:
+            errno[env_idx] = error_code
+    for origin_voxel_idx, search_idx, env_idx in qd.ndrange(
+        collider.n_voxels, collider.n_voxels, collider.voxel_search_order.shape[2]
+    ):
+        voxel_idx = collider.voxel_search_order[origin_voxel_idx, search_idx, env_idx]
+        if voxel_idx < 0 or voxel_idx >= collider.n_voxels:
+            errno[env_idx] = error_code
+
+
+@qd.kernel
 def kernel_update_absorbed_particles(
     n_particles: qd.i32,
     collider_idx: qd.i32,
@@ -71,6 +228,7 @@ def kernel_update_absorbed_particles(
     absorption_particles: qd.template(),
     colliders_pos: qd.template(),
     colliders_quat: qd.template(),
+    collider: qd.template(),
     error_code: qd.i32,
     errno: qd.template(),
 ):
@@ -81,6 +239,10 @@ def kernel_update_absorbed_particles(
         ):
             local_pos = absorption_particles[particle_idx, env_idx].local_pos
             target_local_pos = absorption_particles[particle_idx, env_idx].target_local_pos
+            if qd.static(collider.is_deformable):
+                voxel_idx_local = absorption_particles[particle_idx, env_idx].voxel_idx - collider.voxel_start
+                target_local_pos = collider.voxel_positions[voxel_idx_local, env_idx]
+                absorption_particles[particle_idx, env_idx].target_local_pos = target_local_pos
             voxel_distance = absorption_particles[particle_idx, env_idx].voxel_distance
             progress = absorption_particles[particle_idx, env_idx].progress
             distance_scale = qd.max(voxel_distance + 1, 1)
@@ -162,29 +324,52 @@ def kernel_capture_particles(
                     collider_quat,
                 )
                 origin_voxel_idx = qd.Vector.zero(gs.qd_int, 3)
-                for axis in qd.static(range(3)):
-                    coordinate = qd.cast(
-                        qd.floor((local_pos[axis] - collider.lower_qd[axis]) / collider.voxel_size_qd[axis]),
-                        gs.qd_int,
-                    )
-                    origin_voxel_idx[axis] = qd.max(0, qd.min(coordinate, collider.grid_res_qd[axis] - 1))
+                origin_voxel_idx_local = 0
+                if qd.static(collider.is_deformable):
+                    origin_distance_sqr = gs.qd_float(1.0e20)
+                    for candidate_voxel_idx in range(collider.n_voxels):
+                        candidate_distance_sqr = (
+                            local_pos - collider.voxel_positions[candidate_voxel_idx, env_idx]
+                        ).norm_sqr()
+                        if candidate_distance_sqr < origin_distance_sqr:
+                            origin_distance_sqr = candidate_distance_sqr
+                            origin_voxel_idx_local = candidate_voxel_idx
+                else:
+                    for axis in qd.static(range(3)):
+                        coordinate = qd.cast(
+                            qd.floor((local_pos[axis] - collider.lower_qd[axis]) / collider.voxel_size_qd[axis]),
+                            gs.qd_int,
+                        )
+                        origin_voxel_idx[axis] = qd.max(0, qd.min(coordinate, collider.grid_res_qd[axis] - 1))
+                    origin_voxel_idx_local = origin_voxel_idx[0] * collider.grid_res_qd[1] + origin_voxel_idx[1]
+                    origin_voxel_idx_local = origin_voxel_idx_local * collider.grid_res_qd[2] + origin_voxel_idx[2]
 
                 search_offset_idx = 0
                 is_captured = False
                 is_search_active = True
-                while search_offset_idx < collider.n_voxel_search_offsets and not is_captured and is_search_active:
-                    voxel_offset = voxel_search_offsets[collider.voxel_search_offset_start + search_offset_idx]
-                    voxel_idx = origin_voxel_idx + voxel_offset
+                n_search_candidates = collider.n_voxels
+                if qd.static(not collider.is_deformable):
+                    n_search_candidates = collider.n_voxel_search_offsets
+                while search_offset_idx < n_search_candidates and not is_captured and is_search_active:
                     is_voxel_inside = True
-                    for axis in qd.static(range(3)):
-                        is_voxel_inside = (
-                            is_voxel_inside
-                            and voxel_idx[axis] >= 0
-                            and voxel_idx[axis] < collider.grid_res_qd[axis]
-                        )
-                    if is_voxel_inside:
+                    voxel_offset = qd.Vector.zero(gs.qd_int, 3)
+                    voxel_idx_local = -1
+                    if qd.static(collider.is_deformable):
+                        voxel_idx_local = collider.voxel_search_order[
+                            origin_voxel_idx_local, search_offset_idx, env_idx
+                        ]
+                    else:
+                        voxel_offset = voxel_search_offsets[collider.voxel_search_offset_start + search_offset_idx]
+                        voxel_idx = origin_voxel_idx + voxel_offset
+                        for axis in qd.static(range(3)):
+                            is_voxel_inside = (
+                                is_voxel_inside
+                                and voxel_idx[axis] >= 0
+                                and voxel_idx[axis] < collider.grid_res_qd[axis]
+                            )
                         voxel_idx_local = voxel_idx[0] * collider.grid_res_qd[1] + voxel_idx[1]
                         voxel_idx_local = voxel_idx_local * collider.grid_res_qd[2] + voxel_idx[2]
+                    if is_voxel_inside:
                         voxel_idx_global = collider.voxel_start + voxel_idx_local
                         capacity = voxel_capacity[voxel_idx_global]
                         if capacity > 0:
@@ -200,8 +385,26 @@ def kernel_capture_particles(
                                     voxel_distance = (
                                         qd.abs(voxel_offset[0]) + qd.abs(voxel_offset[1]) + qd.abs(voxel_offset[2])
                                     )
+                                    target_local_pos = collider.lower_qd + (
+                                        origin_voxel_idx + voxel_offset + 0.5
+                                    ) * collider.voxel_size_qd
+                                    if qd.static(collider.is_deformable):
+                                        yz_resolution = collider.grid_res_qd[1] * collider.grid_res_qd[2]
+                                        origin_x = origin_voxel_idx_local // yz_resolution
+                                        origin_remainder = origin_voxel_idx_local - origin_x * yz_resolution
+                                        origin_y = origin_remainder // collider.grid_res_qd[2]
+                                        origin_z = origin_remainder - origin_y * collider.grid_res_qd[2]
+                                        voxel_x = voxel_idx_local // yz_resolution
+                                        voxel_remainder = voxel_idx_local - voxel_x * yz_resolution
+                                        voxel_y = voxel_remainder // collider.grid_res_qd[2]
+                                        voxel_z = voxel_remainder - voxel_y * collider.grid_res_qd[2]
+                                        voxel_distance = (
+                                            qd.abs(voxel_x - origin_x)
+                                            + qd.abs(voxel_y - origin_y)
+                                            + qd.abs(voxel_z - origin_z)
+                                        )
+                                        target_local_pos = collider.voxel_positions[voxel_idx_local, env_idx]
                                     beta = 1.0 - qd.exp(-absorption_rate * substep_dt / (voxel_distance + 1))
-                                    target_local_pos = collider.lower_qd + (voxel_idx + 0.5) * collider.voxel_size_qd
                                     local_pos += beta * (target_local_pos - local_pos)
                                     progress = beta
                                     absorbed_pos = gu.qd_transform_by_trans_quat(

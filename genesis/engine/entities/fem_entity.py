@@ -1,22 +1,24 @@
 from functools import wraps
 from pathlib import Path
 
-import igl
 import numpy as np
-import quadrants as qd
 import torch
+
+import igl
 import trimesh
+
+import quadrants as qd
 
 import genesis as gs
 import genesis.utils.element as eu
 import genesis.utils.geom as gu
 import genesis.utils.mesh as mu
+from genesis.engine.couplers import IPCCoupler, SAPCoupler
 from genesis.engine.entities.rigid_entity import RigidLink
-from genesis.engine.couplers import SAPCoupler
 from genesis.engine.states.cache import QueriedStates
 from genesis.engine.states.entities import FEMEntityState
 from genesis.repr_base import RBC
-from genesis.utils.misc import to_gs_tensor, tensor_to_array, broadcast_tensor
+from genesis.utils.misc import broadcast_tensor, tensor_to_array, to_gs_tensor
 
 from .base_entity import Entity
 
@@ -432,6 +434,42 @@ class FEMEntity(Entity):
         self._queried_states.append(state)
 
         return state
+
+    @gs.assert_built
+    def get_embedded_positions(self, elements_idx_local, barycentric, envs_idx=None):
+        """Evaluate material points embedded in volumetric finite element method (FEM) tetrahedra.
+
+        ``elements_idx_local`` selects one tetrahedron per point and ``barycentric`` supplies its four rest-space
+        weights. The returned tensor has shape ``[B, n_points, 3]`` and follows the current deformed vertices, where
+        ``B`` is the number of selected environments and equals one in a non-batched scene.
+        """
+        if self.elems.shape[1] != 4:
+            gs.raise_exception("Embedded FEM positions require tetrahedral elements.")
+
+        envs_idx = self._scene._sanitize_envs_idx(envs_idx)
+        elements_idx_local = broadcast_tensor(elements_idx_local, gs.tc_int, (-1,), ("points_idx",)).contiguous()
+        barycentric = broadcast_tensor(
+            barycentric,
+            gs.tc_float,
+            (len(elements_idx_local), 4),
+            ("points_idx", "tetrahedron_vertices_idx"),
+        ).contiguous()
+        barycentric_tolerance = 1.0e-5
+        if (elements_idx_local < 0).any() or (elements_idx_local >= self.n_elements).any():
+            gs.raise_exception("Embedded FEM element indices are out of range.")
+        if not torch.isfinite(barycentric).all():
+            gs.raise_exception("Embedded FEM barycentric coordinates must be finite.")
+        if (barycentric < -barycentric_tolerance).any() or (
+            torch.abs(barycentric.sum(dim=-1) - 1.0) > barycentric_tolerance
+        ).any():
+            gs.raise_exception("Embedded FEM barycentric coordinates must describe points inside tetrahedra.")
+
+        return self._solver.get_embedded_positions(
+            self._sim.cur_substep_local,
+            elements_idx_local + self._el_start,
+            barycentric,
+            envs_idx,
+        )
 
     def deactivate(self):
         gs.logger.info(f"{self.__class__.__name__} <{self.id}> deactivated.")
@@ -974,8 +1012,6 @@ class FEMEntity(Entity):
             envs_idx : array_like, optional
                 List of environment indices to apply the constraints to. If None, applies to all environments.
         """
-        from genesis.engine.couplers import IPCCoupler
-
         if self._solver._use_implicit_solver and not self._solver._enable_vertex_constraints:
             gs.raise_exception(
                 "This feature is disabled. Please set 'enable_vertex_constraints=True' when using FEM implicit solver."
@@ -999,15 +1035,15 @@ class FEMEntity(Entity):
         if link is None:
             link_idx = -1
             link_init_pos = torch.zeros((self._sim._B, 3), dtype=gs.tc_float, device=gs.device)
-            link_init_quat = torch.zeros((self._sim._B, 4), dtype=gs.tc_float, device=gs.device)
+            link_init_quat_inv = torch.zeros((self._sim._B, 4), dtype=gs.tc_float, device=gs.device)
         else:
             assert isinstance(link, RigidLink), "Only RigidLink is supported for vertex constraints."
             link_idx = link.idx
             link_init_pos = link.get_pos(relative=False)
-            link_init_quat = link.get_quat(relative=False)
+            link_init_quat_inv = gu.inv_quat(link.get_quat(relative=False))
             if self._scene.n_envs == 0:
                 link_init_pos = link_init_pos[None]
-                link_init_quat = link_init_quat[None]
+                link_init_quat_inv = link_init_quat_inv[None]
 
         self._solver._kernel_set_vertex_constraints(
             self._sim.cur_substep_local,
@@ -1017,7 +1053,7 @@ class FEMEntity(Entity):
             stiffness,
             link_idx,
             link_init_pos,
-            link_init_quat,
+            link_init_quat_inv,
             envs_idx,
         )
 

@@ -1,17 +1,20 @@
-import os
-import pickle as pkl
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+import os
+import pickle as pkl
+
+import numpy as np
 
 import igl
-import numpy as np
-import quadrants as qd
 import trimesh
+
+import quadrants as qd
 
 import genesis as gs
 import genesis.utils.geom as gu
 import genesis.utils.mesh as mesh_utils
 from genesis.utils.misc import get_assets_dir, get_gsd_cache_dir
+from genesis.utils.triangle_qd import closest_point_on_triangle, triangle_face_normal
 
 _COLLIDER_CONE = 0
 _COLLIDER_MESH = 1
@@ -34,6 +37,7 @@ class StaticCollider(ABC):
     def __init__(self, pos, quat):
         self.pos = np.array(pos)
         self.quat = np.array(quat)
+        self.is_deformable = False
 
     @classmethod
     @abstractmethod
@@ -96,7 +100,7 @@ class AbsorbentStaticCollider:
 
 
 class AbsorbentBoxStaticCollider(BoxStaticCollider, AbsorbentStaticCollider):
-    """Finite analytic box with rate-limited nearby-voxel capture for position-based surface tension flow (PBSTF)."""
+    """Finite box with rate-limited nearby-voxel capture for position-based surface tension flow (PBSTF)."""
 
     type = "absorbent_box"
 
@@ -106,6 +110,8 @@ class AbsorbentBoxStaticCollider(BoxStaticCollider, AbsorbentStaticCollider):
         upper,
         absorption_rate,
         absorption_capacity_fraction,
+        fem_entity_name=None,
+        sdf_res=None,
         pos=(0.0, 0.0, 0.0),
         quat=(1.0, 0.0, 0.0, 0.0),
     ):
@@ -115,6 +121,30 @@ class AbsorbentBoxStaticCollider(BoxStaticCollider, AbsorbentStaticCollider):
             absorption_rate=absorption_rate,
             absorption_capacity_fraction=absorption_capacity_fraction,
         )
+        self.fem_entity_name = fem_entity_name
+        self.sdf_res = sdf_res
+        self.is_deformable = fem_entity_name is not None
+        self.has_sdf = sdf_res is not None
+        self.fem_entity = None
+        self.embedding_elements_idx = None
+        self.embedding_barycentric = None
+        self.n_surface_vertices = 0
+        self.n_surface_triangles = 0
+        self.surface_faces_array = None
+        self.surface_faces_tensor = None
+        self.surface_faces = None
+        self.surface_vertices = None
+        self.sdf = None
+        self.sdf_lower = None
+        self.sdf_inv_cell_size = None
+        self.is_sdf_active = None
+        self.sdf_state_idx = -1
+        self.voxel_graph_distance = None
+        self.voxel_positions = None
+        self.voxel_search_order = None
+        self.surface_vertex_state_start = 0
+        self.voxel_state_start = 0
+        self.voxel_search_order_state_start = 0
 
     @classmethod
     def from_options(cls, options):
@@ -123,6 +153,8 @@ class AbsorbentBoxStaticCollider(BoxStaticCollider, AbsorbentStaticCollider):
             upper=options.upper,
             absorption_rate=options.absorption_rate,
             absorption_capacity_fraction=options.absorption_capacity_fraction,
+            fem_entity_name=options.fem_entity_name,
+            sdf_res=options.sdf_res,
             pos=options.pos,
             quat=options.quat,
         )
@@ -192,7 +224,7 @@ class MeshStaticCollider(StaticCollider):
         if not mesh.is_watertight:
             gs.raise_exception("PBSTF mesh static colliders require a watertight triangle mesh.")
 
-        sdf_data = _load_or_build_mesh_sdf(mesh, sdf_res)
+        sdf_data = load_or_build_mesh_sdf(mesh.vertices, mesh.faces, sdf_res)
         self.sdf = qd.field(gs.qd_float, shape=sdf_data.values.shape)
         self.sdf.from_numpy(sdf_data.values)
         self.sdf_lower_qd = qd.Vector(sdf_data.lower, dt=gs.qd_float)
@@ -209,9 +241,8 @@ class MeshStaticCollider(StaticCollider):
         )
 
 
-def _load_or_build_mesh_sdf(mesh, sdf_res):
-    vertices = mesh.vertices
-    faces = mesh.faces
+def load_or_build_mesh_sdf(vertices, faces, sdf_res):
+    """Load or build a cached signed distance field for one watertight triangle surface."""
     lower = vertices.min(axis=0)
     upper = vertices.max(axis=0)
     grid_size = upper - lower + (upper - lower).max() * 0.2
@@ -266,7 +297,197 @@ def _cone_radial_direction(pos, collider: qd.template()):
 
 
 @qd.func
-def _query_box_local(pos, collider: qd.template()):
+def _query_sdf_local(
+    env_idx,
+    pos,
+    sdf_lower,
+    sdf_inv_cell_size,
+    sdf: qd.template(),
+    sdf_res,
+    is_sdf_batched: qd.template(),
+):
+    grid_pos = (pos - sdf_lower) * sdf_inv_cell_size
+    is_in_grid = True
+    for axis in qd.static(range(3)):
+        if grid_pos[axis] < 0.0 or grid_pos[axis] > sdf_res - 1:
+            is_in_grid = False
+
+    closest_position = pos
+    closest_normal = qd.Vector([1.0, 0.0, 0.0], dt=gs.qd_float)
+    is_inside = False
+    surface_distance = gs.qd_float(1.0e20)
+    if is_in_grid:
+        cell = qd.Vector.zero(gs.qd_int, 3)
+        fraction = qd.Vector.zero(gs.qd_float, 3)
+        for axis in qd.static(range(3)):
+            cell[axis] = qd.min(qd.cast(qd.floor(grid_pos[axis]), gs.qd_int), sdf_res - 2)
+            fraction[axis] = grid_pos[axis] - cell[axis]
+
+        x, y, z = cell[0], cell[1], cell[2]
+        fx, fy, fz = fraction[0], fraction[1], fraction[2]
+        v000 = gs.qd_float(0.0)
+        v001 = gs.qd_float(0.0)
+        v010 = gs.qd_float(0.0)
+        v011 = gs.qd_float(0.0)
+        v100 = gs.qd_float(0.0)
+        v101 = gs.qd_float(0.0)
+        v110 = gs.qd_float(0.0)
+        v111 = gs.qd_float(0.0)
+        if qd.static(is_sdf_batched):
+            v000 = sdf[x, y, z, env_idx]
+            v001 = sdf[x, y, z + 1, env_idx]
+            v010 = sdf[x, y + 1, z, env_idx]
+            v011 = sdf[x, y + 1, z + 1, env_idx]
+            v100 = sdf[x + 1, y, z, env_idx]
+            v101 = sdf[x + 1, y, z + 1, env_idx]
+            v110 = sdf[x + 1, y + 1, z, env_idx]
+            v111 = sdf[x + 1, y + 1, z + 1, env_idx]
+        else:
+            v000 = sdf[x, y, z]
+            v001 = sdf[x, y, z + 1]
+            v010 = sdf[x, y + 1, z]
+            v011 = sdf[x, y + 1, z + 1]
+            v100 = sdf[x + 1, y, z]
+            v101 = sdf[x + 1, y, z + 1]
+            v110 = sdf[x + 1, y + 1, z]
+            v111 = sdf[x + 1, y + 1, z + 1]
+
+        v00 = v000 * (1.0 - fx) + v100 * fx
+        v01 = v001 * (1.0 - fx) + v101 * fx
+        v10 = v010 * (1.0 - fx) + v110 * fx
+        v11 = v011 * (1.0 - fx) + v111 * fx
+        v0 = v00 * (1.0 - fy) + v10 * fy
+        v1 = v01 * (1.0 - fy) + v11 * fy
+        signed_distance = v0 * (1.0 - fz) + v1 * fz
+
+        gradient = qd.Vector(
+            [
+                (
+                    (1.0 - fy) * (1.0 - fz) * (v100 - v000)
+                    + (1.0 - fy) * fz * (v101 - v001)
+                    + fy * (1.0 - fz) * (v110 - v010)
+                    + fy * fz * (v111 - v011)
+                )
+                * sdf_inv_cell_size[0],
+                (
+                    (1.0 - fx) * (1.0 - fz) * (v010 - v000)
+                    + (1.0 - fx) * fz * (v011 - v001)
+                    + fx * (1.0 - fz) * (v110 - v100)
+                    + fx * fz * (v111 - v101)
+                )
+                * sdf_inv_cell_size[1],
+                (
+                    (1.0 - fx) * (1.0 - fy) * (v001 - v000)
+                    + (1.0 - fx) * fy * (v011 - v010)
+                    + fx * (1.0 - fy) * (v101 - v100)
+                    + fx * fy * (v111 - v110)
+                )
+                * sdf_inv_cell_size[2],
+            ],
+            dt=gs.qd_float,
+        )
+        if gradient.norm_sqr() > gs.EPS**2:
+            closest_normal = gradient.normalized()
+        closest_position = pos - signed_distance * closest_normal
+        is_inside = signed_distance < 0.0
+        surface_distance = qd.abs(signed_distance)
+
+    return closest_position, closest_normal, is_inside, surface_distance
+
+
+@qd.func
+def _query_deformable_surface_local(env_idx, pos, collider: qd.template()):
+    closest_position = pos
+    closest_normal = qd.Vector([1.0, 0.0, 0.0], dt=gs.qd_float)
+    closest_normal_sum = qd.Vector.zero(gs.qd_float, 3)
+    surface_distance_sqr = gs.qd_float(1.0e20)
+    has_closest = False
+    for triangle_idx in range(collider.n_surface_triangles):
+        face = collider.surface_faces[triangle_idx]
+        v0 = collider.surface_vertices[face[0], env_idx]
+        v1 = collider.surface_vertices[face[1], env_idx]
+        v2 = collider.surface_vertices[face[2], env_idx]
+        candidate_normal = triangle_face_normal(v0, v1, v2)
+        candidate = closest_point_on_triangle(pos, v0, v1, v2)
+        candidate_distance_sqr = (pos - candidate).norm_sqr()
+        if not has_closest:
+            closest_position = candidate
+            closest_normal = candidate_normal
+            closest_normal_sum = candidate_normal
+            surface_distance_sqr = candidate_distance_sqr
+            has_closest = True
+        else:
+            distance_tolerance = 8.0 * gs.EPS * qd.max(1.0, candidate_distance_sqr, surface_distance_sqr)
+            if candidate_distance_sqr < surface_distance_sqr - distance_tolerance:
+                closest_normal_sum = candidate_normal
+            elif qd.abs(candidate_distance_sqr - surface_distance_sqr) <= distance_tolerance:
+                # Equidistant face normals give edges and vertices a stable sign while preserving surface dents.
+                closest_normal_sum += candidate_normal
+            if candidate_distance_sqr < surface_distance_sqr:
+                closest_position = candidate
+                closest_normal = candidate_normal
+                surface_distance_sqr = candidate_distance_sqr
+
+    delta = pos - closest_position
+    surface_distance = qd.sqrt(surface_distance_sqr)
+    inside_normal = closest_normal
+    if closest_normal_sum.norm_sqr() > gs.EPS**2:
+        inside_normal = closest_normal_sum.normalized()
+    is_inside_candidate = delta.dot(inside_normal) <= 0.0
+    is_inside = surface_distance <= gs.EPS
+    if is_inside_candidate and not is_inside:
+        # The solid-angle winding number gives a closed concave surface its global inside sign.
+        winding_angle = gs.qd_float(0.0)
+        for triangle_idx in range(collider.n_surface_triangles):
+            face = collider.surface_faces[triangle_idx]
+            a = collider.surface_vertices[face[0], env_idx] - pos
+            b = collider.surface_vertices[face[1], env_idx] - pos
+            c = collider.surface_vertices[face[2], env_idx] - pos
+            a_length = a.norm()
+            b_length = b.norm()
+            c_length = c.norm()
+            numerator = a.dot(b.cross(c))
+            denominator = (
+                a_length * b_length * c_length
+                + a.dot(b) * c_length
+                + b.dot(c) * a_length
+                + c.dot(a) * b_length
+            )
+            winding_angle += 2.0 * qd.atan2(numerator, denominator)
+        is_inside = qd.abs(winding_angle) > 2.0 * qd.math.pi
+    if not is_inside and surface_distance > gs.EPS:
+        closest_normal = delta / surface_distance
+    return closest_position, closest_normal, is_inside, surface_distance
+
+
+@qd.func
+def _query_box_local(env_idx, pos, collider: qd.template()):
+    if qd.static(collider.is_deformable):
+        closest_position = pos
+        closest_normal = qd.Vector([1.0, 0.0, 0.0], dt=gs.qd_float)
+        is_inside = False
+        surface_distance = gs.qd_float(1.0e20)
+        if qd.static(collider.has_sdf):
+            if collider.is_sdf_active[env_idx]:
+                closest_position, closest_normal, is_inside, surface_distance = _query_sdf_local(
+                    env_idx,
+                    pos,
+                    collider.sdf_lower[env_idx],
+                    collider.sdf_inv_cell_size[env_idx],
+                    collider.sdf,
+                    collider.sdf_res,
+                    is_sdf_batched=True,
+                )
+            else:
+                closest_position, closest_normal, is_inside, surface_distance = _query_deformable_surface_local(
+                    env_idx, pos, collider
+                )
+        else:
+            closest_position, closest_normal, is_inside, surface_distance = _query_deformable_surface_local(
+                env_idx, pos, collider
+            )
+        return closest_position, closest_normal, is_inside, surface_distance
+
     closest_position = pos
     closest_normal = qd.Vector([1.0, 0.0, 0.0], dt=gs.qd_float)
     is_inside = True
@@ -343,76 +564,16 @@ def _query_cone_local(pos, collider: qd.template()):
 
 
 @qd.func
-def _query_mesh_local(pos, collider: qd.template()):
-    grid_pos = (pos - collider.sdf_lower_qd) * collider.sdf_inv_cell_size_qd
-    is_in_grid = True
-    for axis in qd.static(range(3)):
-        if grid_pos[axis] < 0.0 or grid_pos[axis] > collider.sdf_res - 1:
-            is_in_grid = False
-
-    closest_position = pos
-    closest_normal = qd.Vector([1.0, 0.0, 0.0], dt=gs.qd_float)
-    is_inside = False
-    surface_distance = gs.qd_float(1.0e20)
-    if is_in_grid:
-        cell = qd.Vector.zero(gs.qd_int, 3)
-        fraction = qd.Vector.zero(gs.qd_float, 3)
-        for axis in qd.static(range(3)):
-            cell[axis] = qd.min(qd.cast(qd.floor(grid_pos[axis]), gs.qd_int), collider.sdf_res - 2)
-            fraction[axis] = grid_pos[axis] - cell[axis]
-
-        x, y, z = cell[0], cell[1], cell[2]
-        fx, fy, fz = fraction[0], fraction[1], fraction[2]
-        v000 = collider.sdf[x, y, z]
-        v001 = collider.sdf[x, y, z + 1]
-        v010 = collider.sdf[x, y + 1, z]
-        v011 = collider.sdf[x, y + 1, z + 1]
-        v100 = collider.sdf[x + 1, y, z]
-        v101 = collider.sdf[x + 1, y, z + 1]
-        v110 = collider.sdf[x + 1, y + 1, z]
-        v111 = collider.sdf[x + 1, y + 1, z + 1]
-
-        v00 = v000 * (1.0 - fx) + v100 * fx
-        v01 = v001 * (1.0 - fx) + v101 * fx
-        v10 = v010 * (1.0 - fx) + v110 * fx
-        v11 = v011 * (1.0 - fx) + v111 * fx
-        v0 = v00 * (1.0 - fy) + v10 * fy
-        v1 = v01 * (1.0 - fy) + v11 * fy
-        signed_distance = v0 * (1.0 - fz) + v1 * fz
-
-        gradient = qd.Vector(
-            [
-                (
-                    (1.0 - fy) * (1.0 - fz) * (v100 - v000)
-                    + (1.0 - fy) * fz * (v101 - v001)
-                    + fy * (1.0 - fz) * (v110 - v010)
-                    + fy * fz * (v111 - v011)
-                )
-                * collider.sdf_inv_cell_size_qd[0],
-                (
-                    (1.0 - fx) * (1.0 - fz) * (v010 - v000)
-                    + (1.0 - fx) * fz * (v011 - v001)
-                    + fx * (1.0 - fz) * (v110 - v100)
-                    + fx * fz * (v111 - v101)
-                )
-                * collider.sdf_inv_cell_size_qd[1],
-                (
-                    (1.0 - fx) * (1.0 - fy) * (v001 - v000)
-                    + (1.0 - fx) * fy * (v011 - v010)
-                    + fx * (1.0 - fy) * (v101 - v100)
-                    + fx * fy * (v111 - v110)
-                )
-                * collider.sdf_inv_cell_size_qd[2],
-            ],
-            dt=gs.qd_float,
-        )
-        if gradient.norm_sqr() > gs.EPS**2:
-            closest_normal = gradient.normalized()
-        closest_position = pos - signed_distance * closest_normal
-        is_inside = signed_distance < 0.0
-        surface_distance = qd.abs(signed_distance)
-
-    return closest_position, closest_normal, is_inside, surface_distance
+def _query_mesh_local(env_idx, pos, collider: qd.template()):
+    return _query_sdf_local(
+        env_idx,
+        pos,
+        collider.sdf_lower_qd,
+        collider.sdf_inv_cell_size_qd,
+        collider.sdf,
+        collider.sdf_res,
+        is_sdf_batched=False,
+    )
 
 
 @qd.func
@@ -425,11 +586,11 @@ def query_static_collider(collider_idx, env_idx, pos, colliders_pos, colliders_q
     is_inside = False
     surface_distance = gs.qd_float(1.0e20)
     if qd.static(collider.kind == _COLLIDER_BOX):
-        closest_local, normal_local, is_inside, surface_distance = _query_box_local(pos_local, collider)
+        closest_local, normal_local, is_inside, surface_distance = _query_box_local(env_idx, pos_local, collider)
     elif qd.static(collider.kind == _COLLIDER_CONE):
         closest_local, normal_local, is_inside, surface_distance = _query_cone_local(pos_local, collider)
     elif qd.static(collider.kind == _COLLIDER_MESH):
-        closest_local, normal_local, is_inside, surface_distance = _query_mesh_local(pos_local, collider)
+        closest_local, normal_local, is_inside, surface_distance = _query_mesh_local(env_idx, pos_local, collider)
     closest = gu.qd_transform_by_trans_quat(closest_local, collider_pos, collider_quat)
     normal = gu.qd_transform_by_quat(normal_local, collider_quat)
     return closest, normal, is_inside, surface_distance
@@ -508,6 +669,7 @@ __all__ = [
     "ConeStaticCollider",
     "MeshStaticCollider",
     "create_static_collider",
+    "load_or_build_mesh_sdf",
     "project_out_static_collider",
     "query_static_collider",
     "query_static_collider_contact",

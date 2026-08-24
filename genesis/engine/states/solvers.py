@@ -298,6 +298,26 @@ class PBSTFSolverState(_ParticleFluidSolverState):
         }
         self._static_colliders_pos = gs.zeros((scene.sim._B, solver._n_static_colliders, 3), **args)
         self._static_colliders_quat = gs.zeros((scene.sim._B, solver._n_static_colliders, 4), **args)
+        self._deformable_static_colliders_surface_vertices = None
+        self._deformable_static_colliders_voxel_positions = None
+        self._deformable_static_colliders_voxel_search_order = None
+        self._is_deformable_static_colliders_sdf_active = None
+        if solver._n_deformable_static_colliders > 0:
+            self._deformable_static_colliders_surface_vertices = gs.zeros(
+                (scene.sim._B, solver._n_deformable_surface_vertices, 3), **args
+            )
+            self._deformable_static_colliders_voxel_positions = gs.zeros(
+                (scene.sim._B, solver._n_deformable_voxels, 3), **args
+            )
+            args["dtype"] = gs.tc_int
+            self._deformable_static_colliders_voxel_search_order = gs.zeros(
+                (scene.sim._B, solver._n_deformable_voxel_search_order), **args
+            )
+        if solver._n_deformable_sdf_colliders > 0:
+            args["dtype"] = gs.tc_bool
+            self._is_deformable_static_colliders_sdf_active = gs.zeros(
+                (scene.sim._B, solver._n_deformable_sdf_colliders), **args
+            )
         self._absorbed_collider_idx = None
         self._absorbed_voxel_idx = None
         self._absorption_voxel_distance = None
@@ -320,6 +340,20 @@ class PBSTFSolverState(_ParticleFluidSolverState):
         super().serializable()
         self._static_colliders_pos = self._static_colliders_pos.detach()
         self._static_colliders_quat = self._static_colliders_quat.detach()
+        if self._deformable_static_colliders_surface_vertices is not None:
+            self._deformable_static_colliders_surface_vertices = (
+                self._deformable_static_colliders_surface_vertices.detach()
+            )
+            self._deformable_static_colliders_voxel_positions = (
+                self._deformable_static_colliders_voxel_positions.detach()
+            )
+            self._deformable_static_colliders_voxel_search_order = (
+                self._deformable_static_colliders_voxel_search_order.detach()
+            )
+        if self._is_deformable_static_colliders_sdf_active is not None:
+            self._is_deformable_static_colliders_sdf_active = (
+                self._is_deformable_static_colliders_sdf_active.detach()
+            )
         if self._absorbed_collider_idx is not None:
             self._absorbed_collider_idx = self._absorbed_collider_idx.detach()
             self._absorbed_voxel_idx = self._absorbed_voxel_idx.detach()
@@ -336,6 +370,22 @@ class PBSTFSolverState(_ParticleFluidSolverState):
     @property
     def static_colliders_quat(self):
         return self._static_colliders_quat
+
+    @property
+    def deformable_static_colliders_surface_vertices(self):
+        return self._deformable_static_colliders_surface_vertices
+
+    @property
+    def deformable_static_colliders_voxel_positions(self):
+        return self._deformable_static_colliders_voxel_positions
+
+    @property
+    def deformable_static_colliders_voxel_search_order(self):
+        return self._deformable_static_colliders_voxel_search_order
+
+    @property
+    def is_deformable_static_colliders_sdf_active(self):
+        return self._is_deformable_static_colliders_sdf_active
 
     @property
     def absorbed_collider_idx(self):

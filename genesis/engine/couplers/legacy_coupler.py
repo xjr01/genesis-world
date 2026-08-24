@@ -921,6 +921,10 @@ class LegacyCoupler(RBC):
         return new_pos, new_vel, contact_normal
 
     def preprocess(self, f):
+        # Implicit finite element method (FEM) constraints participate in inertia assembly before the coupling phase.
+        if self.fem_solver.is_active and self.fem_solver._use_implicit_solver:
+            self.fem_rigid_link_constraints()
+
         # preprocess for MPM CPIC
         if self._rigid_mpm and self.mpm_solver.enable_CPIC:
             self.mpm_surface_to_particle(

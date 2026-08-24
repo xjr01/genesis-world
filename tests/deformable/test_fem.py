@@ -329,6 +329,10 @@ def test_hard_constraint(use_implicit_solver, show_viewer):
     )
     scene.build(n_envs=2)
 
+    embedded_pos = box.get_embedded_positions((0,), ((0.25, 0.25, 0.25, 0.25),))
+    expected_embedded_pos = box.get_state().pos[..., box.elems[0], :].mean(dim=-2)
+    assert_allclose(embedded_pos[..., 0, :], expected_embedded_pos, tol=1e-8)
+
     # Simulate
     n_steps = int(0.5 * math.pi / MOTION_SPEED)
     for it in range(n_steps):

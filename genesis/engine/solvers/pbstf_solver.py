@@ -11,12 +11,13 @@ from genesis.engine.boundaries import (
     AbsorbentStaticCollider,
     CubeBoundary,
     create_static_collider,
+    load_or_build_mesh_sdf,
     project_out_static_collider,
     query_static_collider,
     query_static_collider_contact,
     static_collider_separates,
 )
-from genesis.engine.entities import PBSTFEntity
+from genesis.engine.entities import FEMEntity, PBSTFEntity
 from genesis.engine.states.solvers import PBSTFSolverState
 from genesis.utils import particle
 from genesis.utils.array_class import ErrorCode
@@ -27,6 +28,7 @@ from genesis.utils.misc import (
     qd_to_numpy,
     qd_to_torch,
     sanitize_index,
+    tensor_to_array,
 )
 
 from . import pbstf_absorption
@@ -84,6 +86,11 @@ class PBSTFSolver(Solver):
         self._default_mass = 1.0
         self._material = None
         self._n_absorption_voxels = 0
+        self._n_deformable_static_colliders = 0
+        self._n_deformable_sdf_colliders = 0
+        self._n_deformable_surface_vertices = 0
+        self._n_deformable_voxels = 0
+        self._n_deformable_voxel_search_order = 0
         self._absorption_particles = None
         self._absorption_particles_reordered = None
         self._absorption_voxel_capacity = None
@@ -275,6 +282,140 @@ class PBSTFSolver(Solver):
         else:
             self._kernel_set_static_colliders_pose(colliders_idx, envs_idx, pos, quat)
 
+    def _set_deformable_collider_sdf(self, collider, envs_idx, surface_positions, is_sdf_active):
+        is_sdf_active = broadcast_tensor(
+            is_sdf_active,
+            gs.tc_bool,
+            (len(envs_idx),),
+            ("envs_idx",),
+        ).contiguous()
+        if not collider.has_sdf:
+            if is_sdf_active.any():
+                gs.raise_exception("PBSTF FEM-bound collider SDF activation requires a configured `sdf_res`.")
+            return
+
+        if gs.use_zerocopy:
+            is_sdf_active_dst = qd_to_torch(collider.is_sdf_active, transpose=True, copy=False)
+            is_sdf_active_dst[envs_idx] = False
+        else:
+            pbstf_absorption.kernel_disable_deformable_collider_sdf(envs_idx, collider)
+
+        if not is_sdf_active.any():
+            if gs.use_zerocopy and gs.backend == gs.metal:
+                torch.mps.synchronize()
+            return
+
+        active_envs_idx = envs_idx[is_sdf_active]
+        active_surface_positions = tensor_to_array(surface_positions[is_sdf_active])
+        n_active_envs = len(active_envs_idx)
+        sdf = np.empty(
+            (n_active_envs, collider.sdf_res, collider.sdf_res, collider.sdf_res),
+            dtype=gs.np_float,
+        )
+        sdf_lower = np.empty((n_active_envs, 3), dtype=gs.np_float)
+        sdf_inv_cell_size = np.empty((n_active_envs, 3), dtype=gs.np_float)
+        for env_idx_local in range(n_active_envs):
+            sdf_data = load_or_build_mesh_sdf(
+                active_surface_positions[env_idx_local], collider.surface_faces_array, collider.sdf_res
+            )
+            sdf[env_idx_local] = sdf_data.values
+            sdf_lower[env_idx_local] = sdf_data.lower
+            sdf_inv_cell_size[env_idx_local] = 1.0 / sdf_data.cell_size
+
+        sdf = torch.as_tensor(sdf, device=gs.device)
+        sdf_lower = torch.as_tensor(sdf_lower, device=gs.device)
+        sdf_inv_cell_size = torch.as_tensor(sdf_inv_cell_size, device=gs.device)
+        if gs.use_zerocopy:
+            sdf_dst = qd_to_torch(collider.sdf, transpose=True, copy=False)
+            sdf_lower_dst = qd_to_torch(collider.sdf_lower, transpose=True, copy=False)
+            sdf_inv_cell_size_dst = qd_to_torch(collider.sdf_inv_cell_size, transpose=True, copy=False)
+            sdf_dst[active_envs_idx] = sdf
+            sdf_lower_dst[active_envs_idx] = sdf_lower
+            sdf_inv_cell_size_dst[active_envs_idx] = sdf_inv_cell_size
+            is_sdf_active_dst[active_envs_idx] = True
+            if gs.backend == gs.metal:
+                torch.mps.synchronize()
+        else:
+            pbstf_absorption.kernel_set_deformable_collider_sdf(
+                active_envs_idx, sdf, sdf_lower, sdf_inv_cell_size, collider
+            )
+
+    @gs.assert_built
+    def update_static_collider_deformation(self, collider_idx, envs_idx=None, is_sdf_enabled=False):
+        """Synchronize a FEM-bound absorbent collider with its current deformed material points.
+
+        The finite element method (FEM) entity supplies geometry only: position-based surface tension flow (PBSTF)
+        forces remain one-way. Call this after each FEM step whose deformation should affect later fluid steps.
+        Enabling the signed distance field (SDF) builds a cached field from the synchronized surface. It makes later
+        queries independent of triangle count at cubic preprocessing and memory cost, and suits a shape whose local
+        deformation has stopped. A later synchronization with ``is_sdf_enabled=False`` resumes exact triangle queries.
+        """
+        if not isinstance(collider_idx, (int, np.integer)):
+            gs.raise_exception("PBSTF collider deformation requires one integer `collider_idx`.")
+        if collider_idx < 0 or collider_idx >= self._n_static_colliders:
+            gs.raise_exception(f"PBSTF static collider index {collider_idx} is out of range.")
+        collider = self._static_colliders[collider_idx]
+        if not isinstance(collider, AbsorbentStaticCollider) or not collider.is_deformable:
+            gs.raise_exception(f"PBSTF static collider {collider_idx} has no FEM deformation binding.")
+        if is_sdf_enabled and not collider.has_sdf:
+            gs.raise_exception(f"PBSTF static collider {collider_idx} has no configured SDF resolution.")
+
+        envs_idx = self._scene._sanitize_envs_idx(envs_idx)
+        embedded_positions = collider.fem_entity.get_embedded_positions(
+            collider.embedding_elements_idx,
+            collider.embedding_barycentric,
+            envs_idx if self._scene.n_envs > 0 else None,
+        )
+        collider_pos = qd_to_torch(
+            self._static_colliders_pos, envs_idx, (collider_idx,), transpose=True,
+        )[..., 0, :]
+        collider_quat = qd_to_torch(
+            self._static_colliders_quat, envs_idx, (collider_idx,), transpose=True,
+        )[..., 0, :]
+        local_positions = gu.inv_transform_by_trans_quat(
+            embedded_positions, collider_pos[:, None, :], collider_quat[:, None, :],
+        )
+        surface_positions = local_positions[:, : collider.n_surface_vertices]
+        voxel_positions = local_positions[:, collider.n_surface_vertices :]
+        if not torch.isfinite(local_positions).all():
+            gs.raise_exception("PBSTF FEM-bound collider positions must be finite.")
+
+        face_v0 = surface_positions[:, collider.surface_faces_tensor[:, 0]]
+        face_v1 = surface_positions[:, collider.surface_faces_tensor[:, 1]]
+        face_v2 = surface_positions[:, collider.surface_faces_tensor[:, 2]]
+        face_area_twice = torch.linalg.vector_norm(torch.linalg.cross(face_v1 - face_v0, face_v2 - face_v0), dim=-1)
+        if (face_area_twice <= gs.EPS).any():
+            gs.raise_exception("PBSTF FEM-bound collider surface triangles must remain non-degenerate.")
+
+        voxel_delta = voxel_positions[:, :, None, :] - voxel_positions[:, None, :, :]
+        physical_distance_sqr = torch.sum(voxel_delta * voxel_delta, dim=-1)
+        physical_order = torch.argsort(physical_distance_sqr, dim=-1, stable=True)
+        graph_distance = collider.voxel_graph_distance[None].expand(len(envs_idx), -1, -1)
+        graph_distance_ordered = torch.gather(graph_distance, dim=-1, index=physical_order)
+        graph_order = torch.argsort(graph_distance_ordered, dim=-1, stable=True)
+        voxel_search_order = torch.gather(physical_order, dim=-1, index=graph_order)
+        voxel_search_order = broadcast_tensor(
+            voxel_search_order,
+            gs.tc_int,
+            (len(envs_idx), collider.n_voxels, collider.n_voxels),
+            ("envs_idx", "origin_voxel_idx", "search_idx"),
+        ).contiguous()
+
+        if gs.use_zerocopy:
+            surface_vertices = qd_to_torch(collider.surface_vertices, transpose=True, copy=False)
+            voxel_positions_dst = qd_to_torch(collider.voxel_positions, transpose=True, copy=False)
+            voxel_search_order_dst = qd_to_torch(collider.voxel_search_order, transpose=True, copy=False)
+            surface_vertices[envs_idx] = surface_positions
+            voxel_positions_dst[envs_idx] = voxel_positions
+            voxel_search_order_dst[envs_idx] = voxel_search_order
+            if gs.backend == gs.metal:
+                torch.mps.synchronize()
+        else:
+            pbstf_absorption.kernel_set_deformable_collider_geometry(
+                envs_idx, surface_positions, voxel_positions, voxel_search_order, collider,
+            )
+        self._set_deformable_collider_sdf(collider, envs_idx, surface_positions, is_sdf_enabled)
+
     @gs.assert_built
     def get_static_collider_wetness(self, collider_idx, envs_idx=None):
         """Return local-grid wetness for one absorbent position-based surface tension flow (PBSTF) static collider.
@@ -354,6 +495,9 @@ class PBSTFSolver(Solver):
 
         voxel_start = 0
         voxel_search_offset_start = 0
+        surface_vertex_state_start = 0
+        voxel_state_start = 0
+        voxel_search_order_state_start = 0
         voxel_search_offsets = []
         for collider_idx in self._absorbent_static_colliders_idx:
             collider = self._static_colliders[collider_idx]
@@ -365,40 +509,160 @@ class PBSTFSolver(Solver):
             collider.n_voxels = int(np.prod(collider.grid_res))
             voxel_start += collider.n_voxels
 
-            axis_offsets = tuple(
-                np.arange(1 - collider.grid_res[axis], collider.grid_res[axis], dtype=gs.np_int) for axis in range(3)
-            )
-            collider_search_offsets = np.stack(np.meshgrid(*axis_offsets, indexing="ij"), axis=-1).reshape((-1, 3))
-            voxel_distances = np.abs(collider_search_offsets).sum(axis=-1)
-            physical_distance_sq = np.square(collider_search_offsets * collider.voxel_size).sum(axis=-1)
-            search_order = np.lexsort(
-                (
-                    collider_search_offsets[:, 2],
-                    collider_search_offsets[:, 1],
-                    collider_search_offsets[:, 0],
-                    physical_distance_sq,
-                    voxel_distances,
+            if collider.is_deformable:
+                fem_entity = self.scene.get_entity(name=collider.fem_entity_name)
+                if not isinstance(fem_entity, FEMEntity) or fem_entity.elems.shape[1] != 4:
+                    gs.raise_exception(
+                        f"PBSTF absorbent collider FEM binding {collider.fem_entity_name!r} requires a volumetric "
+                        "FEM entity."
+                    )
+
+                surface_vertices_idx = np.unique(fem_entity.surface_triangles)
+                surface_vertex_mapping = np.full(fem_entity.n_vertices, -1, dtype=gs.np_int)
+                surface_vertex_mapping[surface_vertices_idx] = np.arange(len(surface_vertices_idx))
+                surface_faces = surface_vertex_mapping[fem_entity.surface_triangles]
+                fem_init_positions = tensor_to_array(fem_entity.init_positions)
+
+                grid_coordinates = np.stack(
+                    np.meshgrid(*(np.arange(resolution) + 0.5 for resolution in collider.grid_res), indexing="ij"),
+                    axis=-1,
+                ).reshape((-1, 3))
+                voxel_positions = collider.lower + grid_coordinates * collider.voxel_size
+                voxel_positions_world = gu.transform_by_trans_quat(voxel_positions, collider.pos, collider.quat)
+                query_positions = np.concatenate(
+                    (
+                        fem_init_positions[surface_vertices_idx],
+                        voxel_positions_world,
+                    )
                 )
-            )
-            collider_search_offsets = collider_search_offsets[search_order]
+                element_vertices = fem_init_positions[fem_entity.elems]
+                element_edges = np.swapaxes(element_vertices[:, 1:] - element_vertices[:, :1], 1, 2)
+                element_edges_inv = np.linalg.inv(element_edges)
+                query_offsets = query_positions[:, None, :] - element_vertices[None, :, 0, :]
+                barycentric_tail = np.einsum("eij,pej->pei", element_edges_inv, query_offsets)
+                barycentric = np.concatenate(
+                    (
+                        1.0 - barycentric_tail.sum(axis=-1, keepdims=True),
+                        barycentric_tail,
+                    ),
+                    axis=-1,
+                )
+                containing_score = barycentric.min(axis=-1)
+                embedding_elements_idx = containing_score.argmax(axis=-1)
+                embedding_barycentric = barycentric[np.arange(len(query_positions)), embedding_elements_idx]
+                if (embedding_barycentric < -1.0e-5).any():
+                    gs.raise_exception(
+                        f"PBSTF absorbent collider bounds for {collider.fem_entity_name!r} must lie inside its FEM "
+                        "tetrahedral mesh."
+                    )
+
+                surface_positions = gu.inv_transform_by_trans_quat(
+                    fem_init_positions[surface_vertices_idx], collider.pos, collider.quat
+                )
+                material_coordinates = np.stack(
+                    np.meshgrid(*(np.arange(resolution) for resolution in collider.grid_res), indexing="ij"), axis=-1
+                ).reshape((-1, 3))
+                graph_distance = np.abs(
+                    material_coordinates[:, None, :] - material_coordinates[None, :, :]
+                ).sum(axis=-1)
+                physical_distance_sqr = np.square(
+                    voxel_positions[:, None, :] - voxel_positions[None, :, :]
+                ).sum(axis=-1)
+                physical_order = np.argsort(physical_distance_sqr, axis=-1, kind="stable")
+                graph_distance_ordered = np.take_along_axis(graph_distance, physical_order, axis=-1)
+                graph_order = np.argsort(graph_distance_ordered, axis=-1, kind="stable")
+                voxel_search_order = np.take_along_axis(physical_order, graph_order, axis=-1)
+
+                collider.fem_entity = fem_entity
+                collider.embedding_elements_idx = torch.as_tensor(
+                    embedding_elements_idx, dtype=gs.tc_int, device=gs.device
+                )
+                collider.embedding_barycentric = torch.as_tensor(
+                    embedding_barycentric, dtype=gs.tc_float, device=gs.device
+                )
+                collider.n_surface_vertices = len(surface_vertices_idx)
+                collider.n_surface_triangles = len(surface_faces)
+                collider.surface_faces_array = surface_faces
+                collider.surface_faces_tensor = torch.as_tensor(surface_faces, device=gs.device)
+                collider.voxel_graph_distance = torch.as_tensor(graph_distance, device=gs.device)
+                collider.surface_vertex_state_start = surface_vertex_state_start
+                collider.voxel_state_start = voxel_state_start
+                collider.voxel_search_order_state_start = voxel_search_order_state_start
+                collider.surface_faces = qd.field(gs.qd_ivec3, shape=(collider.n_surface_triangles,))
+                collider.surface_vertices = qd.field(gs.qd_vec3, shape=(collider.n_surface_vertices, self._B))
+                if collider.has_sdf:
+                    collider.sdf = qd.field(
+                        gs.qd_float, shape=(collider.sdf_res, collider.sdf_res, collider.sdf_res, self._B)
+                    )
+                    collider.sdf_lower = qd.field(gs.qd_vec3, shape=(self._B,))
+                    collider.sdf_inv_cell_size = qd.field(gs.qd_vec3, shape=(self._B,))
+                    collider.is_sdf_active = qd.field(gs.qd_bool, shape=(self._B,))
+                    collider.is_sdf_active.fill(False)
+                    collider.sdf_state_idx = self._n_deformable_sdf_colliders
+                    self._n_deformable_sdf_colliders += 1
+                collider.voxel_positions = qd.field(gs.qd_vec3, shape=(collider.n_voxels, self._B))
+                collider.voxel_search_order = qd.field(
+                    gs.qd_int, shape=(collider.n_voxels, collider.n_voxels, self._B)
+                )
+                collider.surface_faces.from_numpy(surface_faces)
+                collider.surface_vertices.from_numpy(
+                    np.repeat(surface_positions[:, None, :], repeats=self._B, axis=1)
+                )
+                collider.voxel_positions.from_numpy(
+                    np.repeat(voxel_positions[:, None, :], repeats=self._B, axis=1)
+                )
+                collider.voxel_search_order.from_numpy(
+                    np.repeat(voxel_search_order[:, :, None], repeats=self._B, axis=2)
+                )
+                surface_vertex_state_start += collider.n_surface_vertices
+                voxel_state_start += collider.n_voxels
+                voxel_search_order_state_start += collider.n_voxels * collider.n_voxels
+                self._n_deformable_static_colliders += 1
+
             collider.voxel_search_offset_start = voxel_search_offset_start
-            collider.n_voxel_search_offsets = len(collider_search_offsets)
-            voxel_search_offset_start += collider.n_voxel_search_offsets
-            voxel_search_offsets.append(collider_search_offsets)
+            collider.n_voxel_search_offsets = 0
+            if not collider.is_deformable:
+                axis_offsets = tuple(
+                    np.arange(1 - collider.grid_res[axis], collider.grid_res[axis], dtype=gs.np_int)
+                    for axis in range(3)
+                )
+                collider_search_offsets = np.stack(
+                    np.meshgrid(*axis_offsets, indexing="ij"), axis=-1
+                ).reshape((-1, 3))
+                voxel_distances = np.abs(collider_search_offsets).sum(axis=-1)
+                physical_distance_sq = np.square(collider_search_offsets * collider.voxel_size).sum(axis=-1)
+                search_order = np.lexsort(
+                    (
+                        collider_search_offsets[:, 2],
+                        collider_search_offsets[:, 1],
+                        collider_search_offsets[:, 0],
+                        physical_distance_sq,
+                        voxel_distances,
+                    )
+                )
+                collider_search_offsets = collider_search_offsets[search_order]
+                collider.n_voxel_search_offsets = len(collider_search_offsets)
+                voxel_search_offset_start += collider.n_voxel_search_offsets
+                voxel_search_offsets.append(collider_search_offsets)
 
         self._n_absorption_voxels = voxel_start
+        self._n_deformable_surface_vertices = surface_vertex_state_start
+        self._n_deformable_voxels = voxel_state_start
+        self._n_deformable_voxel_search_order = voxel_search_order_state_start
         shape = (self._n_particles, self._B)
         self._absorption_particles = absorption_particle_state.field(shape=shape, layout=qd.Layout.SOA)
         self._absorption_particles_reordered = absorption_particle_state.field(shape=shape, layout=qd.Layout.SOA)
         self._absorption_voxel_capacity = qd.field(gs.qd_int, shape=(self._n_absorption_voxels,))
         self._absorption_voxel_occupancy = qd.field(gs.qd_int, shape=(self._n_absorption_voxels, self._B))
         self._absorption_voxel_wetness = qd.field(gs.qd_float, shape=(self._n_absorption_voxels, self._B))
-        self._absorption_voxel_search_offsets = qd.field(gs.qd_ivec3, shape=(voxel_search_offset_start,))
+        if voxel_search_offset_start > 0:
+            self._absorption_voxel_search_offsets = qd.field(gs.qd_ivec3, shape=(voxel_search_offset_start,))
         self._absorption_capture_budget = qd.field(gs.qd_float, shape=(self._n_absorbent_static_colliders, self._B))
         self._absorption_voxel_capacity.fill(0)
         self._absorption_voxel_occupancy.fill(0)
         self._absorption_voxel_wetness.fill(0.0)
-        self._absorption_voxel_search_offsets.from_numpy(np.concatenate(voxel_search_offsets))
+        if self._absorption_voxel_search_offsets is not None:
+            self._absorption_voxel_search_offsets.from_numpy(np.concatenate(voxel_search_offsets))
         self._absorption_capture_budget.fill(0.0)
         pbstf_absorption.kernel_initialize_absorption_particles(self._n_particles, self._absorption_particles)
         pbstf_absorption.kernel_initialize_absorption_particles(
@@ -450,6 +714,9 @@ class PBSTFSolver(Solver):
         error_code = int(ErrorCode.INVALID_PBSTF_STATE_NAN)
         for absorption_idx, collider_idx in enumerate(self._absorbent_static_colliders_idx):
             collider = self._static_colliders[collider_idx]
+            voxel_search_offsets = self._absorption_voxel_search_offsets
+            if collider.is_deformable:
+                voxel_search_offsets = collider.voxel_search_order
             pbstf_absorption.kernel_capture_particles(
                 self._n_particles,
                 collider_idx,
@@ -463,7 +730,7 @@ class PBSTFSolver(Solver):
                 self._absorption_capture_budget,
                 self._absorption_voxel_capacity,
                 self._absorption_voxel_occupancy,
-                self._absorption_voxel_search_offsets,
+                voxel_search_offsets,
                 self._static_colliders_pos,
                 self._static_colliders_quat,
                 collider,
@@ -1415,6 +1682,7 @@ class PBSTFSolver(Solver):
                     self._absorption_particles_reordered,
                     self._static_colliders_pos,
                     self._static_colliders_quat,
+                    collider,
                     error_code,
                     self._errno,
                 )
@@ -1475,6 +1743,11 @@ class PBSTFSolver(Solver):
 
     def check_errno(self):
         errno = np.bitwise_or.reduce(qd_to_numpy(self._errno, transpose=True))
+        if errno & ErrorCode.INVALID_PBSTF_DEFORMABLE_COLLIDER:
+            gs.raise_exception(
+                "PBSTF deformable collider state contains non-finite points, degenerate surface triangles, or invalid "
+                "voxel search indices. Synchronize the collider from a valid FEM entity or restore a valid state."
+            )
         if errno & ErrorCode.INVALID_PBSTF_STATE_NAN:
             gs.raise_exception(
                 "PBSTF produced a non-finite fluid or absorption state. Increase compliance, reduce the time step, "
@@ -1517,6 +1790,35 @@ class PBSTFSolver(Solver):
                     self._static_colliders_pos,
                     self._static_colliders_quat,
                 )
+            if self._n_deformable_static_colliders > 0:
+                for collider in self._static_colliders:
+                    if collider.is_deformable:
+                        pbstf_absorption.kernel_set_deformable_collider_state(
+                            collider.surface_vertex_state_start,
+                            collider.voxel_state_start,
+                            collider.voxel_search_order_state_start,
+                            envs_idx,
+                            state.deformable_static_colliders_surface_vertices,
+                            state.deformable_static_colliders_voxel_positions,
+                            state.deformable_static_colliders_voxel_search_order,
+                            collider,
+                        )
+                        pbstf_absorption.kernel_check_deformable_collider_geometry(
+                            collider, error_code=int(ErrorCode.INVALID_PBSTF_DEFORMABLE_COLLIDER), errno=self._errno,
+                        )
+                        if collider.has_sdf:
+                            surface_state_end = collider.surface_vertex_state_start + collider.n_surface_vertices
+                            surface_positions = state.deformable_static_colliders_surface_vertices[
+                                envs_idx, collider.surface_vertex_state_start : surface_state_end
+                            ]
+                            self._set_deformable_collider_sdf(
+                                collider,
+                                envs_idx,
+                                surface_positions,
+                                state.is_deformable_static_colliders_sdf_active[
+                                    envs_idx, collider.sdf_state_idx
+                                ],
+                            )
             if self._n_absorbent_static_colliders > 0:
                 pbstf_absorption.kernel_set_absorption_capture_budget(
                     self._n_absorbent_static_colliders,
@@ -1566,6 +1868,29 @@ class PBSTFSolver(Solver):
                 state.static_colliders_pos,
                 state.static_colliders_quat,
             )
+        if self._n_deformable_static_colliders > 0:
+            for collider in self._static_colliders:
+                if collider.is_deformable:
+                    pbstf_absorption.kernel_get_deformable_collider_geometry(
+                        collider.surface_vertex_state_start,
+                        collider.voxel_state_start,
+                        collider.voxel_search_order_state_start,
+                        state.deformable_static_colliders_surface_vertices,
+                        state.deformable_static_colliders_voxel_positions,
+                        state.deformable_static_colliders_voxel_search_order,
+                        collider,
+                    )
+                    if collider.has_sdf:
+                        if gs.use_zerocopy:
+                            state.is_deformable_static_colliders_sdf_active[:, collider.sdf_state_idx] = qd_to_torch(
+                                collider.is_sdf_active, transpose=True
+                            )
+                        else:
+                            pbstf_absorption.kernel_get_deformable_collider_sdf_active(
+                                collider.sdf_state_idx,
+                                state.is_deformable_static_colliders_sdf_active,
+                                collider,
+                            )
         if self._n_absorbent_static_colliders > 0:
             pbstf_absorption.kernel_get_absorption_capture_budget(
                 self._n_absorbent_static_colliders,

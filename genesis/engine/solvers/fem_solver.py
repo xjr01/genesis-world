@@ -318,7 +318,7 @@ class FEMSolver(Solver):
             stiffness=gs.qd_float,  # spring stiffness
             link_idx=gs.qd_int,  # index of the rigid link (-1 if not linked)
             link_offset_pos=gs.qd_vec3,  # offset position of link
-            link_init_quat=gs.qd_vec4,  # offset rotation of link
+            link_init_quat_inv=gs.qd_vec4,  # inverse link rotation when the constraint is created
         )
 
         # FIXME: AOS, which does not match other Genesis structs. Old, untested code. We prefer not to touch for now.
@@ -378,7 +378,7 @@ class FEMSolver(Solver):
         if self.n_vertices_max > 0 and self._enable_vertex_constraints and not self._constraints_initialized:
             self.init_constraints()
 
-        # FIXME: _gravity must be a raw qd.field() — see comment in mpm_solver.py
+        # FIXME: _gravity must be a raw qd.field() -- see comment in mpm_solver.py
         if self._gravity is not None:
             gravity = self._gravity.to_numpy()
             self._gravity = qd.field(dtype=gs.qd_vec3, shape=(self._B,))
@@ -1003,7 +1003,7 @@ class FEMSolver(Solver):
     def substep_post_coupling(self, f):
         if self.is_active:
             self.compute_pos(f)
-            if self._constraints_initialized and not self._use_implicit_solver:
+            if self._constraints_initialized:
                 self.apply_hard_constraints(f)
 
     def substep_post_coupling_grad(self, f):
@@ -1107,6 +1107,36 @@ class FEMSolver(Solver):
         else:
             state = None
         return state
+
+    def get_embedded_positions(self, f, elements_idx, barycentric, envs_idx):
+        """Return positions of tetrahedron material points for selected environments."""
+        positions = gs.zeros(
+            (len(envs_idx), len(elements_idx), 3),
+            dtype=gs.tc_float,
+            requires_grad=False,
+            scene=self.scene,
+        )
+        self._kernel_get_embedded_positions(f, elements_idx, envs_idx, barycentric, positions)
+        return positions
+
+    @qd.kernel
+    def _kernel_get_embedded_positions(
+        self,
+        f: qd.i32,
+        elements_idx: qd.types.ndarray(),
+        envs_idx: qd.types.ndarray(),
+        barycentric: qd.types.ndarray(),
+        positions: qd.types.ndarray(),
+    ):
+        for point_idx, env_idx_local in qd.ndrange(elements_idx.shape[0], envs_idx.shape[0]):
+            element_idx = elements_idx[point_idx]
+            env_idx = envs_idx[env_idx_local]
+            pos = qd.Vector.zero(gs.qd_float, 3)
+            for element_vertex_idx in qd.static(range(4)):
+                vertex_idx = self.elements_i[element_idx].el2v[element_vertex_idx]
+                pos += barycentric[point_idx, element_vertex_idx] * self.elements_v[f, vertex_idx, env_idx].pos
+            for axis in qd.static(range(3)):
+                positions[env_idx_local, point_idx, axis] = pos[axis]
 
     def get_state_render(self, f):
         """
@@ -1519,7 +1549,7 @@ class FEMSolver(Solver):
                 quat = links_state.quat[i_l, i_b]
 
                 offset_pos = vc.link_offset_pos
-                offset_quat = qd_transform_quat_by_quat(vc.link_init_quat, quat)
+                offset_quat = qd_transform_quat_by_quat(vc.link_init_quat_inv, quat)
                 self.vertex_constraints[i_v, i_b].target_pos = pos + qd_transform_by_quat(offset_pos, offset_quat)
 
     @qd.kernel
@@ -1555,7 +1585,7 @@ class FEMSolver(Solver):
         stiffness: qd.f32,
         link_idx: qd.i32,
         link_init_pos: qd.types.ndarray(),  # shape [B, 3]
-        link_init_quat: qd.types.ndarray(),  # shape [B, 4]
+        link_init_quat_inv: qd.types.ndarray(),  # shape [B, 4]
         envs_idx: qd.types.ndarray(),  # shape [B]
     ):
         for i_v_, i_b_ in qd.ndrange(verts_idx.shape[1], envs_idx.shape[0]):
@@ -1571,7 +1601,7 @@ class FEMSolver(Solver):
                 self.vertex_constraints[i_v, i_b].target_pos[j] = target_poss[i_b_, i_v_, j]
                 self.vertex_constraints[i_v, i_b].link_offset_pos[j] = cur_pos[j] - link_init_pos[i_b_, j]
             for j in qd.static(range(4)):
-                self.vertex_constraints[i_v, i_b].link_init_quat[j] = link_init_quat[i_b_, j]
+                self.vertex_constraints[i_v, i_b].link_init_quat_inv[j] = link_init_quat_inv[i_b_, j]
 
     @qd.kernel
     def _kernel_update_constraint_targets(

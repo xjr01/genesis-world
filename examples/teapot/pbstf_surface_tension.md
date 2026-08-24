@@ -132,19 +132,19 @@ arm and hand have collision disabled in this demo; the PBSTF mesh static collide
 
 ## Sweep and mop cases
 
-`sweep` and `mop` intentionally use the same table, liquid region, moving-box geometry, and trajectory. Their only
-behavioral difference is the moving collider type:
+`sweep` and `mop` use the same table, liquid region, rest dimensions, and wiping trajectory:
 
-- `sweep` uses `PBSTFBoxStaticColliderOptions`, so the box remains impermeable and pushes the water.
-- `mop` uses `PBSTFAbsorbentBoxStaticColliderOptions`, so available voxels capture contacting particles.
+- `sweep` uses an analytic `PBSTFBoxStaticColliderOptions` box that pushes the water.
+- `mop` renders a soft finite element method (FEM) sponge and binds its absorbent PBSTF collider to the deformed FEM
+  surface. The liquid sees the sponge as a one-way boundary and contributes no force to its FEM dynamics.
 
 Both cases use these `WipeSettings` values:
 
 | Field | Default | Meaning |
 | --- | --- | --- |
-| `collider_idx` | `1` | Moving box index; the table is collider index 0. |
-| `collider_lower` | `(-0.6, 0.02, -1.2)` | Moving box local lower corner. |
-| `collider_upper` | `(0.6, 0.85, 1.2)` | Moving box local upper corner. |
+| `collider_idx` | `1` | Moving sweep-box or sponge index; the table is collider index 0. |
+| `collider_lower` | `(-0.6, 0.02, -1.2)` | Collider rest-space lower corner. |
+| `collider_upper` | `(0.6, 0.85, 1.2)` | Collider rest-space upper corner. |
 | `table_pos` | `(0.0, -0.25, 0.0)` | Table world position. |
 | `table_size` | `(12.0, 0.5, 8.0)` | Table dimensions. Its top surface is at world Y = 0. |
 | `liquid_lower` | `(-2.5, 0.05, -0.7)` | Initial liquid lower corner. |
@@ -155,11 +155,36 @@ Both cases use these `WipeSettings` values:
 | `settle_time` | `1.0 s` | Time allowed for the initial liquid to settle. |
 | `wipe_time` | `5.0 s` | Duration of the linear wiping stroke. |
 
-`wipe_pose()` keeps the box at `start_pos` through `settle_time`, linearly interpolates to `end_pos` during
-`wipe_time`, and keeps it at `end_pos` afterward. With the default `dt`, settling lasts 100 steps and the stroke ends
-at step 600. `update_wipe_case()` applies the pose to collider index 1 before each simulation step.
+`wipe_pose()` keeps the active collider at `start_pos` through `settle_time`, linearly interpolates to `end_pos`
+during `wipe_time`, and keeps it at `end_pos` afterward. With the default `dt`, settling lasts 100 steps and the
+stroke ends at step 600. `update_wipe_case()` moves the sweep box. `update_mop_case()` coordinates the Franka,
+sponge constraints, deformable collider geometry, and the same trajectory.
 
-The viewer draws the moving box with opacity `0.35`, which keeps captured mop particles visible inside it.
+### Mop gripper and sponge phases
+
+The mop uses `urdf/panda_bullet/panda.urdf` at scale `15`. Rigid collision and constraint dynamics are disabled; the
+seven arm joints come directly from inverse kinematics (IK), and the two finger joints are authored positions. The
+tool center targets the sponge top center with the finger opening aligned to world X, keeping the gripper above the
+liquid region.
+
+| Simulated time | Sponge and gripper behavior |
+| --- | --- |
+| `0.0` to `1.0 s` | Fingers close from `0.60` to `0.54`; local top-center sponge patches follow the finger links while the spatially separated liquid uses the initial surface SDF. |
+| at `1.0 s` | Synchronize the final FEM surface and voxels, build its SDF, then link every sponge vertex to the hand. |
+| `1.0` to `6.0 s` | IK moves the hand and frozen sponge along the linear wiping stroke. |
+| after `6.0 s` | The hand and sponge hold the end pose. |
+
+The FEM sponge uses a refined tetrahedral mesh with a `0.01` maximum tetrahedron volume and a linear-corotated elastic
+material with `E=1e4`, `nu=0.2`, and `rho=100`. Its FEM gravity is zero, so the settling phase isolates the local grip
+indentation. Finger-to-sponge coupling is one-way through hard vertex boundary conditions. Once linked to the hand,
+the deformed shape stays fixed in the hand frame.
+
+The sponge is authored from the refined tetrahedral boundary, so its rendered triangles are the same triangles as the
+FEM volume boundary. The PBSTF collider builds a `150^3` signed distance field (SDF) from those actual boundary
+vertices and faces at initialization and again after the grip deformation. Runtime collision and absorption queries
+use trilinear interpolation of the eight surrounding SDF samples, as in the teapot collider. `collider_lower` and
+`collider_upper` define the rest-space material voxel lattice; the deformed tetrahedral boundary defines the contact
+and absorption surface.
 
 ## Configuring the absorbent box
 
@@ -173,11 +198,16 @@ wipe_collider = gs.options.PBSTFAbsorbentBoxStaticColliderOptions(
     upper=wipe.collider_upper,
     absorption_rate=2000.0,
     absorption_capacity_fraction=1.0,
+    fem_entity_name="sponge",
+    sdf_res=150,
 )
 ```
 
-`lower` and `upper` define the box in collider-local coordinates. `pos` and `quat` place that local box in world
-space. The two absorption fields control different parts of the behavior.
+`lower` and `upper` define the rest material grid in collider-local coordinates. `pos` and `quat` place that frame in
+world space. `fem_entity_name` binds the collision surface and material targets to the named volumetric FEM entity.
+`sdf_res` controls the contact-field resolution: higher values retain smaller dents at cubic memory and preprocessing
+cost. The generated field is cached by surface geometry, so repeated runs reuse both the initial and gripped shapes.
+The two absorption fields control different parts of the behavior.
 
 ### `absorption_rate`
 
@@ -235,17 +265,23 @@ At the default `scale=20`, `particle_size=0.1` and `support_radius=0.3`. The def
 `(4, 3, 8)` grid. Integer slot counts are distributed uniformly over these 96 voxels while preserving the exact total
 capacity.
 
-When a particle contacts the box, its collider-local position selects the nearest voxel. The solver examines
-precomputed offsets in breadth-first order: the contact voxel at Manhattan distance zero, its face-adjacent neighbors
-at distance one, and successive distance layers. It atomically reserves the first available slot. Equal-distance
-voxels use physical center distance and a fixed coordinate order as tie breakers. Ordinary box collision resumes only
-after every reachable voxel is full, so contacts can use capacity throughout the box.
+Each rest-grid voxel center is embedded in one FEM tetrahedron with barycentric coordinates. Synchronization evaluates
+those coordinates from the current tetrahedron vertices, so targets follow the grip deformation. Capacity remains
+derived from the rest box volume and retains the same per-voxel and total slot counts throughout deformation.
 
-Captured particles remain active and visible. They follow box translation and rotation while converging to their
-voxel targets, and they leave density, surface, distance, viscosity, adhesion, and friction processing. Each capture
-remains assigned to its reserved target voxel. Explicitly setting a captured particle's position, velocity, or active
-state releases its absorption binding. Scene state save and restore includes all bindings, capture credit, voxel
-distances, progress, local targets, and dynamic collider poses; wetness is rebuilt from the restored binding progress.
+When a particle contacts the sponge, its collider-local position selects the nearest deformed voxel center. The
+solver then searches the unchanged six-neighbor material graph in breadth-first order: the contact voxel at graph
+distance zero, face-adjacent neighbors at distance one, and successive layers. Within one graph-distance layer,
+deformed physical center distance and stable voxel index determine the order. The rest-grid six-neighbor graph remains
+fixed throughout deformation. The first candidate with an available slot captures the particle.
+
+Captured particles remain active and visible. They follow sponge translation and rotation while converging to their
+current embedded voxel targets, and they leave density, surface, distance, viscosity, adhesion, and friction
+processing. Each capture remains assigned to its reserved material voxel. Explicitly setting a captured particle's
+position, velocity, or active state releases its absorption binding. Scene state save and restore includes all
+bindings, capture credit, voxel distances, progress, local targets, dynamic collider poses, deformed surfaces,
+embedded voxel positions, search orders, and SDF activation; the SDF is restored from the saved surface geometry and
+wetness is rebuilt from the restored binding progress.
 
 Changing `scale` also changes `particle_size`, support radius, voxel count, graph distances, calibrated particle
 volume, and therefore the integer capacity distribution. Since the admission limit counts particles, its volumetric
