@@ -890,6 +890,12 @@ class DEMOptions(Options):
 
     surface_tension_coeff: PositiveFloat = 0.007  # capillary (liquid-bridge) cohesion scale
 
+    restitution: PositiveFloat = 1.0  # grain-grain normal restitution e. 1.0 = the reference's
+    # strictly-elastic contact (no damping). e < 1 adds a spring-dashpot normal damping
+    # c = 2*xi*sqrt(k_norm*m_eff) with xi from e = exp(-pi*xi/sqrt(1-xi^2)) (recorded deviation:
+    # the reference's DEMForce::getForce has no damping; added on user request 2026-08-22 to calm
+    # the scoop first-touch splash)
+
     cylinder_radius: PositiveFloat | None = None
 
     # spatial hashing

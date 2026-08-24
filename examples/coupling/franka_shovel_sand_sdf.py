@@ -242,6 +242,10 @@ def main():
             particle_size=2.0 * PARTICLE_RADIUS,
             ddt_safety=0.5,
             surface_tension_coeff=SURFACE_TENSION,
+            # user request (2026-08-22): grain-grain restitution 0.5 (spring-dashpot normal damping;
+            # recorded deviation from the reference's strictly-elastic contact) to calm the
+            # first-touch splash at ORIGINAL trajectory speed
+            restitution=0.5,
             lower_bound=BOX_LOWER,
             upper_bound=BOX_UPPER,
         ),
@@ -356,6 +360,7 @@ def main():
                 "max_ratio": MAX_RATIO,
                 "viscosity_coeff": VISCOSITY,
                 "surface_tension_coeff": SURFACE_TENSION,
+                "restitution": 0.5,
                 "box_lower": BOX_LOWER,
                 "box_upper": BOX_UPPER,
                 "wall_thick": WALL_THICK,

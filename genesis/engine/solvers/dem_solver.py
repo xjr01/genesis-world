@@ -70,6 +70,8 @@ class DEMSolver(Solver):
         self._ddt_safety = options.ddt_safety
         # capillary (liquid-bridge) cohesion scale (C++ surface_tensor_cof, default 0.007)
         self._surface_tension_coeff = options.surface_tension_coeff
+        # grain-grain normal restitution (1.0 = reference's strictly-elastic contact)
+        self._restitution = options.restitution
 
         # optional hollow-cylinder collider (axis along z through the domain center), C++ rotate scene
         self._cylinder_radius = options.cylinder_radius
@@ -663,8 +665,12 @@ class DEMSolver(Solver):
         k_norm: qd.f32,
         k_tang: qd.f32,
         tan_fric: qd.f32,
+        c_norm: qd.f32,
     ):
-        # C++ DEMForce::getForce(pi, pj), force on particle i; strictly elastic, no damping
+        # C++ DEMForce::getForce(pi, pj), force on particle i; strictly elastic, no damping in the
+        # reference. Recorded deviation (user request 2026-08-22): when DEMOptions.restitution < 1,
+        # add spring-dashpot normal damping -c_norm * (vij . n) (clamped to never attract) so a
+        # two-grain normal collision rebounds with the requested restitution e.
         pos_i = self.particles_reordered[i, i_b].pos
         pos_j = self.particles_reordered[j, i_b].pos
         dij = pos_j - pos_i
@@ -679,7 +685,8 @@ class DEMSolver(Solver):
                     vij = self.particles_reordered[j, i_b].vel - self.particles_reordered[i, i_b].vel
                     vij_tangential = vij - vij.dot(n) * n
 
-                    f_normal = k_norm * penetration * n
+                    f_normal_mag = k_norm * penetration - c_norm * vij.dot(n)
+                    f_normal = qd.max(f_normal_mag, 0.0) * n
                     f_shear = -k_tang * vij_tangential
 
                     max_fs = k_norm * penetration * tan_fric
@@ -707,6 +714,7 @@ class DEMSolver(Solver):
         k_norm: qd.f32,
         k_tang: qd.f32,
         tan_fric: qd.f32,
+        c_norm: qd.f32,
     ):
         for i_p, i_b in qd.ndrange(self._n_particles, self._B):
             if self.particles_reordered[i_p, i_b].active:
@@ -718,7 +726,9 @@ class DEMSolver(Solver):
                         self.sh.slot_size[slot_idx, i_b] + self.sh.slot_start[slot_idx, i_b],
                     ):
                         if i_p != j and self.particles_reordered[j, i_b].active:
-                            self._func_contact_force(i_p, j, i_b, particle_radius, k_norm, k_tang, tan_fric)
+                            self._func_contact_force(
+                                i_p, j, i_b, particle_radius, k_norm, k_tang, tan_fric, c_norm
+                            )
 
     @qd.kernel
     def _kernel_copy_acc_from_reordered(self, f: qd.i32):
@@ -1251,24 +1261,24 @@ class DEMSolver(Solver):
                             qd.atomic_add(flip.vel_w[idx], -cf[2] * w * kick)
                 self.particles[i_p, i_b].coupling_force = qd.Vector.zero(gs.qd_float, 3)
 
-    def _dem_substep_coupled(self, f, ddt, dt_f, k_norm, k_tang, tan_fric):
+    def _dem_substep_coupled(self, f, ddt, dt_f, k_norm, k_tang, tan_fric, c_norm):
         # C++ MoveDEMParticlesSplit (coupled): saturate rate, coupling force (reads the previous
         # sub-substep's acc), force assembly, contact, reaction scatter, collider, integrate
         self._kernel_update_saturate_rate(f)
         self._kernel_cal_coupling(f)
         self._kernel_reset_acc_coupled(f, dt_f)
         self._kernel_reorder_particles(f)
-        self._kernel_contact_forces(f, self._particle_radius, k_norm, k_tang, tan_fric)
+        self._kernel_contact_forces(f, self._particle_radius, k_norm, k_tang, tan_fric, c_norm)
         self._kernel_copy_acc_from_reordered(f)
         self._kernel_transfer_coupling_forces(f, ddt, dt_f)
         self._kernel_move_obstacle(ddt)
         self._kernel_enforce_boundary(f, self._particle_radius, tan_fric)
         self._kernel_integrate(f, ddt)
 
-    def _dem_substep(self, f, ddt, inv_mass, k_norm, k_tang, tan_fric):
+    def _dem_substep(self, f, ddt, inv_mass, k_norm, k_tang, tan_fric, c_norm):
         self._kernel_reset_acc(f)
         self._kernel_reorder_particles(f)
-        self._kernel_contact_forces(f, self._particle_radius, k_norm, k_tang, tan_fric)
+        self._kernel_contact_forces(f, self._particle_radius, k_norm, k_tang, tan_fric, c_norm)
         self._kernel_copy_acc_from_reordered(f)
         self._kernel_move_obstacle(ddt)
         self._kernel_enforce_boundary(f, self._particle_radius, tan_fric)
@@ -1285,36 +1295,46 @@ class DEMSolver(Solver):
         # they are taken from the (single) material here
         material = self._entities[0].material
         volume = 4.0 / 3.0 * math.pi * self._particle_radius**3
-        inv_mass = float(1.0 / (material.rho * volume))
+        mass = float(material.rho * volume)
+        inv_mass = 1.0 / mass
         k_norm = float(material.young_modulus * self._particle_radius)
         k_tang = float(k_norm * material.poisson_ratio)
         tan_fric = float(math.tan(material.friction_angle))
-        return inv_mass, k_norm, k_tang, tan_fric
+        # normal damping for the requested grain-grain restitution e (spring-dashpot, equal-mass
+        # pair -> m_eff = m/2): e = exp(-pi*xi/sqrt(1-xi^2)), c = 2*xi*sqrt(k*m_eff)
+        e = self._restitution
+        if e >= 1.0:
+            c_norm = 0.0
+        else:
+            L = -math.log(e)
+            xi = L / math.sqrt(math.pi * math.pi + L * L)
+            c_norm = float(2.0 * xi * math.sqrt(k_norm * 0.5 * mass))
+        return inv_mass, k_norm, k_tang, tan_fric, c_norm
 
     def _advance(self, dt_total, f):
         # fixed sub-substep (the reference's velocity-adaptive clamp is removed by user decision):
         # as many full `ddt` steps as fit into dt_total, plus one remainder step
-        inv_mass, k_norm, k_tang, tan_fric = self._material_constants()
+        inv_mass, k_norm, k_tang, tan_fric, c_norm = self._material_constants()
         ddt = self._m_ddt * self._ddt_safety
         n_full = int(dt_total / ddt)
         for _ in range(n_full):
-            self._dem_substep(f, ddt, inv_mass, k_norm, k_tang, tan_fric)
+            self._dem_substep(f, ddt, inv_mass, k_norm, k_tang, tan_fric, c_norm)
         remainder = dt_total - n_full * ddt
         if remainder > 0.0:
-            self._dem_substep(f, remainder, inv_mass, k_norm, k_tang, tan_fric)
+            self._dem_substep(f, remainder, inv_mass, k_norm, k_tang, tan_fric, c_norm)
 
     def advance_coupled(self, f, dt_f):
         # C++ MoveDEMParticles(dt_f): fresh fluid density, then the ddt sub-substep loop whose
         # total duration is exactly dt_f (called by the FLIP solver before each water step)
         self._sim.flip_solver._kernel_cal_density(f)
-        inv_mass, k_norm, k_tang, tan_fric = self._material_constants()
+        inv_mass, k_norm, k_tang, tan_fric, c_norm = self._material_constants()
         ddt = self._m_ddt * self._ddt_safety
         n_full = int(dt_f / ddt)
         for _ in range(n_full):
-            self._dem_substep_coupled(f, ddt, dt_f, k_norm, k_tang, tan_fric)
+            self._dem_substep_coupled(f, ddt, dt_f, k_norm, k_tang, tan_fric, c_norm)
         remainder = dt_f - n_full * ddt
         if remainder > 0.0:
-            self._dem_substep_coupled(f, remainder, dt_f, k_norm, k_tang, tan_fric)
+            self._dem_substep_coupled(f, remainder, dt_f, k_norm, k_tang, tan_fric, c_norm)
 
     def substep_pre_coupling_grad(self, f):
         pass
