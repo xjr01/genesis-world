@@ -34,7 +34,7 @@ REC_DIR = os.path.join(EXPERIMENTS_DIR, "recordings", f"phase9_franka_shovel_sdf
 VIDEO_PATH = os.path.join(EXPERIMENTS_DIR, "videos", f"phase9_franka_shovel_sdf{TAG}.mp4")
 
 DT = 1.0 / 60.0
-KEYFRAME_STEPS = [0, 299, 410, 522, 592, 740, 872]
+KEYFRAME_STEPS = [0, 299, 410, 593, 663, 810, 942]  # synced with phase9_franka_shovel_sdf.py v5
 
 SC = 0.5
 PARTICLE_RADIUS = 3.125e-3 * SC

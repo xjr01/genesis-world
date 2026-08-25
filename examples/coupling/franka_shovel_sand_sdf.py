@@ -61,7 +61,6 @@ SC = 0.5  # whole-scene scale factor (user request 2026-08-21)
 DT = 1.0 / 60.0
 N_SETTLE_STEPS = 300  # 5 s: droplet falls and is absorbed
 N_DESCEND_STEPS = 60  # 1.00 s: tip descends until it is 2 cm/SC = 1 cm into the bed
-N_INSERT_STEPS = 93  # 1.55 s
 N_ROTATE_STEPS = 140  # 2.33 s
 N_LIFT_STEPS = 200  # 3.33 s
 N_HOLD_STEPS = 80  # 1.33 s
@@ -70,7 +69,27 @@ INSERT_VEL = (0.0723 * SC, 0.0, -0.0862 * SC)  # 50 deg below horizontal, parall
 ROTATE_VEL = (0.0237 * SC, 0.0, 0.0508 * SC)  # trailing-edge-pivot emulation (mid-rotation 25 deg)
 ROTATE_OMEGA = (0.0, -math.radians(50.0) / (140.0 / 60.0), 0.0)  # 50 deg -> flat about the blade center
 LIFT_VEL = (0.0, 0.0, 0.075 * SC)
-KEYFRAME_STEPS = [0, 299, 410, 522, 592, 740, 872]
+# --- trajectory v5 "wincombo" (user request 2026-08-25: visually ZERO splash in the first-touch
+# window, abs ~360-420). Segment-vehicle experiments (phase9_segment.py) showed the splash is a
+# bow-wave force-chain pop-out at the leading edge, robust to any single lever; the validated
+# combination is: (a) windowed contact parameters -- grain-grain restitution 0.5 -> 0.1 and sand
+# Young's modulus x 0.25 from abs 330 until WINCOMBO_END (both are re-read by
+# dem_solver._material_constants() on every advance, plain runtime switches, no rebuild), then a
+# 30-step linear stiffness ramp-back; (b) a slower insert start -- path-units 0-30 at 1/3 speed
+# (90 steps, the tip transits the surface layer where the pops launch), a 30-step linear ramp
+# 1/3 -> 1.0 over units 30-50, then full speed for units 50-93 (43 steps). The speed-up happens
+# only with the wedge fully submerged (tip z 0.069 -> 0.054), which the segment runs proved does
+# not re-splash. Insert 93 -> 163 steps; total 873 -> 943 steps. All other phases unchanged.
+N_INSERT_STEPS = 163  # 2.72 s: 90 slow (1/3) + 30 ramp + 43 full = 93 original path-units
+INSERT_SLOW_STEPS = 90  # path-units 0-30 at 1/3 speed
+INSERT_SLOW_RATIO = 1.0 / 3.0
+INSERT_RAMP_STEPS = 30  # linear 1/3 -> 1.0, mean 2/3 -> 20 path-units
+WINCOMBO_START = 330  # abs step: restitution/Young window opens (first touch ~344)
+WINCOMBO_REST = 0.1  # windowed grain-grain restitution
+WINCOMBO_YOUNG_F = 0.25  # windowed Young's modulus factor
+WINCOMBO_END = 530  # insert ends at abs 523; params ramp back 530 -> 560
+WINCOMBO_RAMP = 30
+KEYFRAME_STEPS = [0, 299, 410, 593, 663, 810, 942]  # settle-end, splash window, rotate-mid/end, lift, final
 WET_EVERY = 3
 
 PARTICLE_RADIUS = 3.125e-3 * SC  # 1.5625 mm: grain diameter 3.125 mm = 0.4 / 128, still dx = 2r
@@ -361,6 +380,8 @@ def main():
                 "viscosity_coeff": VISCOSITY,
                 "surface_tension_coeff": SURFACE_TENSION,
                 "restitution": 0.5,
+                "trajectory": "v5 wincombo: insert 163 steps (90 @1/3 + 30 ramp + 43 full); "
+                "restitution 0.1 + young x0.25 window abs 330-530, 30-step ramp-back",
                 "box_lower": BOX_LOWER,
                 "box_upper": BOX_UPPER,
                 "wall_thick": WALL_THICK,
@@ -394,13 +415,44 @@ def main():
     wet_idx = 0
     q_prev = None
     n_water0 = water.n_particles
+    young0 = float(dem._entities[0].material.young_modulus)  # for the wincombo window ramp-back
     for i in range(n_steps):
+        # wincombo window (trajectory v5): soft + damped contacts during the first-touch/insert
+        # window, then a 30-step linear stiffness ramp-back (see the constants block above)
+        if i == WINCOMBO_START:
+            dem._restitution = WINCOMBO_REST
+            dem._entities[0].material.young_modulus = young0 * WINCOMBO_YOUNG_F
+            print(
+                f"step {i + 1}: wincombo window opens (restitution {WINCOMBO_REST}, "
+                f"young x{WINCOMBO_YOUNG_F}) until step {WINCOMBO_END}",
+                flush=True,
+            )
+        if i == WINCOMBO_END:
+            dem._restitution = 0.5
+            print(f"step {i + 1}: wincombo restitution restored to 0.5", flush=True)
+        if i >= WINCOMBO_END:
+            g = min(1.0, (i - WINCOMBO_END + 1) / WINCOMBO_RAMP)
+            dem._entities[0].material.young_modulus = young0 * (WINCOMBO_YOUNG_F + (1.0 - WINCOMBO_YOUNG_F) * g)
         if i == i_descend:
             dem.set_sdf_obstacle_vel(DESCEND_VEL)
             print(f"step {i + 1}: blade starts descending vertically at {DESCEND_VEL} m/s", flush=True)
-        elif i == i_insert:
-            dem.set_sdf_obstacle_vel(INSERT_VEL)
-            print(f"step {i + 1}: blade starts inserting along the blade direction at {INSERT_VEL} m/s", flush=True)
+        elif i_insert <= i < i_rotate:
+            # v5 insert speed profile along the (unchanged) 93-unit blade path
+            j = i - i_insert
+            if j < INSERT_SLOW_STEPS:
+                f = INSERT_SLOW_RATIO
+            elif j < INSERT_SLOW_STEPS + INSERT_RAMP_STEPS:
+                k = j - INSERT_SLOW_STEPS
+                f = INSERT_SLOW_RATIO + (1.0 - INSERT_SLOW_RATIO) * (k + 0.5) / INSERT_RAMP_STEPS
+            else:
+                f = 1.0
+            dem.set_sdf_obstacle_vel(tuple(v * f for v in INSERT_VEL))
+            if i == i_insert:
+                print(
+                    f"step {i + 1}: blade starts inserting along the blade direction "
+                    f"(v5 wincombo profile: 1/3 speed for the first {INSERT_SLOW_STEPS} steps)",
+                    flush=True,
+                )
         elif i == i_rotate:
             dem.set_sdf_obstacle_vel(ROTATE_VEL, omega=ROTATE_OMEGA)
             print(
