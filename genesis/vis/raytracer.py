@@ -345,6 +345,8 @@ class Raytracer:
                 if fem_entity.surface.vis_mode == "visual":
                     for vgeom in fem_entity.vgeoms:
                         self.add_deformable(str(vgeom.uid))
+                elif fem_entity.surface.vis_mode == "tetrahedral":
+                    gs.raise_exception("Tetrahedral finite element method visualization requires Rasterizer.")
 
     def get_transform(self, matrix):
         if matrix is None:

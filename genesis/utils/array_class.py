@@ -1991,6 +1991,7 @@ class GeomsInfo:
     is_decomposed: qd.Tensor
     is_hollow: qd.Tensor
     needs_coup: qd.Tensor
+    is_coup_reaction_enabled: qd.Tensor
     coup_friction: qd.Tensor
     coup_softness: qd.Tensor
     coup_restitution: qd.Tensor
@@ -2028,6 +2029,7 @@ def get_geoms_info(solver, is_active=True):
         is_decomposed=V(dtype=gs.qd_bool, shape=shape),
         is_hollow=V(dtype=gs.qd_bool, shape=shape),
         needs_coup=V(dtype=gs.qd_int, shape=shape),
+        is_coup_reaction_enabled=V(dtype=gs.qd_bool, shape=shape),
         coup_friction=V(dtype=gs.qd_float, shape=shape),
         coup_softness=V(dtype=gs.qd_float, shape=shape),
         coup_restitution=V(dtype=gs.qd_float, shape=shape),
@@ -2338,6 +2340,19 @@ def get_rigid_adjoint_cache(solver):
         dofs_vel=V(dtype=gs.qd_float, shape=(substeps_local + 1, solver.n_dofs_, solver._B), needs_grad=requires_grad),
         dofs_acc=V(dtype=gs.qd_float, shape=(substeps_local + 1, solver.n_dofs_, solver._B), needs_grad=requires_grad),
     )
+
+
+# =========================================== FEMProjectionState ===========================================
+
+
+@dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
+class FEMProjectionState:
+    normals: qd.Tensor
+    is_active: qd.Tensor
+    is_processed: qd.Tensor
+    has_changed: qd.Tensor
+    has_contact: qd.Tensor
+    is_pcg_active_saved: qd.Tensor
 
 
 # =========================================== DynInfo and DynState ===========================================

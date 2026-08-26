@@ -531,9 +531,9 @@ class FEMEntity(Entity):
         Build the entity's visual geoms and simulation mesh from its morph.
 
         Each morph sub-mesh becomes a visual geom with its own surface and UVs, while the simulation operates on a
-        single welded copy of their vertices, tracked through 'FEMVisGeom.sim_verts_idx': welding and
-        tetrahedralization both keep the input vertices first and in order, so these maps remain valid indices into
-        the simulated vertices.
+        single welded copy of their vertices, tracked through 'FEMVisGeom.sim_verts_idx'. Surface tetrahedralization
+        keeps its input vertices first and in order. An explicit TetrahedralMesh supplies the simulation topology and
+        retains the same vertex ordering in its boundary render mesh.
         """
         meshes = gs.Mesh.from_morph_surface(self._morph, self._surface)
         surface_verts, surface_faces, verts_maps = mu.merge_submeshes(
@@ -554,7 +554,10 @@ class FEMEntity(Entity):
             vvert_start += len(mesh.verts)
             vface_start += len(mesh.faces)
 
-        if isinstance(self.material, gs.materials.FEM.Cloth):
+        if isinstance(self._morph, gs.options.morphs.TetrahedralMesh):
+            verts = np.array(self._morph.vertices) + self._morph.pos
+            elems = np.array(self._morph.elements)
+        elif isinstance(self.material, gs.materials.FEM.Cloth):
             # Cloth needs no tetrahedralization: the welded surface triangles are the simulation elements.
             verts = surface_verts + self._morph.pos
             elems = surface_faces

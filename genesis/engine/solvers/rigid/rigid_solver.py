@@ -1266,6 +1266,7 @@ class RigidSolver(KinematicSolver):
                 np.array([geom.data for geom in geoms], dtype=gs.np_float),
                 np.array([geom.is_convex for geom in geoms], dtype=gs.np_bool),
                 np.array([geom.needs_coup for geom in geoms], dtype=gs.np_int),
+                np.array([geom.is_coup_reaction_enabled for geom in geoms], dtype=gs.np_bool),
                 np.array([geom.contype for geom in geoms], dtype=np.int32),
                 np.array([geom.conaffinity for geom in geoms], dtype=np.int32),
                 np.array([geom.coup_softness for geom in geoms], dtype=gs.np_float),

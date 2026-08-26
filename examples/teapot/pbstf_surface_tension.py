@@ -5,9 +5,6 @@ from typing import NamedTuple
 
 import numpy as np
 
-import igl
-import trimesh
-
 import genesis as gs
 import genesis.utils.element as element_utils
 import genesis.utils.geom as geom_utils
@@ -51,6 +48,9 @@ __all__ = (
     "CASE_TEAPOT",
     "MopManipulatorSettings",
     "MopUpdate",
+    "SPONGE_RENDER_SKELETON",
+    "SPONGE_RENDER_SOLID",
+    "SPONGE_RENDER_STYLES",
     "TeapotSettings",
     "WipeSettings",
     "add_case_entities",
@@ -80,6 +80,9 @@ CASE_SWEEP = "sweep"
 CASE_TAP = "tap"
 CASE_TEAPOT = "teapot"
 CASES = (CASE_CUBE, CASE_MERGE, CASE_BOUNCE, CASE_CONE, CASE_MOP, CASE_SWEEP, CASE_TAP, CASE_TEAPOT)
+SPONGE_RENDER_SKELETON = "skeleton"
+SPONGE_RENDER_SOLID = "solid"
+SPONGE_RENDER_STYLES = (SPONGE_RENDER_SKELETON, SPONGE_RENDER_SOLID)
 
 DEFAULT_CASE_DT = 1.0 / 30.0
 
@@ -94,21 +97,23 @@ class TapEmitterSettings(NamedTuple):
 
 
 class MopManipulatorSettings(NamedTuple):
-    franka_entity_name: str
+    entity_name: str
     sponge_entity_name: str
+    sponge_grid_resolution: tuple[int, int, int]
     asset: str
+    is_visible: bool
     scale: float
     base_pos: tuple[float, float, float]
     base_quat: tuple[float, float, float, float]
     hand_link_name: str
     left_finger_link_name: str
     right_finger_link_name: str
+    collider_link_names: tuple[str, ...]
     tool_center_point: tuple[float, float, float]
     grasp_quat: tuple[float, float, float, float]
     initial_qpos: tuple[float, ...]
     finger_open_qpos: float
     finger_closed_qpos: float
-    finger_contact_half_width: float
 
 
 class WipeSettings(NamedTuple):
@@ -315,21 +320,23 @@ def case_settings(case):
         mop_manipulator = None
         if case == CASE_MOP:
             mop_manipulator = MopManipulatorSettings(
-                franka_entity_name="mop_franka",
+                entity_name="mop_manipulator",
                 sponge_entity_name="sponge",
+                sponge_grid_resolution=(15, 10, 30),
                 asset="urdf/panda_bullet/panda.urdf",
+                is_visible=True,
                 scale=15.0,
                 base_pos=(0.0, -0.25, -7.0),
                 base_quat=(math.sqrt(0.5), -math.sqrt(0.5), 0.0, 0.0),
                 hand_link_name="panda_link7",
                 left_finger_link_name="panda_leftfinger",
                 right_finger_link_name="panda_rightfinger",
-                tool_center_point=(0.0, 0.0, 3.18),
+                collider_link_names=("panda_leftfinger", "panda_rightfinger"),
+                tool_center_point=(0.0, 0.0, 3.02),
                 grasp_quat=(0.6532814824, 0.6532814824, 0.2705980501, -0.2705980501),
                 initial_qpos=(0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785, 0.6, 0.6),
                 finger_open_qpos=0.6,
-                finger_closed_qpos=0.54,
-                finger_contact_half_width=0.35,
+                finger_closed_qpos=0.4,
             )
         wipe = WipeSettings(
             collider_idx=1,
@@ -455,7 +462,18 @@ def get_wipe_settings(settings):
     gs.raise_exception("The selected case requires wipe settings.")
 
 
-def add_case_entities(scene, case, particle_size, settings, material_factory):
+def add_case_entities(
+    scene,
+    case,
+    particle_size,
+    settings,
+    material_factory,
+    sponge_render_style=SPONGE_RENDER_SKELETON,
+    sponge_grid_resolution=None,
+):
+    if sponge_render_style not in SPONGE_RENDER_STYLES:
+        raise ValueError(f"Unknown sponge render style: {sponge_render_style}")
+
     if case == CASE_CUBE:
         liquid = scene.add_entity(
             morph=gs.morphs.Box(
@@ -519,42 +537,34 @@ def add_case_entities(scene, case, particle_size, settings, material_factory):
             manipulator = wipe.mop_manipulator
             if manipulator is None:
                 gs.raise_exception("The mop case requires manipulator settings.")
+            if sponge_grid_resolution is None:
+                sponge_grid_resolution = manipulator.sponge_grid_resolution
             sponge_size = tuple(wipe.collider_upper[axis] - wipe.collider_lower[axis] for axis in range(3))
             sponge_pos = tuple(
                 wipe.start_pos[axis] + 0.5 * (wipe.collider_lower[axis] + wipe.collider_upper[axis])
                 for axis in range(3)
             )
-            sponge_refinement_morph = gs.morphs.Box(
-                size=sponge_size,
-                nobisect=False,
-                maxvolume=0.01,
-            )
-            sponge_surface_mesh = mesh_utils.create_box(extents=sponge_size)
-            sponge_surface_vertices, sponge_elements = element_utils.mesh_to_elements(
-                sponge_surface_mesh,
-                tet_cfg=mesh_utils.generate_tetgen_config_from_morph(sponge_refinement_morph),
-            )
-            sponge_surface_faces, *_ = igl.boundary_facets(sponge_elements)
-            sponge_surface_mesh = trimesh.Trimesh(
-                vertices=sponge_surface_vertices,
-                faces=sponge_surface_faces,
-                process=False,
+            sponge_vertices, sponge_elements = element_utils.create_tetrahedral_grid(
+                lower=tuple(-0.5 * size for size in sponge_size),
+                upper=tuple(0.5 * size for size in sponge_size),
+                resolution=sponge_grid_resolution,
             )
             scene.add_entity(
-                morph=gs.morphs.MeshSet(
-                    files=(sponge_surface_mesh,),
+                morph=gs.morphs.TetrahedralMesh(
+                    vertices=sponge_vertices,
+                    elements=sponge_elements,
                     pos=sponge_pos,
-                    maxvolume=0.01,
                 ),
                 material=gs.materials.FEM.Elastic(
-                    E=1.0e4,
-                    nu=0.2,
+                    E=1.0e2,
+                    nu=0.4,
                     rho=100.0,
                     model="linear_corotated",
                 ),
                 surface=gs.surfaces.Default(
                     color=(0.95, 0.68, 0.12),
                     opacity=0.8,
+                    vis_mode="tetrahedral" if sponge_render_style == SPONGE_RENDER_SKELETON else "visual",
                 ),
                 name=manipulator.sponge_entity_name,
             )
@@ -564,14 +574,19 @@ def add_case_entities(scene, case, particle_size, settings, material_factory):
                     scale=manipulator.scale,
                     pos=manipulator.base_pos,
                     quat=manipulator.base_quat,
-                    collision=False,
+                    visualization=manipulator.is_visible,
+                    collision=True,
+                    convexify=False,
+                    collision_links=manipulator.collider_link_names,
                     fixed=True,
                 ),
                 material=gs.materials.Rigid(
-                    needs_coup=False,
+                    needs_coup=True,
+                    coup_links=manipulator.collider_link_names,
+                    is_coup_reaction_enabled=False,
                     gravity_compensation=1.0,
                 ),
-                name=manipulator.franka_entity_name,
+                name=manipulator.entity_name,
             )
         return ((liquid, None),)
 
@@ -615,8 +630,8 @@ def update_wipe_case(solver, time, settings):
     return pos
 
 
-def mop_manipulator_qpos(franka_entity, wipe_pos, finger_qpos, settings, init_qpos):
-    """Place the Franka tool center at the sponge top center and set its symmetric finger opening."""
+def mop_manipulator_qpos(manipulator_entity, wipe_pos, finger_qpos, settings, init_qpos):
+    """Place the manipulator tool center at the sponge top center and set its symmetric finger opening."""
     manipulator = settings.mop_manipulator
     if manipulator is None:
         gs.raise_exception("Mop manipulator motion requires manipulator settings.")
@@ -627,8 +642,8 @@ def mop_manipulator_qpos(franka_entity, wipe_pos, finger_qpos, settings, init_qp
     )
     target_pos = np.broadcast_to(np.array(target_pos), (*init_qpos.shape[:-1], 3)).copy()
     target_quat = np.broadcast_to(np.array(manipulator.grasp_quat), (*init_qpos.shape[:-1], 4)).copy()
-    qpos = franka_entity.inverse_kinematics(
-        link=franka_entity.get_link(manipulator.hand_link_name),
+    qpos = manipulator_entity.inverse_kinematics(
+        link=manipulator_entity.get_link(manipulator.hand_link_name),
         pos=target_pos,
         quat=target_quat,
         local_point=manipulator.tool_center_point,
@@ -638,34 +653,23 @@ def mop_manipulator_qpos(franka_entity, wipe_pos, finger_qpos, settings, init_qp
         dofs_idx_local=range(7),
     )
     qpos[..., -2:] = finger_qpos
-    franka_entity.set_qpos(qpos, zero_velocity=True)
+    manipulator_entity.set_qpos(qpos, zero_velocity=True)
     return qpos
 
 
 def initialize_mop_manipulator(scene, settings):
-    """Open the gripper around the sponge top and bind local material patches to the fingers."""
+    """Open the gripper around the sponge top before collision-driven compression begins."""
     manipulator = settings.mop_manipulator
     if manipulator is None:
         gs.raise_exception("Mop initialization requires manipulator settings.")
-    franka_entity = scene.get_entity(name=manipulator.franka_entity_name)
-    sponge_entity = scene.get_entity(name=manipulator.sponge_entity_name)
-    franka_entity.set_qpos(manipulator.initial_qpos, zero_velocity=True)
+    manipulator_entity = scene.get_entity(name=manipulator.entity_name)
+    manipulator_entity.set_qpos(manipulator.initial_qpos, zero_velocity=True)
     qpos = mop_manipulator_qpos(
-        franka_entity, settings.start_pos, manipulator.finger_open_qpos, settings, franka_entity.get_qpos(),
-    )
-
-    sponge_positions = tensor_to_array(sponge_entity.init_positions)
-    sponge_center_z = 0.5 * (sponge_positions[:, 2].min() + sponge_positions[:, 2].max())
-    finger_contact_mask = np.isclose(sponge_positions[:, 1], sponge_positions[:, 1].max()) & (
-        np.abs(sponge_positions[:, 2] - sponge_center_z) <= manipulator.finger_contact_half_width
-    )
-    sponge_entity.set_vertex_constraints(
-        np.flatnonzero(finger_contact_mask & np.isclose(sponge_positions[:, 0], sponge_positions[:, 0].max())),
-        link=franka_entity.get_link(manipulator.left_finger_link_name),
-    )
-    sponge_entity.set_vertex_constraints(
-        np.flatnonzero(finger_contact_mask & np.isclose(sponge_positions[:, 0], sponge_positions[:, 0].min())),
-        link=franka_entity.get_link(manipulator.right_finger_link_name),
+        manipulator_entity,
+        settings.start_pos,
+        manipulator.finger_open_qpos,
+        settings,
+        manipulator_entity.get_qpos(),
     )
     scene.pbstf_solver.update_static_collider_deformation(settings.collider_idx, is_sdf_enabled=True)
     return qpos
@@ -676,24 +680,28 @@ def update_mop_case(scene, time, settings, init_qpos, is_sponge_frozen):
     manipulator = settings.mop_manipulator
     if manipulator is None:
         gs.raise_exception("Mop motion requires manipulator settings.")
-    franka_entity = scene.get_entity(name=manipulator.franka_entity_name)
+    manipulator_entity = scene.get_entity(name=manipulator.entity_name)
     sponge_entity = scene.get_entity(name=manipulator.sponge_entity_name)
     wipe_pos = wipe_pose(time, settings)
-    grip_progress = min(max((time + scene.dt) / settings.settle_time, 0.0), 1.0)
+    grip_phase = min(max((time + scene.dt) / settings.settle_time, 0.0), 1.0)
+    grip_progress = grip_phase**3 * (grip_phase * (grip_phase * 6.0 - 15.0) + 10.0)
     finger_qpos = manipulator.finger_open_qpos + grip_progress * (
         manipulator.finger_closed_qpos - manipulator.finger_open_qpos
     )
-    qpos = mop_manipulator_qpos(franka_entity, wipe_pos, finger_qpos, settings, init_qpos)
+    qpos = mop_manipulator_qpos(manipulator_entity, wipe_pos, finger_qpos, settings, init_qpos)
 
     is_grip_complete = time + gs.EPS >= settings.settle_time
     if not is_sponge_frozen and is_grip_complete:
         scene.pbstf_solver.update_static_collider_deformation(settings.collider_idx, is_sdf_enabled=True)
         sponge_entity.set_vertex_constraints(
-            range(sponge_entity.n_vertices), link=franka_entity.get_link(manipulator.hand_link_name),
+            range(sponge_entity.n_vertices),
+            link=manipulator_entity.get_link(manipulator.hand_link_name),
         )
         is_sponge_frozen = True
     scene.pbstf_solver.set_static_colliders_pose(
-        pos=wipe_pos, quat=settings.quat, colliders_idx=settings.collider_idx,
+        pos=wipe_pos,
+        quat=settings.quat,
+        colliders_idx=settings.collider_idx,
     )
     return MopUpdate(qpos=qpos, is_sponge_frozen=is_sponge_frozen, wipe_pos=wipe_pos)
 
@@ -749,7 +757,15 @@ def stop_viewer(scene, is_viewer_shown):
     scene.viewer.stop()
 
 
-def build_scene(case=CASE_CUBE, scale=None, show_viewer=False, dt=None, n_envs=0):
+def build_scene(
+    case=CASE_CUBE,
+    scale=None,
+    show_viewer=False,
+    dt=None,
+    n_envs=0,
+    sponge_render_style=SPONGE_RENDER_SKELETON,
+    sponge_grid_resolution=None,
+):
     """Build a position-based surface-tension flow example scene."""
     settings = case_settings(case)
     if scale is None:
@@ -810,7 +826,15 @@ def build_scene(case=CASE_CUBE, scale=None, show_viewer=False, dt=None, n_envs=0
         ),
         show_viewer=show_viewer,
     )
-    entities_and_velocities = add_case_entities(scene, case, particle_size, settings, _case_liquid_material)
+    entities_and_velocities = add_case_entities(
+        scene,
+        case,
+        particle_size,
+        settings,
+        _case_liquid_material,
+        sponge_render_style=sponge_render_style,
+        sponge_grid_resolution=sponge_grid_resolution,
+    )
     scene.build(n_envs=n_envs)
     for entity, velocity in entities_and_velocities:
         if velocity is not None:
@@ -831,6 +855,20 @@ def main():
     parser.add_argument("--scale", type=int, default=None, help="C++ particle scale (radius = 1 / scale)")
     parser.add_argument("--dt", type=float, default=None, help="Override the case's default time step")
     parser.add_argument("--steps", type=int, default=None, help="Override the case's default simulation horizon")
+    parser.add_argument(
+        "--sponge-render-style",
+        choices=SPONGE_RENDER_STYLES,
+        default=SPONGE_RENDER_SKELETON,
+        help="Render the mop sponge as all tetrahedron edges or as a solid surface",
+    )
+    parser.add_argument(
+        "--sponge-grid-resolution",
+        type=int,
+        nargs=3,
+        metavar=("NX", "NY", "NZ"),
+        default=None,
+        help="Set the mop sponge regular-grid cell count along the x, y, and z axes",
+    )
     parser.add_argument("-v", "--vis", dest="show_viewer", action="store_true", default=False)
     parser.add_argument(
         "--record",
@@ -846,11 +884,20 @@ def main():
         parser.error("--dt must be positive")
     if args.steps is not None and args.steps < 0:
         parser.error("--steps must be non-negative")
+    if args.sponge_grid_resolution is not None and any(value <= 0 for value in args.sponge_grid_resolution):
+        parser.error("--sponge-grid-resolution entries must be positive")
 
     gs.init(backend=gs.cuda, precision="32", logging_level="info")
     settings = case_settings(args.case)
     is_viewer_shown = args.show_viewer or args.is_recording
-    scene, _ = build_scene(case=args.case, scale=args.scale, show_viewer=is_viewer_shown, dt=args.dt)
+    scene, _ = build_scene(
+        case=args.case,
+        scale=args.scale,
+        show_viewer=is_viewer_shown,
+        dt=args.dt,
+        sponge_render_style=args.sponge_render_style,
+        sponge_grid_resolution=args.sponge_grid_resolution,
+    )
     teapot_settings = settings.teapot
     emitter_settings = settings.emitter
     wipe_settings = get_wipe_settings(settings) if args.case in (CASE_MOP, CASE_SWEEP) else None
@@ -876,7 +923,7 @@ def main():
         mop_manipulator = settings.mop.mop_manipulator
         if mop_manipulator is None:
             gs.raise_exception("The mop case requires manipulator settings.")
-        mop_qpos = scene.get_entity(name=mop_manipulator.franka_entity_name).get_qpos()
+        mop_qpos = scene.get_entity(name=mop_manipulator.entity_name).get_qpos()
         is_sponge_frozen = False
 
     steps = settings.steps if args.steps is None else args.steps
@@ -907,7 +954,11 @@ def main():
             if wipe_settings is not None:
                 if args.case == CASE_MOP:
                     mop_update = update_mop_case(
-                        scene, scene.cur_t, wipe_settings, mop_qpos, is_sponge_frozen,
+                        scene,
+                        scene.cur_t,
+                        wipe_settings,
+                        mop_qpos,
+                        is_sponge_frozen,
                     )
                     mop_qpos = mop_update.qpos
                     is_sponge_frozen = mop_update.is_sponge_frozen

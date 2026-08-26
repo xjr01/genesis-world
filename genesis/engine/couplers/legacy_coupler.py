@@ -1,6 +1,7 @@
 from typing import TYPE_CHECKING
 
 import numpy as np
+
 import quadrants as qd
 
 import genesis as gs
@@ -39,6 +40,7 @@ class LegacyCoupler(RBC):
         self.pbd_solver = self.sim.pbd_solver
         self.fem_solver = self.sim.fem_solver
         self.sf_solver = self.sim.sf_solver
+        self.fem_projection_state = None
 
     def build(self) -> None:
         self._rigid_mpm = self.rigid_solver.is_active and self.mpm_solver.is_active and self.options.rigid_mpm
@@ -49,6 +51,29 @@ class LegacyCoupler(RBC):
         self._mpm_pbd = self.mpm_solver.is_active and self.pbd_solver.is_active and self.options.mpm_pbd
         self._fem_mpm = self.fem_solver.is_active and self.mpm_solver.is_active and self.options.fem_mpm
         self._fem_sph = self.fem_solver.is_active and self.sph_solver.is_active and self.options.fem_sph
+
+        self._is_implicit_fem_projection_enabled = (
+            self._rigid_fem
+            and self.fem_solver._use_implicit_solver
+            and any(geom.needs_coup and not geom.is_coup_reaction_enabled for geom in self.rigid_solver.geoms)
+        )
+        self.fem_solver._is_implicit_rigid_projection_enabled = self._is_implicit_fem_projection_enabled
+        if self._is_implicit_fem_projection_enabled:
+            self.fem_projection_state = array_class.FEMProjectionState(
+                normals=qd.Vector.field(
+                    3,
+                    dtype=gs.qd_float,
+                    shape=(self.fem_solver._B, self.fem_solver.n_vertices),
+                ),
+                is_active=qd.field(
+                    dtype=gs.qd_bool,
+                    shape=(self.fem_solver._B, self.fem_solver.n_vertices),
+                ),
+                is_processed=qd.field(dtype=gs.qd_bool, shape=(self.fem_solver._B,)),
+                has_changed=qd.field(dtype=gs.qd_int, shape=(self.fem_solver._B,)),
+                has_contact=qd.field(dtype=gs.qd_int, shape=(self.fem_solver._B,)),
+                is_pcg_active_saved=qd.field(dtype=gs.qd_bool, shape=(self.fem_solver._B,)),
+            )
 
         if (self._rigid_mpm or self._rigid_sph or self._rigid_pbd or self._rigid_fem) and any(
             geom.needs_coup for geom in self.rigid_solver.geoms
@@ -102,6 +127,14 @@ class LegacyCoupler(RBC):
         self.reset(envs_idx=self.sim.scene._envs_idx)
 
     def reset(self, envs_idx=None) -> None:
+        if self.fem_projection_state is not None:
+            self.fem_projection_state.normals.fill(0.0)
+            self.fem_projection_state.is_active.fill(False)
+            self.fem_projection_state.is_processed.fill(False)
+            self.fem_projection_state.has_changed.fill(0)
+            self.fem_projection_state.has_contact.fill(0)
+            self.fem_projection_state.is_pcg_active_saved.fill(False)
+
         if self._rigid_mpm and self.mpm_solver.enable_CPIC:
             if envs_idx is None:
                 self.mpm_rigid_normal.fill(0)
@@ -138,9 +171,14 @@ class LegacyCoupler(RBC):
         rigid_info: array_class.RigidInfo,
         sdf_info: array_class.SDFInfo,
         collider_static_config: qd.template(),
+        is_position_projection_enabled: qd.template(),
+        is_imposed_boundary_projection_enabled: qd.template(),
     ):
         for i_g in range(self.rigid_solver.n_geoms):
-            if geoms_info.needs_coup[i_g]:
+            if geoms_info.needs_coup[i_g] and (
+                not qd.static(is_imposed_boundary_projection_enabled)
+                or geoms_info.is_coup_reaction_enabled[i_g]
+            ):
                 vel = self._func_collide_with_rigid_geom(
                     pos_world,
                     vel,
@@ -153,6 +191,7 @@ class LegacyCoupler(RBC):
                     rigid_info=rigid_info,
                     sdf_info=sdf_info,
                     collider_static_config=collider_static_config,
+                    is_position_projection_enabled=is_position_projection_enabled,
                 )
         return vel
 
@@ -170,6 +209,7 @@ class LegacyCoupler(RBC):
         rigid_info: array_class.RigidInfo,
         sdf_info: array_class.SDFInfo,
         collider_static_config: qd.template(),
+        is_position_projection_enabled: qd.template(),
     ):
         signed_dist = sdf.sdf_func_world(geom_idx, batch_idx, pos_world, geoms_state, geoms_info, sdf_info)
 
@@ -183,6 +223,39 @@ class LegacyCoupler(RBC):
             vel = self._func_collide_in_rigid_geom(
                 pos_world, vel, mass, normal_rigid, influence, geom_idx, batch_idx, geoms_info, links_state, rigid_info
             )
+
+        # Predicted-position projection recovers resting deformable vertices that enter the signed distance field.
+        if qd.static(is_position_projection_enabled):
+            vel_rigid = self.rigid_solver._func_vel_at_point(
+                pos_world=pos_world,
+                link_idx=geoms_info.link_idx[geom_idx],
+                i_b=batch_idx,
+                links_state=links_state,
+            )
+            predicted_pos = pos_world + rigid_info.substep_dt[None] * (vel - vel_rigid)
+            predicted_signed_dist = sdf.sdf_func_world(
+                geom_idx, batch_idx, predicted_pos, geoms_state, geoms_info, sdf_info
+            )
+            if predicted_signed_dist < 0:
+                predicted_normal = sdf.sdf_func_normal_world(
+                    geom_idx,
+                    batch_idx,
+                    predicted_pos,
+                    geoms_state,
+                    geoms_info,
+                    rigid_info,
+                    sdf_info,
+                    collider_static_config,
+                )
+                corrected_pos = predicted_pos - predicted_signed_dist * predicted_normal
+                vel_old = vel
+                vel = vel_rigid + (corrected_pos - pos_world) / rigid_info.substep_dt[None]
+                if geoms_info.is_coup_reaction_enabled[geom_idx]:
+                    delta_mv = mass * (vel - vel_old)
+                    force = -delta_mv / rigid_info.substep_dt[None]
+                    self.rigid_solver._func_apply_coupling_force(
+                        geoms_info.link_idx[geom_idx], batch_idx, predicted_pos, force, links_state
+                    )
 
         return vel
 
@@ -228,12 +301,17 @@ class LegacyCoupler(RBC):
         # surface and integrating the symmetric pressure force over the truncated kernel support yields the factor
         # 2 * sigma(signed_dist), with sigma the kernel plane integral (see cubic_kernel_plane_integral in
         # sph_solver.py). Sigma integrates to 1/2 across the support band, so a covering particle layer transmits
-        # exactly p per unit area: Archimedes buoyancy with no tuning constant. Fixed links are exempt: they cannot
-        # respond to the force, and the reaction is a conservative stiff kick that keeps fluid resting on them
-        # ringing forever, pumped by the acoustic pressure fluctuations of the fluid.
+        # exactly p per unit area: Archimedes buoyancy with no tuning constant. Pressure feedback is limited to movable
+        # links whose material enables coupling reactions; applying it to an imposed boundary creates a conservative
+        # stiff kick that keeps resting fluid ringing through its acoustic pressure fluctuations.
         link_idx = geoms_info.link_idx[geom_idx]
         I_l = [link_idx, batch_idx] if qd.static(self.rigid_solver._options.batch_links_info) else link_idx
-        if signed_dist < self.sph_solver._support_radius and pressure > 0 and not links_info.is_fixed[I_l]:
+        if (
+            signed_dist < self.sph_solver._support_radius
+            and pressure > 0
+            and not links_info.is_fixed[I_l]
+            and geoms_info.is_coup_reaction_enabled[geom_idx]
+        ):
             pressure_force = (
                 -2.0
                 * pressure
@@ -275,25 +353,27 @@ class LegacyCoupler(RBC):
                     1.0 + geoms_info.coup_restitution[geom_idx]
                 )
                 delta_mv = mass * (corrected_vel - vel)
-                self.rigid_solver._func_apply_coupling_force(
-                    link_idx=geoms_info.link_idx[geom_idx],
-                    env_idx=batch_idx,
-                    pos=pos_world,
-                    force=-delta_mv / rigid_info.substep_dt[None],
-                    links_state=links_state,
-                )
+                if geoms_info.is_coup_reaction_enabled[geom_idx]:
+                    self.rigid_solver._func_apply_coupling_force(
+                        link_idx=geoms_info.link_idx[geom_idx],
+                        env_idx=batch_idx,
+                        pos=pos_world,
+                        force=-delta_mv / rigid_info.substep_dt[None],
+                        links_state=links_state,
+                    )
                 vel = corrected_vel
         elif predicted_signed_dist < particle_radius:
             corrected_pos = predicted_pos + predicted_normal * (particle_radius - predicted_signed_dist)
             corrected_vel = (corrected_pos - pos_world) / rigid_info.substep_dt[None]
             delta_mv = mass * (corrected_vel - vel)
-            self.rigid_solver._func_apply_coupling_force(
-                link_idx=geoms_info.link_idx[geom_idx],
-                env_idx=batch_idx,
-                pos=predicted_pos,
-                force=-delta_mv / rigid_info.substep_dt[None],
-                links_state=links_state,
-            )
+            if geoms_info.is_coup_reaction_enabled[geom_idx]:
+                self.rigid_solver._func_apply_coupling_force(
+                    link_idx=geoms_info.link_idx[geom_idx],
+                    env_idx=batch_idx,
+                    pos=predicted_pos,
+                    force=-delta_mv / rigid_info.substep_dt[None],
+                    links_state=links_state,
+                )
             vel = corrected_vel
             normal_rigid = predicted_normal
 
@@ -350,11 +430,12 @@ class LegacyCoupler(RBC):
 
             #################### particle -> rigid ####################
             # Compute delta momentum and apply to rigid body.
-            delta_mv = mass * (vel - vel_old)
-            force = -delta_mv / rigid_info.substep_dt[None]
-            self.rigid_solver._func_apply_coupling_force(
-                geoms_info.link_idx[geom_idx], i_b, pos_world, force, links_state
-            )
+            if geoms_info.is_coup_reaction_enabled[geom_idx]:
+                delta_mv = mass * (vel - vel_old)
+                force = -delta_mv / rigid_info.substep_dt[None]
+                self.rigid_solver._func_apply_coupling_force(
+                    geoms_info.link_idx[geom_idx], i_b, pos_world, force, links_state
+                )
 
         return vel
 
@@ -412,6 +493,8 @@ class LegacyCoupler(RBC):
                         rigid_info=rigid_info,
                         sdf_info=sdf_info,
                         collider_static_config=collider_static_config,
+                        is_position_projection_enabled=False,
+                        is_imposed_boundary_projection_enabled=False,
                     )
 
                 #################### MPM <-> SPH ####################
@@ -544,6 +627,38 @@ class LegacyCoupler(RBC):
         if self.fem_solver._constraints_initialized and self.rigid_solver.is_active:
             self.fem_solver._kernel_update_linked_vertex_constraints(self.rigid_solver.dyn_state.links)
 
+    def project_fem_implicit_pcg(self, f, is_initial):
+        if is_initial:
+            self.fem_solver.project_initial_pcg_positions(
+                f,
+                self.rigid_solver.n_geoms,
+                self.fem_projection_state,
+                self.rigid_solver.dyn_state,
+                self.rigid_solver.dyn_info,
+                self.rigid_solver.rigid_info,
+                self.rigid_solver.collider._collider_info,
+            )
+        else:
+            self.fem_solver.one_projected_pcg_iter(
+                f,
+                self.rigid_solver.n_geoms,
+                self.fem_projection_state,
+                self.rigid_solver.dyn_state,
+                self.rigid_solver.dyn_info,
+                self.rigid_solver.rigid_info,
+                self.rigid_solver.collider._collider_info,
+            )
+
+    def project_fem_implicit_positions(self, f):
+        self.fem_solver.project_implicit_positions(
+            f,
+            self.rigid_solver.n_geoms,
+            self.rigid_solver.dyn_state,
+            self.rigid_solver.dyn_info,
+            self.rigid_solver.rigid_info,
+            self.rigid_solver.collider._collider_info,
+        )
+
     @qd.kernel
     def fem_surface_force(
         self,
@@ -587,6 +702,8 @@ class LegacyCoupler(RBC):
                             rigid_info,
                             sdf_info,
                             collider_static_config,
+                            is_position_projection_enabled=True,
+                            is_imposed_boundary_projection_enabled=self._is_implicit_fem_projection_enabled,
                         )
                         self.fem_solver.elements_v[f + 1, iv, i_b].vel = vel_fem_sv
 
@@ -911,12 +1028,12 @@ class LegacyCoupler(RBC):
             new_vel = (new_pos - prev_pos) / self.pbd_solver._substep_dt
 
             #################### particle -> rigid ####################
-            delta_mv = mass * (new_vel - vel)
-            force = (-delta_mv / self.rigid_solver._substep_dt) * (1 - energy_loss)
-
-            self.rigid_solver._func_apply_coupling_force(
-                geoms_info.link_idx[geom_idx], batch_idx, pos_world, force, links_state
-            )
+            if geoms_info.is_coup_reaction_enabled[geom_idx]:
+                delta_mv = mass * (new_vel - vel)
+                force = (-delta_mv / self.rigid_solver._substep_dt) * (1 - energy_loss)
+                self.rigid_solver._func_apply_coupling_force(
+                    geoms_info.link_idx[geom_idx], batch_idx, pos_world, force, links_state
+                )
 
         return new_pos, new_vel, contact_normal
 

@@ -77,6 +77,8 @@ class PBSTFSolver(Solver):
         self._n_absorbent_static_colliders = len(self._absorbent_static_colliders_idx)
         self._static_colliders_pos = None
         self._static_colliders_quat = None
+        self._static_colliders_prev_pos = None
+        self._static_colliders_prev_quat = None
         self._upper_bound = np.asarray(options.upper_bound, dtype=gs.np_float)
         self._lower_bound = np.asarray(options.lower_bound, dtype=gs.np_float)
 
@@ -150,6 +152,8 @@ class PBSTFSolver(Solver):
         if self._n_static_colliders > 0:
             self._static_colliders_pos = qd.field(gs.qd_vec3, shape=(self._n_static_colliders, self._B))
             self._static_colliders_quat = qd.field(gs.qd_vec4, shape=(self._n_static_colliders, self._B))
+            self._static_colliders_prev_pos = qd.field(gs.qd_vec3, shape=(self._n_static_colliders, self._B))
+            self._static_colliders_prev_quat = qd.field(gs.qd_vec4, shape=(self._n_static_colliders, self._B))
             colliders_pos = np.repeat(
                 np.stack([collider.pos for collider in self._static_colliders])[:, None, :],
                 repeats=self._B,
@@ -162,6 +166,8 @@ class PBSTFSolver(Solver):
             )
             self._static_colliders_pos.from_numpy(colliders_pos)
             self._static_colliders_quat.from_numpy(colliders_quat)
+            self._static_colliders_prev_pos.from_numpy(colliders_pos)
+            self._static_colliders_prev_quat.from_numpy(colliders_quat)
 
         # Convert before compiling any PBSTF kernel so every compiled instance
         # sees one stable gravity-field type.
@@ -457,6 +463,26 @@ class PBSTFSolver(Solver):
                 self._static_colliders_pos[collider_idx, env_idx][axis] = pos[env_idx_local, collider_idx_local, axis]
             for axis in qd.static(range(4)):
                 self._static_colliders_quat[collider_idx, env_idx][axis] = quat[env_idx_local, collider_idx_local, axis]
+
+    @qd.kernel
+    def _kernel_commit_static_colliders_pose(self, envs_idx: qd.types.ndarray()):
+        for collider_idx, env_idx_local in qd.ndrange(self._n_static_colliders, envs_idx.shape[0]):
+            env_idx = envs_idx[env_idx_local]
+            self._static_colliders_prev_pos[collider_idx, env_idx] = self._static_colliders_pos[collider_idx, env_idx]
+            self._static_colliders_prev_quat[collider_idx, env_idx] = self._static_colliders_quat[collider_idx, env_idx]
+
+    def _commit_static_colliders_pose(self, envs_idx):
+        if gs.use_zerocopy:
+            colliders_prev_pos = qd_to_torch(self._static_colliders_prev_pos, transpose=True, copy=False)
+            colliders_prev_quat = qd_to_torch(self._static_colliders_prev_quat, transpose=True, copy=False)
+            colliders_pos = qd_to_torch(self._static_colliders_pos, transpose=True, copy=False)
+            colliders_quat = qd_to_torch(self._static_colliders_quat, transpose=True, copy=False)
+            colliders_prev_pos[envs_idx] = colliders_pos[envs_idx]
+            colliders_prev_quat[envs_idx] = colliders_quat[envs_idx]
+            if gs.backend == gs.metal:
+                torch.mps.synchronize()
+        else:
+            self._kernel_commit_static_colliders_pose(envs_idx)
 
     def _init_particle_fields(self):
         particle_state = qd.types.struct(
@@ -770,7 +796,7 @@ class PBSTFSolver(Solver):
     @qd.func
     def _project_out_static_colliders(self, env_idx, pos):
         for collider_idx in qd.static(range(self._n_static_colliders)):
-            pos = project_out_static_collider(
+            projected_pos = project_out_static_collider(
                 collider_idx,
                 env_idx,
                 pos,
@@ -779,7 +805,37 @@ class PBSTFSolver(Solver):
                 self._static_colliders_quat,
                 self._static_colliders[collider_idx],
             )
+            is_projection_compatible = True
+            if (projected_pos - pos).norm_sqr() > gs.EPS**2:
+                # Earlier colliders define support priority; see PBSTFOptions.static_colliders.
+                for support_collider_idx in qd.static(range(collider_idx)):
+                    _, _, is_penetrating, _ = query_static_collider_contact(
+                        support_collider_idx,
+                        env_idx,
+                        projected_pos,
+                        self._particle_radius,
+                        self._static_colliders_pos,
+                        self._static_colliders_quat,
+                        self._static_colliders[support_collider_idx],
+                    )
+                    is_projection_compatible = is_projection_compatible and not is_penetrating
+            if is_projection_compatible:
+                pos = projected_pos
         return pos
+
+    @qd.func
+    def _static_collider_velocity_at_point(self, collider_idx, env_idx, pos):
+        pos_local = gu.qd_inv_transform_by_trans_quat(
+            pos,
+            self._static_colliders_pos[collider_idx, env_idx],
+            self._static_colliders_quat[collider_idx, env_idx],
+        )
+        pos_prev = gu.qd_transform_by_trans_quat(
+            pos_local,
+            self._static_colliders_prev_pos[collider_idx, env_idx],
+            self._static_colliders_prev_quat[collider_idx, env_idx],
+        )
+        return (pos - pos_prev) / self._substep_dt
 
     @qd.func
     def _separated_by_static_colliders(self, env_idx, pos_i, pos_j):
@@ -1623,9 +1679,13 @@ class PBSTFSolver(Solver):
                                 self._static_colliders[collider_idx],
                             )
                             if surface_distance <= self._particle_radius:
-                                vel_normal = vel.dot(normal) * normal
-                                vel_tangent = vel - vel_normal
-                                vel = vel_normal + (1.0 - self._material.collider_friction) * vel_tangent
+                                collider_vel = self._static_collider_velocity_at_point(collider_idx, i_b, pos)
+                                relative_vel = vel - collider_vel
+                                relative_vel_normal = relative_vel.dot(normal) * normal
+                                relative_vel_tangent = relative_vel - relative_vel_normal
+                                vel = collider_vel + relative_vel_normal + (
+                                    1.0 - self._material.collider_friction
+                                ) * relative_vel_tangent
                         self.particles_reordered[i, i_b].vel = vel
                 pos = self.boundary.impose_pos(
                     self.particles_reordered[i, i_b].ipos + self._substep_dt * self.particles_reordered[i, i_b].vel
@@ -1740,6 +1800,8 @@ class PBSTFSolver(Solver):
     def substep_post_coupling(self, f):
         if self.is_active:
             self._kernel_copy_from_reordered(f)
+            if self._n_static_colliders > 0:
+                self._commit_static_colliders_pose(self._scene._envs_idx)
 
     def check_errno(self):
         errno = np.bitwise_or.reduce(qd_to_numpy(self._errno, transpose=True))
@@ -1790,6 +1852,7 @@ class PBSTFSolver(Solver):
                     self._static_colliders_pos,
                     self._static_colliders_quat,
                 )
+                self._commit_static_colliders_pose(envs_idx)
             if self._n_deformable_static_colliders > 0:
                 for collider in self._static_colliders:
                     if collider.is_deformable:

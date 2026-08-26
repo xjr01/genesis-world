@@ -1,9 +1,11 @@
 import numpy as np
+
 import quadrants as qd
 
 import genesis as gs
-import genesis.utils.geom as gu
 import genesis.utils.array_class as array_class
+import genesis.utils.geom as gu
+from genesis.utils.triangle_qd import closest_point_on_triangle, triangle_face_normal
 
 
 class SDF:
@@ -474,6 +476,146 @@ def sdf_func_grad_world_local_consistent(
                 grad_mesh[2] += w_xyz[0] * w_xyz[1] * (2 * offset[2] - 1) * val / cs[2]
         grad_world = gu.qd_transform_by_quat(grad_mesh, geom_quat)
     return grad_world
+
+
+@qd.func
+def sdf_func_exact_mesh_surface(
+    geom_idx,
+    env_idx,
+    pos_world: qd.types.vector(3),
+    dyn_state: array_class.DynState,
+    dyn_info: array_class.DynInfo,
+    rigid_info: array_class.RigidInfo,
+):
+    """Return the exact closest point, outward direction, inside flag, and distance for a rigid triangle mesh."""
+    geom_pos = dyn_state.geoms.pos[geom_idx, env_idx]
+    geom_quat = dyn_state.geoms.quat[geom_idx, env_idx]
+    pos_mesh = gu.qd_inv_transform_by_trans_quat(pos_world, geom_pos, geom_quat)
+    closest_position = pos_mesh
+    closest_normal_sum = qd.Vector.zero(gs.qd_float, 3)
+    closest_face_normal = qd.Vector([1.0, 0.0, 0.0], dt=gs.qd_float)
+    surface_distance_sqr = gs.qd_float(1.0e20)
+    winding_angle = gs.qd_float(0.0)
+    has_closest = False
+
+    for face_idx in range(dyn_info.geoms.face_start[geom_idx], dyn_info.geoms.face_end[geom_idx]):
+        face = dyn_info.faces.verts_idx[face_idx]
+        v0 = dyn_info.verts.init_pos[face[0]]
+        v1 = dyn_info.verts.init_pos[face[1]]
+        v2 = dyn_info.verts.init_pos[face[2]]
+        candidate_normal = triangle_face_normal(v0, v1, v2)
+        candidate = closest_point_on_triangle(pos_mesh, v0, v1, v2)
+        candidate_distance_sqr = (pos_mesh - candidate).norm_sqr()
+        a = v0 - pos_mesh
+        b = v1 - pos_mesh
+        c = v2 - pos_mesh
+        a_length = a.norm()
+        b_length = b.norm()
+        c_length = c.norm()
+        # Global winding keeps the inside sign valid at concave edges where the nearest face alone is ambiguous.
+        winding_angle += 2.0 * qd.atan2(
+            a.dot(b.cross(c)),
+            a_length * b_length * c_length
+            + a.dot(b) * c_length
+            + b.dot(c) * a_length
+            + c.dot(a) * b_length,
+        )
+        if not has_closest:
+            closest_position = candidate
+            closest_normal_sum = candidate_normal
+            closest_face_normal = candidate_normal
+            surface_distance_sqr = candidate_distance_sqr
+            has_closest = True
+        else:
+            distance_tolerance = 8.0 * rigid_info.EPS[None] * qd.max(
+                1.0, candidate_distance_sqr, surface_distance_sqr
+            )
+            if candidate_distance_sqr < surface_distance_sqr - distance_tolerance:
+                closest_normal_sum = candidate_normal
+            elif qd.abs(candidate_distance_sqr - surface_distance_sqr) <= distance_tolerance:
+                closest_normal_sum += candidate_normal
+            if candidate_distance_sqr < surface_distance_sqr:
+                closest_position = candidate
+                closest_face_normal = candidate_normal
+                surface_distance_sqr = candidate_distance_sqr
+
+    surface_distance = qd.sqrt(surface_distance_sqr)
+    closest_normal = closest_face_normal
+    if closest_normal_sum.norm_sqr() > rigid_info.EPS[None] ** 2:
+        closest_normal = closest_normal_sum.normalized()
+    is_inside = surface_distance <= rigid_info.EPS[None] or qd.abs(winding_angle) > 2.0 * qd.math.pi
+
+    if surface_distance > rigid_info.EPS[None]:
+        if is_inside:
+            closest_normal = (closest_position - pos_mesh) / surface_distance
+        else:
+            closest_normal = (pos_mesh - closest_position) / surface_distance
+
+    return (
+        gu.qd_transform_by_trans_quat(closest_position, geom_pos, geom_quat),
+        gu.qd_transform_by_quat(closest_normal, geom_quat),
+        is_inside,
+        surface_distance,
+    )
+
+
+@qd.func
+def sdf_func_project_vertex_outside_geom(
+    geom_idx,
+    env_idx,
+    pos_world: qd.types.vector(3),
+    dyn_state: array_class.DynState,
+    dyn_info: array_class.DynInfo,
+    rigid_info: array_class.RigidInfo,
+    collider_info: array_class.ColliderInfo,
+):
+    """Project a point onto the feasible side of one rigid geom and return its active contact normal."""
+    # The local bounds remain valid for coupling geoms whose rigid broadphase and runtime AABBs are disabled.
+    geom_lower = rigid_info.geoms_init_AABB[geom_idx, 0]
+    geom_upper = rigid_info.geoms_init_AABB[geom_idx, 7]
+    geom_extent = geom_upper - geom_lower
+    clearance = 128.0 * rigid_info.EPS[None] * qd.max(1.0, geom_extent.norm())
+    contact_tolerance = 2.0 * clearance
+    corrected_position = pos_world
+    normal = qd.Vector.zero(gs.qd_float, 3)
+    is_active = False
+
+    if dyn_info.geoms.type[geom_idx] == gs.GEOM_TYPE.MESH:
+        pos_mesh = gu.qd_inv_transform_by_trans_quat(
+            pos_world,
+            dyn_state.geoms.pos[geom_idx, env_idx],
+            dyn_state.geoms.quat[geom_idx, env_idx],
+        )
+        is_in_query_aabb = (pos_mesh >= geom_lower - clearance).all() and (pos_mesh <= geom_upper + clearance).all()
+        if is_in_query_aabb:
+            closest_position, normal, is_inside, surface_distance = sdf_func_exact_mesh_surface(
+                geom_idx, env_idx, pos_world, dyn_state, dyn_info, rigid_info
+            )
+            is_active = is_inside or surface_distance <= clearance + contact_tolerance
+            if is_inside or surface_distance < clearance:
+                corrected_position = closest_position + clearance * normal
+    else:
+        signed_distance = sdf_func_world(
+            geom_idx, env_idx, pos_world, dyn_state.geoms, dyn_info.geoms, collider_info.sdf
+        )
+        if signed_distance <= clearance + contact_tolerance:
+            normal = gu.qd_normalize(
+                sdf_func_grad_world_local_consistent(
+                    geom_idx,
+                    pos_world,
+                    dyn_state.geoms.pos[geom_idx, env_idx],
+                    dyn_state.geoms.quat[geom_idx, env_idx],
+                    dyn_info,
+                    rigid_info,
+                    collider_info,
+                ),
+                rigid_info.EPS[None],
+            )
+            is_active = True
+            if signed_distance < clearance:
+                corrected_position += (clearance - signed_distance) * normal
+
+    return corrected_position, normal, is_active
 
 
 @qd.func

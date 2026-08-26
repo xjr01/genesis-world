@@ -519,6 +519,7 @@ def kernel_init_geom_fields(
     geoms_data: qd.types.ndarray(),
     geoms_is_convex: qd.types.ndarray(),
     geoms_needs_coup: qd.types.ndarray(),
+    geoms_is_coup_reaction_enabled: qd.types.ndarray(),
     geoms_contype: qd.types.ndarray(),
     geoms_conaffinity: qd.types.ndarray(),
     geoms_coup_softness: qd.types.ndarray(),
@@ -572,6 +573,7 @@ def kernel_init_geom_fields(
         dyn_info.geoms.is_convex[i_g] = geoms_is_convex[i_g]
         dyn_info.geoms.is_hollow[i_g] = geoms_is_hollow[i_g]
         dyn_info.geoms.needs_coup[i_g] = geoms_needs_coup[i_g]
+        dyn_info.geoms.is_coup_reaction_enabled[i_g] = geoms_is_coup_reaction_enabled[i_g]
         dyn_info.geoms.contype[i_g] = geoms_contype[i_g]
         dyn_info.geoms.conaffinity[i_g] = geoms_conaffinity[i_g]
 

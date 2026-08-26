@@ -544,6 +544,11 @@ class RigidGeom(RBC):
         return self._needs_coup
 
     @property
+    def is_coup_reaction_enabled(self) -> bool:
+        """Get whether coupled contacts transfer reaction forces to this geom's rigid entity."""
+        return self._material.is_coup_reaction_enabled
+
+    @property
     def contype(self) -> int:
         """
         Get the contact type of the geometry for collision pair filtering.

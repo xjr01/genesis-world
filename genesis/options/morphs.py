@@ -9,30 +9,32 @@ import os
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Annotated, Any, ClassVar, Literal
-from typing_extensions import Self
 
 import numpy as np
+
 from pydantic import Field, StrictBool, StrictInt, model_validator
+from typing_extensions import Self
 
 import genesis as gs
-import genesis.utils.geom as gu
-import genesis.utils.mjcf as mju
-import genesis.utils.misc as mu
-import genesis.utils.urdf as uu
 import genesis.ext.urdfpy as urdfpy
 from genesis.typing import (
     FrozenDictType,
     NonNegativeInt,
     PositiveFloat,
     PositiveInt,
+    PositiveVec2FType,
     StrArrayType,
     UnitVec3FType,
     UnitVec4FType,
     Vec2IType,
-    PositiveVec2FType,
     Vec3FArrayType,
     Vec3FType,
+    Vec4IArrayType,
 )
+import genesis.utils.geom as gu
+import genesis.utils.mjcf as mju
+import genesis.utils.misc as mu
+import genesis.utils.urdf as uu
 
 from .misc import CoacdOptions
 from .options import Options
@@ -183,6 +185,29 @@ class Particles(Morph):
     """
 
     positions: Vec3FArrayType
+
+
+class TetrahedralMesh(Morph):
+    """Explicit tetrahedral volume mesh for finite element method (FEM) entities.
+
+    ``vertices`` contains local-frame positions and ``elements`` contains positively oriented groups of four vertex
+    indices. FEM preserves this discretization exactly, which makes this morph suitable for authored and structured
+    volume meshes.
+    """
+
+    vertices: Vec3FArrayType
+    elements: Vec4IArrayType
+
+    @model_validator(mode="after")
+    def _validate_tetrahedra(self) -> Self:
+        vertices = np.array(self.vertices)
+        elements = np.array(self.elements)
+        if elements.min() < 0 or elements.max() >= len(vertices):
+            raise ValueError("Tetrahedral mesh element indices must refer to supplied vertices.")
+        tetrahedra = vertices[elements]
+        if (np.linalg.det(tetrahedra[:, 1:] - tetrahedra[:, :1]) <= 0.0).any():
+            raise ValueError("Tetrahedral mesh elements must be non-degenerate and positively oriented.")
+        return self
 
 
 ############################ Shape Primitives ############################
@@ -605,6 +630,10 @@ class FileMorph(Morph):
     collision : bool, optional
         Whether the entity needs to be considered for collision checking. Defaults to True.
         `visualization` and `collision` cannot both be False. **This is only used for RigidEntity.**
+    collision_links : tuple of str or None, optional
+        Link names whose collision geometry is loaded from an articulated file. Restricting the links reduces build
+        time and signed distance field memory, while omitted links cannot participate in collision queries. None loads
+        every link. Default is None. **This is only used for RigidEntity.**
     batch_fixed_verts : bool, optional
         Whether to batch fixed vertices. This will allow setting env-specific poses to fixed geometries, at the cost of
         significantly increasing memory usage. Default to true. **This is only used for RigidEntity.**
@@ -629,6 +658,7 @@ class FileMorph(Morph):
     align: StrictBool | None = None
     file_meshes_are_zup: StrictBool | None = True
     batch_fixed_verts: StrictBool = False
+    collision_links: StrArrayType | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -990,6 +1020,10 @@ class MJCF(FileMorph):
     collision : bool, optional
         Whether the entity needs to be considered for collision checking. Defaults to True.
         `visualization` and `collision` cannot both be False.
+    collision_links : tuple of str or None, optional
+        Link names whose collision geometry is loaded. Restricting the links reduces build time and signed distance
+        field memory, while omitted links cannot participate in collision queries. None loads every link. Default is
+        None.
     requires_jac_and_IK : bool, optional
         Whether this morph, if created as `RigidEntity`, requires jacobian and inverse kinematics. Defaults to True.
     batch_fixed_verts : bool, optional
@@ -1122,6 +1156,10 @@ class URDF(FileMorph):
     collision : bool, optional
         Whether the entity needs to be considered for collision checking. Defaults to True.
         `visualization` and `collision` cannot both be False.
+    collision_links : tuple of str or None, optional
+        Link names whose collision geometry is loaded. Restricting the links reduces build time and signed distance
+        field memory, while omitted links cannot participate in collision queries. None loads every link. Default is
+        None.
     requires_jac_and_IK : bool, optional
         Whether this morph, if created as `RigidEntity`, requires jacobian and inverse kinematics. Defaults to True.
     fixed : bool, optional

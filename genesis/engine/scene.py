@@ -421,6 +421,11 @@ class Scene(RBC):
         else:
             morph_for_checks = morph
 
+        if isinstance(morph_for_checks, gs.morphs.TetrahedralMesh) and (
+            not isinstance(material, gs.materials.FEM.Base) or isinstance(material, gs.materials.FEM.Cloth)
+        ):
+            gs.raise_exception("TetrahedralMesh morphs require a volumetric finite element method material.")
+
         if isinstance(material, gs.materials.Rigid):
             # small sdf res is sufficient for primitives regardless of size
             if isinstance(morph_for_checks, gs.morphs.Primitive):
@@ -502,9 +507,10 @@ class Scene(RBC):
             if surface.vis_mode is None:
                 surface.vis_mode = "visual"
 
-            if surface.vis_mode not in ("visual",):
+            if surface.vis_mode not in ("visual", "tetrahedral"):
                 gs.raise_exception(
-                    f"Unsupported `surface.vis_mode` for material {material}: '{surface.vis_mode}'. Expected one of: ['visual']."
+                    f"Unsupported `surface.vis_mode` for material {material}: '{surface.vis_mode}'. Expected one of: "
+                    "['visual', 'tetrahedral']."
                 )
 
         elif isinstance(material, gs.materials.Hybrid):  # determine the visual of the outer soft part

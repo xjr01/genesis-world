@@ -1,14 +1,17 @@
 import math
 
-import igl
 import numpy as np
 import pytest
 import torch
 
+import igl
+
 import genesis as gs
+import genesis.utils.element as element_utils
+from genesis.ext import pyrender
 from genesis.utils.misc import tensor_to_array
 
-from ..utils import assert_allclose, get_hf_dataset
+from ..utils import assert_allclose, assert_equal, get_hf_dataset
 
 
 @pytest.mark.required
@@ -28,6 +31,34 @@ def test_interior_tetrahedralized_vertex(cube_verts_and_faces, box_obj_path, sho
             minratio=1.5,
             verbose=1,
             maxvolume=0.01,
+        ),
+        material=gs.materials.FEM.Muscle(),
+    )
+    skeleton = scene.add_entity(
+        morph=gs.morphs.Mesh(
+            file=box_obj_path,
+            pos=(1.5, 0.0, 0.0),
+            nobisect=False,
+            minratio=1.5,
+            verbose=1,
+            maxvolume=0.01,
+        ),
+        material=gs.materials.FEM.Muscle(),
+        surface=gs.surfaces.Default(
+            color=(0.95, 0.68, 0.12),
+            vis_mode="tetrahedral",
+        ),
+    )
+    grid_vertices, grid_elements = element_utils.create_tetrahedral_grid(
+        lower=(-0.5, -0.5, -0.5),
+        upper=(0.5, 0.5, 0.5),
+        resolution=(2, 1, 2),
+    )
+    tetrahedral_entity = scene.add_entity(
+        morph=gs.morphs.TetrahedralMesh(
+            vertices=grid_vertices,
+            elements=grid_elements,
+            pos=(3.0, 0.0, 0.0),
         ),
         material=gs.materials.FEM.Muscle(),
     )
@@ -91,6 +122,29 @@ def test_interior_tetrahedralized_vertex(cube_verts_and_faces, box_obj_path, sho
     (fem_node_primitive,) = scene.visualizer.context.static_nodes[(0, vgeom.uid)].mesh.primitives
     viz_verts = fem_node_primitive.positions
     assert_allclose(viz_verts, vertices[vgeom.sim_verts_idx], tol=gs.EPS)
+
+    skeleton_vertices = tensor_to_array(skeleton.get_state().pos[0])
+    skeleton_element_edges = np.concatenate(
+        (
+            skeleton.elems[:, (0, 1)],
+            skeleton.elems[:, (0, 2)],
+            skeleton.elems[:, (0, 3)],
+            skeleton.elems[:, (1, 2)],
+            skeleton.elems[:, (1, 3)],
+            skeleton.elems[:, (2, 3)],
+        ),
+        axis=0,
+    )
+    skeleton_edges = np.unique(np.sort(skeleton_element_edges, axis=1), axis=0)
+    (skeleton_primitive,) = scene.visualizer.context.static_nodes[(0, skeleton.uid)].mesh.primitives
+    assert skeleton_primitive.mode == pyrender.GLTF.LINES
+    assert_equal(skeleton_primitive.indices, skeleton_edges)
+    assert_allclose(skeleton_primitive.positions, skeleton_vertices, atol=1e-7)
+
+    assert tetrahedral_entity.n_vertices == 18
+    assert tetrahedral_entity.n_elements == 24
+    assert_equal(tetrahedral_entity.elems, grid_elements)
+    assert_allclose(tetrahedral_entity.get_state().pos[0], grid_vertices + (3.0, 0.0, 0.0), tol=gs.EPS)
 
 
 @pytest.mark.required

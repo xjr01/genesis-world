@@ -51,6 +51,11 @@ class Rigid(Kinematic["RigidEntity"]):
         Softness of coupling interaction. Must be non-negative. Default is 0.002.
     coup_restitution : float, optional
         Restitution coefficient in collision coupling. Should be between 0 and 1. Default is 0.0.
+    is_coup_reaction_enabled : bool, optional
+        Whether contacts with particle and deformable solvers transfer reaction forces to this rigid entity under
+        legacy coupling. True preserves two-way momentum exchange but can perturb an externally driven trajectory;
+        False makes the rigid geometry an imposed moving boundary while omitting its coupled contact response. Default
+        is True.
     sdf_cell_size : float, optional
         Cell size in SDF grid in meters. Defines grid resolution. Default is 0.005.
     sdf_min_res : int, optional
@@ -71,9 +76,9 @@ class Rigid(Kinematic["RigidEntity"]):
             non-articulated objects.
         Default is None.
     coup_links : tuple of str or None, optional
-        Tuple of link names to include in coupling. When set, only the named links participate
-        in coupling; other links are excluded. Only supported with needs_coup=True and
-        ``two_way_soft_constraint`` type in IPC. Default is None.
+        Tuple of link names to include in coupling. Restricting this list reduces collision work and prevents other
+        links from interacting with particle and deformable solvers. Under IPC, it is supported by
+        ``two_way_soft_constraint`` coupling. None includes every link. Default is None.
     enable_coup_collision : bool, optional
         Whether coupler collision is enabled for this entity's links. Only used by the IPC coupler.
         Unlike ``needs_coup=False`` (which removes the entity from the coupler entirely), setting this to
@@ -98,6 +103,7 @@ class Rigid(Kinematic["RigidEntity"]):
     coup_friction: NonNegativeFloat = 0.1
     coup_softness: NonNegativeFloat = 0.002
     coup_restitution: Annotated[ValidFloat, Field(ge=0.0, le=1.0)] = 0.0
+    is_coup_reaction_enabled: StrictBool = True
     sdf_cell_size: PositiveFloat = 0.005
     sdf_min_res: Annotated[StrictInt, Field(ge=16)] = 32
     sdf_max_res: Annotated[StrictInt, Field(ge=16)] = 128

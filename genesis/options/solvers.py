@@ -941,6 +941,10 @@ class PBSTFOptions(Options):
     ``max_localmesh_neighbors`` bounds the final one-ring vertices used by surface constraints. A higher value admits
     more irregular one-rings at the cost of constraint memory and time. Its default is the smaller of 64 and
     ``max_surface_neighbors``.
+
+    ``static_colliders`` are ordered by support priority when their particle-radius-expanded regions overlap. Earlier
+    entries preserve their exclusion region, while later entries yield at incompatible contacts. Put load-bearing
+    surfaces before moving tools so particles remain on the support; reverse the order when the tool must take priority.
     """
 
     dt: PositiveFloat | None = None

@@ -583,7 +583,8 @@ def test_static_collider_pose_and_absorption(asset_tmp_path, n_envs, show_viewer
 
 @pytest.mark.required
 @pytest.mark.parametrize("backend", [gs.cuda])
-def test_static_collider_adhesion_and_friction(asset_tmp_path, show_viewer):
+@pytest.mark.parametrize("n_envs", [0, 2])
+def test_static_collider_adhesion_and_friction(asset_tmp_path, n_envs, show_viewer):
     mesh_path = asset_tmp_path / "pbstf_adhesion_remote_box.obj"
     trimesh.creation.box().export(mesh_path)
     scene = gs.Scene(
@@ -608,13 +609,22 @@ def test_static_collider_adhesion_and_friction(asset_tmp_path, show_viewer):
                     file=str(mesh_path),
                     sdf_res=16,
                 ),
+                gs.options.PBSTFBoxStaticColliderOptions(
+                    pos=(1.5, 0.0, 0.0),
+                    lower=(-0.4, -0.5, -0.4),
+                    upper=(0.4, -0.05, 0.4),
+                ),
             ],
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(4.0, -5.0, 4.0),
+            camera_lookat=(-0.5, 0.0, 0.0),
         ),
         show_viewer=show_viewer,
     )
     liquid = scene.add_entity(
         morph=gs.morphs.Particles(
-            positions=((0.0, -0.05, 0.0), (0.0, -0.15, 0.0)),
+            positions=((0.0, -0.05, 0.0), (0.0, -0.15, 0.0), (1.5, -0.1, 0.0)),
         ),
         material=gs.materials.PBSTF.Liquid(
             sampler="regular",
@@ -623,18 +633,21 @@ def test_static_collider_adhesion_and_friction(asset_tmp_path, show_viewer):
             collider_friction=0.25,
         ),
     )
-    scene.build()
+    scene.build(n_envs=n_envs)
     solver = scene.pbstf_solver
 
     solver._kernel_reorder_particles(0)
     solver.particles_reordered.dpos.fill(0.0)
     solver.on_surface.fill(True)
     solver._kernel_apply_static_collider_adhesion()
-    adhesion_delta = qd_to_numpy(solver.particles_reordered.dpos, transpose=True)[0]
-    mass = qd_to_numpy(solver.particles_info_reordered.mass, transpose=True)[0]
+    reordered_idx = qd_to_numpy(solver.particles_ng.reordered_idx, transpose=True)
+    adhesion_delta = np.take_along_axis(
+        qd_to_numpy(solver.particles_reordered.dpos, transpose=True), reordered_idx[..., None], axis=1
+    )
+    mass = np.take_along_axis(qd_to_numpy(solver.particles_info_reordered.mass, transpose=True), reordered_idx, axis=1)
     denominator = liquid.material.collider_adhesion_compliance / solver._default_mass + 1.0 / mass
     expected_adhesion_delta = np.zeros_like(adhesion_delta)
-    expected_adhesion_delta[:, 1] = np.array((-0.05, 0.05)) / denominator / mass
+    expected_adhesion_delta[..., :2, 1] = np.array((-0.05, 0.05)) / denominator[..., :2] / mass[..., :2]
     assert_allclose(adhesion_delta, expected_adhesion_delta, atol=1e-6)
 
     liquid.set_particles_vel((1.0, 1.0, 0.0))
@@ -642,8 +655,39 @@ def test_static_collider_adhesion_and_friction(asset_tmp_path, show_viewer):
     solver.particles_reordered.dpos.fill(0.0)
     solver.particles_reordered.surface.fill(True)
     solver._kernel_apply_viscosity()
-    velocity = qd_to_numpy(solver.particles_reordered.vel, transpose=True)[0]
-    assert_allclose(velocity, ((0.75, 1.0, 0.0), (1.0, 1.0, 0.0)), atol=1e-6)
+    velocity = np.take_along_axis(
+        qd_to_numpy(solver.particles_reordered.vel, transpose=True), reordered_idx[..., None], axis=1
+    )
+    position = np.take_along_axis(
+        qd_to_numpy(solver.particles_reordered.pos, transpose=True), reordered_idx[..., None], axis=1
+    )
+    assert_allclose(
+        velocity,
+        (((0.75, 1.0, 0.0), (1.0, 1.0, 0.0), (0.5625, 1.0, 0.0)),) * max(n_envs, 1),
+        atol=1e-6,
+    )
+    assert_allclose(position[..., 2, 1], -0.1, atol=1e-6)
+
+    liquid.set_particles_pos((2.5, -2.5, 0.0), particles_idx_local=2)
+    liquid.set_particles_vel((0.0, 0.0, 0.0))
+    solver.set_static_colliders_pose(
+        pos=(0.001, 0.0, 0.0),
+        quat=(1.0, 0.0, 0.0, 0.0),
+        colliders_idx=0,
+    )
+    solver._kernel_reorder_particles(0)
+    solver.particles_reordered.dpos.fill(0.0)
+    solver.particles_reordered.surface.fill(True)
+    solver._kernel_apply_viscosity()
+    reordered_idx = qd_to_numpy(solver.particles_ng.reordered_idx, transpose=True)
+    velocity = np.take_along_axis(
+        qd_to_numpy(solver.particles_reordered.vel, transpose=True), reordered_idx[..., None], axis=1
+    )
+    assert_allclose(
+        velocity,
+        (((0.25, 0.0, 0.0), (0.0, 0.0, 0.0), (0.0, 0.0, 0.0)),) * max(n_envs, 1),
+        atol=1e-6,
+    )
 
 
 @pytest.mark.required
@@ -755,10 +799,16 @@ def test_case_settings():
     assert mop_settings.static_colliders[1].fem_entity_name == mop.mop_manipulator.sponge_entity_name
     assert_equal(mop_settings.static_colliders[1].sdf_res, 150)
     assert mop.mop_manipulator.asset == "urdf/panda_bullet/panda.urdf"
+    assert mop.mop_manipulator.is_visible
+    assert_equal(mop.mop_manipulator.sponge_grid_resolution, (15, 10, 30))
     assert_equal(mop.mop_manipulator.scale, 15.0)
     assert_equal(mop.mop_manipulator.finger_open_qpos, 0.6)
-    assert_equal(mop.mop_manipulator.finger_closed_qpos, 0.54)
-    assert_equal(mop.mop_manipulator.finger_contact_half_width, 0.35)
+    assert mop.mop_manipulator.collider_link_names == (
+        mop.mop_manipulator.left_finger_link_name,
+        mop.mop_manipulator.right_finger_link_name,
+    )
+    assert_equal(mop.mop_manipulator.tool_center_point, (0.0, 0.0, 3.02))
+    assert_equal(mop.mop_manipulator.finger_closed_qpos, 0.4)
     for time in (0.0, mop.settle_time, mop.settle_time + 0.5 * mop.wipe_time, 20.0):
         assert_equal(wipe_pose(time, mop), wipe_pose(time, sweep))
 
@@ -885,28 +935,52 @@ def test_teapot_manipulator_tracks_grasp_pose(show_viewer):
 @pytest.mark.parametrize("backend", [gs.cuda])
 @pytest.mark.parametrize("n_envs", [0, 2])
 def test_mop_gripper_compresses_and_moves_sponge(n_envs, show_viewer):
-    scene, (liquid_entity,) = build_scene(case=CASE_MOP, scale=5, show_viewer=show_viewer, dt=0.1, n_envs=n_envs)
+    scene, (liquid_entity,) = build_scene(
+        case=CASE_MOP,
+        scale=5,
+        show_viewer=show_viewer,
+        dt=0.05,
+        n_envs=n_envs,
+    )
     settings = case_settings(CASE_MOP).mop
     manipulator = settings.mop_manipulator
-    franka_entity = scene.get_entity(name=manipulator.franka_entity_name)
+    sponge_grid_resolution = manipulator.sponge_grid_resolution
+    manipulator_entity = scene.get_entity(name=manipulator.entity_name)
     sponge_entity = scene.get_entity(name=manipulator.sponge_entity_name)
+    assert sponge_entity.surface.vis_mode == "tetrahedral"
+    assert isinstance(sponge_entity.morph, gs.morphs.TetrahedralMesh)
+    assert sponge_entity.n_vertices == math.prod(resolution + 1 for resolution in sponge_grid_resolution)
+    assert sponge_entity.n_elements == 6 * math.prod(sponge_grid_resolution)
     sponge_init_positions = tensor_to_array(sponge_entity.init_positions)
+    for axis, resolution in enumerate(sponge_grid_resolution):
+        coordinates = np.unique(sponge_init_positions[:, axis])
+        assert len(coordinates) == resolution + 1
+        assert_allclose(
+            np.diff(coordinates),
+            (settings.collider_upper[axis] - settings.collider_lower[axis]) / resolution,
+            atol=1e-6,
+        )
     (sponge_vgeom,) = sponge_entity.vgeoms
     render_surface_triangles = np.sort(sponge_vgeom.sim_verts_idx[sponge_vgeom.vmesh.faces], axis=-1)
     simulation_surface_triangles = np.sort(sponge_entity.surface_triangles, axis=-1)
+    sponge_surface_vertices_idx = np.unique(sponge_entity.surface_triangles)
     render_faces_order = np.lexsort(render_surface_triangles.T[::-1])
     simulation_faces_order = np.lexsort(simulation_surface_triangles.T[::-1])
     assert_equal(
         render_surface_triangles[render_faces_order],
         simulation_surface_triangles[simulation_faces_order],
     )
-    sponge_center_z = 0.5 * (sponge_init_positions[:, 2].min() + sponge_init_positions[:, 2].max())
-    finger_contact_mask = np.isclose(sponge_init_positions[:, 1], sponge_init_positions[:, 1].max()) & (
-        np.abs(sponge_init_positions[:, 2] - sponge_center_z) <= manipulator.finger_contact_half_width
+    left_finger_link = manipulator_entity.get_link(manipulator.left_finger_link_name)
+    collider_links = tuple(manipulator_entity.get_link(name) for name in manipulator.collider_link_names)
+    assert all(link.geoms for link in collider_links)
+    assert all(geom.needs_coup and not geom.is_coup_reaction_enabled for link in collider_links for geom in link.geoms)
+    assert all(
+        geom.get_trimesh().is_watertight and not geom.is_convex for link in collider_links for geom in link.geoms
     )
-    left_contact_mask = finger_contact_mask & np.isclose(
-        sponge_init_positions[:, 0], sponge_init_positions[:, 0].max()
-    )
+    assert all(not link.geoms for link in manipulator_entity.links if link.name not in manipulator.collider_link_names)
+    assert any(link.vgeoms for link in manipulator_entity.links) == manipulator.is_visible
+    finger_contact_mask = np.isclose(sponge_init_positions[:, 1], sponge_init_positions[:, 1].max())
+    left_contact_mask = finger_contact_mask & np.isclose(sponge_init_positions[:, 0], sponge_init_positions[:, 0].max())
     right_contact_mask = finger_contact_mask & np.isclose(
         sponge_init_positions[:, 0], sponge_init_positions[:, 0].min()
     )
@@ -916,25 +990,31 @@ def test_mop_gripper_compresses_and_moves_sponge(n_envs, show_viewer):
     lower_right_mask = np.isclose(sponge_init_positions[:, 0], sponge_init_positions[:, 0].min()) & np.isclose(
         sponge_init_positions[:, 1], sponge_init_positions[:, 1].min()
     )
-    gripper_links = (
-        franka_entity.get_link(manipulator.hand_link_name),
-        franka_entity.get_link(manipulator.left_finger_link_name),
-        franka_entity.get_link(manipulator.right_finger_link_name),
-    )
-    gripper_lower_y = min(tensor_to_array(link.get_vAABB())[..., 0, 1].min() for link in gripper_links)
-    qpos = franka_entity.get_qpos()
+    left_finger_geoms = left_finger_link.geoms
+    sponge_center_x = 0.5 * (sponge_init_positions[:, 0].min() + sponge_init_positions[:, 0].max())
+    finger_contact_y = [[] for _ in range(max(n_envs, 1))]
+    for geom in left_finger_geoms:
+        geom_vertices = tensor_to_array(geom.get_verts())
+        if geom_vertices.ndim == 2:
+            geom_vertices = geom_vertices[None]
+        for env_idx, vertices in enumerate(geom_vertices):
+            distances_x = np.abs(vertices[:, 0] - sponge_center_x)
+            contact_mask = distances_x <= distances_x.min() + 0.01 * np.ptp(vertices[:, 0])
+            finger_contact_y[env_idx].append(vertices[contact_mask, 1])
+    finger_contact_y = [np.concatenate(values) for values in finger_contact_y]
+    collider_lower_y = min(tensor_to_array(link.get_AABB())[..., 0, 1].min() for link in collider_links)
+    qpos = manipulator_entity.get_qpos()
     is_sponge_frozen = False
     liquid_entity.set_particles_pos(
         tuple(
-            settings.start_pos[axis]
-            + 0.5 * (settings.collider_lower[axis] + settings.collider_upper[axis])
+            settings.start_pos[axis] + 0.5 * (settings.collider_lower[axis] + settings.collider_upper[axis])
             for axis in range(3)
         ),
         particles_idx_local=0,
     )
     assert tensor_to_array(scene.pbstf_solver.get_state(0).is_deformable_static_colliders_sdf_active).all()
 
-    for _ in range(11):
+    for _ in range(round(settings.settle_time / scene.dt) + 1):
         update = update_mop_case(scene, scene.cur_t, settings, qpos, is_sponge_frozen)
         qpos = update.qpos
         is_sponge_frozen = update.is_sponge_frozen
@@ -942,25 +1022,49 @@ def test_mop_gripper_compresses_and_moves_sponge(n_envs, show_viewer):
 
     frozen_positions = tensor_to_array(sponge_entity.get_state().pos)
     frozen_extents = np.ptp(frozen_positions, axis=1)
-    contact_width = (
-        frozen_positions[:, left_contact_mask, 0].mean(axis=1)
-        - frozen_positions[:, right_contact_mask, 0].mean(axis=1)
-    )
-    lower_width = (
-        frozen_positions[:, lower_left_mask, 0].mean(axis=1)
-        - frozen_positions[:, lower_right_mask, 0].mean(axis=1)
+    finger_signed_distances = []
+    finger_sdf_cell_sizes = []
+    for link in collider_links:
+        for geom in link.geoms:
+            geom_vertices = tensor_to_array(geom.get_verts())
+            if geom_vertices.ndim == 2:
+                geom_vertices = geom_vertices[None]
+            for sponge_positions, vertices in zip(frozen_positions, geom_vertices):
+                signed_distances, *_ = igl.signed_distance(
+                    sponge_positions,
+                    vertices,
+                    geom.get_trimesh().faces,
+                )
+                finger_signed_distances.append(signed_distances.min())
+            finger_sdf_cell_sizes.append(np.max(geom.sdf_cell_size))
+    contact_inner_width = frozen_positions[:, left_contact_mask, 0].min(axis=1) - frozen_positions[
+        :, right_contact_mask, 0
+    ].max(axis=1)
+    top_width = frozen_positions[:, left_contact_mask, 0].mean(axis=1) - frozen_positions[
+        :, right_contact_mask, 0
+    ].mean(axis=1)
+    lower_width = frozen_positions[:, lower_left_mask, 0].mean(axis=1) - frozen_positions[:, lower_right_mask, 0].mean(
+        axis=1
     )
     assert is_sponge_frozen
     assert left_contact_mask.sum() >= 3
     assert right_contact_mask.sum() >= 3
-    assert gripper_lower_y > settings.liquid_upper[1]
-    assert_allclose(contact_width, 0.9 * (settings.collider_upper[0] - settings.collider_lower[0]), atol=1e-2)
-    assert (lower_width - contact_width > 0.05).all()
+    assert all(values.min() >= sponge_init_positions[:, 1].min() - 1e-3 for values in finger_contact_y)
+    assert all(values.max() <= sponge_init_positions[:, 1].max() + 1e-3 for values in finger_contact_y)
+    assert collider_lower_y > settings.liquid_upper[1]
+    assert min(finger_signed_distances) >= -1e-6
+    assert_allclose(
+        contact_inner_width,
+        2.0 * manipulator.finger_closed_qpos,
+        atol=2.0 * max(finger_sdf_cell_sizes),
+    )
+    assert (top_width - contact_inner_width > 0.05).all()
+    assert (lower_width - contact_inner_width > 0.05).all()
     assert (frozen_extents[:, 0] > 0.95 * (settings.collider_upper[0] - settings.collider_lower[0])).all()
     assert_allclose(qpos[..., -2:], manipulator.finger_closed_qpos, atol=1e-6)
+    assert_allclose(manipulator_entity.get_qpos(), qpos, atol=1e-6)
     solver_state = scene.pbstf_solver.get_state(0)
     assert tensor_to_array(solver_state.is_deformable_static_colliders_sdf_active).all()
-    sponge_surface_vertices_idx = np.unique(sponge_entity.surface_triangles)
     collider_surface_positions = tensor_to_array(solver_state.deformable_static_colliders_surface_vertices)
     sponge_surface_positions_local = geom_utils.inv_transform_by_trans_quat(
         frozen_positions[:, sponge_surface_vertices_idx],
@@ -970,7 +1074,7 @@ def test_mop_gripper_compresses_and_moves_sponge(n_envs, show_viewer):
     assert_allclose(collider_surface_positions, sponge_surface_positions_local, atol=1e-5)
     assert_equal(tensor_to_array(solver_state.absorbed_collider_idx)[:, 0], settings.collider_idx)
     assert tensor_to_array(scene.pbstf_solver.get_static_collider_wetness(settings.collider_idx)).sum() > 0.0
-    hand_link = franka_entity.get_link(manipulator.hand_link_name)
+    hand_link = manipulator_entity.get_link(manipulator.hand_link_name)
     frozen_hand_pos = np.atleast_2d(tensor_to_array(hand_link.get_pos()))
     frozen_hand_quat = np.atleast_2d(tensor_to_array(hand_link.get_quat()))
     frozen_state = scene.get_state()
@@ -984,10 +1088,14 @@ def test_mop_gripper_compresses_and_moves_sponge(n_envs, show_viewer):
         frozen_positions - frozen_hand_pos[:, None, :], geom_utils.inv_quat(frozen_hand_quat)[:, None, :]
     )
     expected_positions = hand_pos[:, None, :] + geom_utils.transform_by_quat(sponge_hand_pos, hand_quat[:, None, :])
-    assert_allclose(moved_positions, expected_positions, atol=1e-4)
+    assert_allclose(moved_positions, expected_positions, atol=1e-6)
 
     end_update = update_mop_case(
-        scene, settings.settle_time + settings.wipe_time, settings, update.qpos, is_sponge_frozen,
+        scene,
+        settings.settle_time + settings.wipe_time,
+        settings,
+        update.qpos,
+        is_sponge_frozen,
     )
     end_hand_pos = np.atleast_2d(tensor_to_array(hand_link.get_pos()))
     end_hand_quat = np.atleast_2d(tensor_to_array(hand_link.get_quat()))
