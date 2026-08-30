@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 import math
 
 import numpy as np
@@ -6,21 +7,24 @@ import torch
 import quadrants as qd
 
 import genesis as gs
-import genesis.utils.geom as gu
 from genesis.engine.boundaries import (
     AbsorbentStaticCollider,
     CubeBoundary,
+    build_deformable_surface_bvh,
     create_static_collider,
     load_or_build_mesh_sdf,
     project_out_static_collider,
+    query_deformable_static_collider_surface,
     query_static_collider,
     query_static_collider_contact,
+    refit_deformable_surface_bvh,
     static_collider_separates,
 )
 from genesis.engine.entities import FEMEntity, PBSTFEntity
 from genesis.engine.states.solvers import PBSTFSolverState
 from genesis.utils import particle
 from genesis.utils.array_class import ErrorCode
+import genesis.utils.geom as gu
 from genesis.utils.misc import (
     assign_indexed_tensor,
     broadcast_tensor,
@@ -33,6 +37,46 @@ from genesis.utils.misc import (
 
 from . import pbstf_absorption
 from .base_solver import Solver
+
+
+@dataclass(frozen=True)
+class _DeformableColliderParticleCache:
+    distances: qd.template()
+    normals: qd.template()
+
+
+@qd.kernel
+def kernel_update_deformable_collider_particle_cache(
+    cache_idx: qd.i32,
+    collider_idx: qd.i32,
+    particle_radius: float,
+    particles_reordered: qd.template(),
+    particles_ng_reordered: qd.template(),
+    absorption_particles_reordered: qd.template(),
+    static_colliders_pos: qd.template(),
+    static_colliders_quat: qd.template(),
+    cache: _DeformableColliderParticleCache,
+    collider: qd.template(),
+):
+    """Cache one bounded surface query per particle for a deformable static collider."""
+    for particle_idx, env_idx in qd.ndrange(particles_reordered.shape[0], particles_reordered.shape[1]):
+        normal = qd.Vector([1.0, 0.0, 0.0], dt=gs.qd_float)
+        distance = 2.0 * particle_radius
+        if (
+            particles_ng_reordered[particle_idx, env_idx].active
+            and absorption_particles_reordered[particle_idx, env_idx].collider_idx < 0
+        ):
+            _, normal, _, distance = query_deformable_static_collider_surface(
+                collider_idx,
+                env_idx,
+                particle_radius,
+                particles_reordered[particle_idx, env_idx].pos,
+                static_colliders_pos,
+                static_colliders_quat,
+                collider,
+            )
+        cache.distances[cache_idx, particle_idx, env_idx] = distance
+        cache.normals[cache_idx, particle_idx, env_idx] = normal
 
 
 @qd.data_oriented
@@ -75,6 +119,14 @@ class PBSTFSolver(Solver):
             if isinstance(collider, AbsorbentStaticCollider)
         )
         self._n_absorbent_static_colliders = len(self._absorbent_static_colliders_idx)
+        self._deformable_static_colliders_idx = tuple(
+            collider_idx for collider_idx, collider in enumerate(self._static_colliders) if collider.is_deformable
+        )
+        self._n_deformable_static_colliders = len(self._deformable_static_colliders_idx)
+        deformable_cache_idx_by_static_collider = [-1] * self._n_static_colliders
+        for cache_idx, collider_idx in enumerate(self._deformable_static_colliders_idx):
+            deformable_cache_idx_by_static_collider[collider_idx] = cache_idx
+        self._deformable_cache_idx_by_static_collider = tuple(deformable_cache_idx_by_static_collider)
         self._static_colliders_pos = None
         self._static_colliders_quat = None
         self._static_colliders_prev_pos = None
@@ -88,7 +140,6 @@ class PBSTFSolver(Solver):
         self._default_mass = 1.0
         self._material = None
         self._n_absorption_voxels = 0
-        self._n_deformable_static_colliders = 0
         self._n_deformable_sdf_colliders = 0
         self._n_deformable_surface_vertices = 0
         self._n_deformable_voxels = 0
@@ -100,6 +151,7 @@ class PBSTFSolver(Solver):
         self._absorption_voxel_wetness = None
         self._absorption_voxel_search_offsets = None
         self._absorption_capture_budget = None
+        self._deformable_collider_particle_cache = None
         self._errno = None
 
     @property
@@ -197,6 +249,7 @@ class PBSTFSolver(Solver):
             has_active_particles = any(entity.active for entity in self.entities)
             if has_active_particles:
                 self._kernel_reorder_particles(0)
+                self._update_deformable_collider_particle_cache()
                 self._kernel_compute_density(0)
                 self._max_density[None] = 0.0
                 self._kernel_reduce_max_density()
@@ -225,6 +278,7 @@ class PBSTFSolver(Solver):
             self._default_mass = float(self._material.rho / max_density)
             self._kernel_set_particle_mass(self._default_mass)
             self._kernel_reorder_particles(0)
+            self._update_deformable_collider_particle_cache()
             self._kernel_compute_density(0)
             if self._n_absorbent_static_colliders > 0:
                 particle_volume = self._default_mass / self._material.rho
@@ -372,14 +426,10 @@ class PBSTFSolver(Solver):
             collider.embedding_barycentric,
             envs_idx if self._scene.n_envs > 0 else None,
         )
-        collider_pos = qd_to_torch(
-            self._static_colliders_pos, envs_idx, (collider_idx,), transpose=True,
-        )[..., 0, :]
-        collider_quat = qd_to_torch(
-            self._static_colliders_quat, envs_idx, (collider_idx,), transpose=True,
-        )[..., 0, :]
+        collider_pos = qd_to_torch(self._static_colliders_pos, envs_idx, (collider_idx,), transpose=True)[..., 0, :]
+        collider_quat = qd_to_torch(self._static_colliders_quat, envs_idx, (collider_idx,), transpose=True)[..., 0, :]
         local_positions = gu.inv_transform_by_trans_quat(
-            embedded_positions, collider_pos[:, None, :], collider_quat[:, None, :],
+            embedded_positions, collider_pos[:, None, :], collider_quat[:, None, :]
         )
         surface_positions = local_positions[:, : collider.n_surface_vertices]
         voxel_positions = local_positions[:, collider.n_surface_vertices :]
@@ -418,8 +468,9 @@ class PBSTFSolver(Solver):
                 torch.mps.synchronize()
         else:
             pbstf_absorption.kernel_set_deformable_collider_geometry(
-                envs_idx, surface_positions, voxel_positions, voxel_search_order, collider,
+                envs_idx, surface_positions, voxel_positions, voxel_search_order, collider
             )
+        refit_deformable_surface_bvh(collider)
         self._set_deformable_collider_sdf(collider, envs_idx, surface_positions, is_sdf_enabled)
 
     @gs.assert_built
@@ -508,6 +559,12 @@ class PBSTFSolver(Solver):
         self.particles_info_reordered = particle_info.field(shape=shape, layout=qd.Layout.SOA)
         self.particles_render = particle_render.field(shape=shape, layout=qd.Layout.SOA)
         self._max_density = qd.field(gs.qd_float, shape=())
+        if self._n_deformable_static_colliders > 0:
+            cache_shape = (self._n_deformable_static_colliders, self._n_particles, self._B)
+            self._deformable_collider_particle_cache = _DeformableColliderParticleCache(
+                distances=qd.field(gs.qd_float, shape=cache_shape),
+                normals=qd.field(gs.qd_vec3, shape=cache_shape),
+            )
 
     def _init_absorption_fields(self):
         absorption_particle_state = qd.types.struct(
@@ -588,12 +645,12 @@ class PBSTFSolver(Solver):
                 material_coordinates = np.stack(
                     np.meshgrid(*(np.arange(resolution) for resolution in collider.grid_res), indexing="ij"), axis=-1
                 ).reshape((-1, 3))
-                graph_distance = np.abs(
-                    material_coordinates[:, None, :] - material_coordinates[None, :, :]
-                ).sum(axis=-1)
-                physical_distance_sqr = np.square(
-                    voxel_positions[:, None, :] - voxel_positions[None, :, :]
-                ).sum(axis=-1)
+                graph_distance = np.abs(material_coordinates[:, None, :] - material_coordinates[None, :, :]).sum(
+                    axis=-1
+                )
+                physical_distance_sqr = np.square(voxel_positions[:, None, :] - voxel_positions[None, :, :]).sum(
+                    axis=-1
+                )
                 physical_order = np.argsort(physical_distance_sqr, axis=-1, kind="stable")
                 graph_distance_ordered = np.take_along_axis(graph_distance, physical_order, axis=-1)
                 graph_order = np.argsort(graph_distance_ordered, axis=-1, kind="stable")
@@ -627,23 +684,17 @@ class PBSTFSolver(Solver):
                     collider.sdf_state_idx = self._n_deformable_sdf_colliders
                     self._n_deformable_sdf_colliders += 1
                 collider.voxel_positions = qd.field(gs.qd_vec3, shape=(collider.n_voxels, self._B))
-                collider.voxel_search_order = qd.field(
-                    gs.qd_int, shape=(collider.n_voxels, collider.n_voxels, self._B)
-                )
+                collider.voxel_search_order = qd.field(gs.qd_int, shape=(collider.n_voxels, collider.n_voxels, self._B))
                 collider.surface_faces.from_numpy(surface_faces)
-                collider.surface_vertices.from_numpy(
-                    np.repeat(surface_positions[:, None, :], repeats=self._B, axis=1)
-                )
-                collider.voxel_positions.from_numpy(
-                    np.repeat(voxel_positions[:, None, :], repeats=self._B, axis=1)
-                )
+                collider.surface_vertices.from_numpy(np.repeat(surface_positions[:, None, :], repeats=self._B, axis=1))
+                build_deformable_surface_bvh(collider, self._B)
+                collider.voxel_positions.from_numpy(np.repeat(voxel_positions[:, None, :], repeats=self._B, axis=1))
                 collider.voxel_search_order.from_numpy(
                     np.repeat(voxel_search_order[:, :, None], repeats=self._B, axis=2)
                 )
                 surface_vertex_state_start += collider.n_surface_vertices
                 voxel_state_start += collider.n_voxels
                 voxel_search_order_state_start += collider.n_voxels * collider.n_voxels
-                self._n_deformable_static_colliders += 1
 
             collider.voxel_search_offset_start = voxel_search_offset_start
             collider.n_voxel_search_offsets = 0
@@ -652,9 +703,7 @@ class PBSTFSolver(Solver):
                     np.arange(1 - collider.grid_res[axis], collider.grid_res[axis], dtype=gs.np_int)
                     for axis in range(3)
                 )
-                collider_search_offsets = np.stack(
-                    np.meshgrid(*axis_offsets, indexing="ij"), axis=-1
-                ).reshape((-1, 3))
+                collider_search_offsets = np.stack(np.meshgrid(*axis_offsets, indexing="ij"), axis=-1).reshape((-1, 3))
                 voxel_distances = np.abs(collider_search_offsets).sum(axis=-1)
                 physical_distance_sq = np.square(collider_search_offsets * collider.voxel_size).sum(axis=-1)
                 search_order = np.lexsort(
@@ -691,9 +740,23 @@ class PBSTFSolver(Solver):
             self._absorption_voxel_search_offsets.from_numpy(np.concatenate(voxel_search_offsets))
         self._absorption_capture_budget.fill(0.0)
         pbstf_absorption.kernel_initialize_absorption_particles(self._n_particles, self._absorption_particles)
-        pbstf_absorption.kernel_initialize_absorption_particles(
-            self._n_particles, self._absorption_particles_reordered
-        )
+        pbstf_absorption.kernel_initialize_absorption_particles(self._n_particles, self._absorption_particles_reordered)
+
+    def _update_deformable_collider_particle_cache(self):
+        """Refresh deformable-collider proximity for the current reordered particle positions."""
+        for cache_idx, collider_idx in enumerate(self._deformable_static_colliders_idx):
+            kernel_update_deformable_collider_particle_cache(
+                cache_idx,
+                collider_idx,
+                self._particle_radius,
+                self.particles_reordered,
+                self.particles_ng_reordered,
+                self._absorption_particles_reordered,
+                self._static_colliders_pos,
+                self._static_colliders_quat,
+                self._deformable_collider_particle_cache,
+                self._static_colliders[collider_idx],
+            )
 
     def _init_surface_fields(self):
         n = self._n_particles
@@ -838,10 +901,22 @@ class PBSTFSolver(Solver):
         return (pos - pos_prev) / self._substep_dt
 
     @qd.func
-    def _separated_by_static_colliders(self, env_idx, pos_i, pos_j):
+    def _separated_by_static_colliders(self, particle_idx_i, particle_idx_j, env_idx, pos_i, pos_j):
         separated = False
         for collider_idx in qd.static(range(self._n_static_colliders)):
-            if static_collider_separates(
+            if qd.static(self._deformable_cache_idx_by_static_collider[collider_idx] >= 0):
+                cache_idx = qd.static(self._deformable_cache_idx_by_static_collider[collider_idx])
+                distance_i = self._deformable_collider_particle_cache.distances[cache_idx, particle_idx_i, env_idx]
+                distance_j = self._deformable_collider_particle_cache.distances[cache_idx, particle_idx_j, env_idx]
+                normal_i = self._deformable_collider_particle_cache.normals[cache_idx, particle_idx_i, env_idx]
+                normal_j = self._deformable_collider_particle_cache.normals[cache_idx, particle_idx_j, env_idx]
+                if (
+                    distance_i <= self._particle_radius
+                    and distance_j <= self._particle_radius
+                    and normal_i.dot(normal_j) < 0.0
+                ):
+                    separated = True
+            elif static_collider_separates(
                 collider_idx,
                 env_idx,
                 pos_i,
@@ -926,7 +1001,7 @@ class PBSTFSolver(Solver):
         if self.particles_ng_reordered[j, i_b].active and not self._is_particle_absorbed_reordered(j, i_b):
             pos_i = self.particles_reordered[i, i_b].pos
             pos_j = self.particles_reordered[j, i_b].pos
-            if not self._separated_by_static_colliders(i_b, pos_i, pos_j):
+            if not self._separated_by_static_colliders(i, j, i_b, pos_i, pos_j):
                 distance = (pos_i - pos_j).norm()
                 result += self.particles_info_reordered[j, i_b].mass * self.cubic_kernel(distance)
 
@@ -965,7 +1040,7 @@ class PBSTFSolver(Solver):
             not self._is_particle_absorbed_reordered(j, i_b)
             and distance > gs.EPS
             and not self._separated_by_static_colliders(
-                i_b, self.particles_reordered[i, i_b].pos, self.particles_reordered[j, i_b].pos
+                i, j, i_b, self.particles_reordered[i, i_b].pos, self.particles_reordered[j, i_b].pos
             )
         ):
             unit_theta = math.pi / self._N_THETA
@@ -1044,7 +1119,7 @@ class PBSTFSolver(Solver):
         if not self._is_particle_absorbed_reordered(j, i_b):
             delta = self.particles_reordered[j, i_b].pos - self.particles_reordered[i, i_b].pos
             separated = self._separated_by_static_colliders(
-                i_b, self.particles_reordered[i, i_b].pos, self.particles_reordered[j, i_b].pos
+                i, j, i_b, self.particles_reordered[i, i_b].pos, self.particles_reordered[j, i_b].pos
             )
             if not separated:
                 density_j = self.particles_reordered[j, i_b].density
@@ -1107,9 +1182,9 @@ class PBSTFSolver(Solver):
 
         for i, i_b in qd.ndrange(self._n_particles, self._B):
             if self.particles_ng_reordered[i, i_b].active:
-                self.particles_reordered[i, i_b].surface = (
-                    self.on_surface[i, i_b] and not self._is_particle_absorbed_reordered(i, i_b)
-                )
+                self.particles_reordered[i, i_b].surface = self.on_surface[
+                    i, i_b
+                ] and not self._is_particle_absorbed_reordered(i, i_b)
 
     @qd.func
     def _task_surface_covariance(self, i, j, unused: qd.template(), i_b):
@@ -1171,7 +1246,7 @@ class PBSTFSolver(Solver):
             self.on_surface[j, i_b]
             and not self._is_particle_absorbed_reordered(j, i_b)
             and not self._separated_by_static_colliders(
-                i_b, self.particles_reordered[i, i_b].pos, self.particles_reordered[j, i_b].pos
+                i, j, i_b, self.particles_reordered[i, i_b].pos, self.particles_reordered[j, i_b].pos
             )
         ):
             delta = self.particles_reordered[j, i_b].pos - self.particles_reordered[i, i_b].pos
@@ -1361,7 +1436,7 @@ class PBSTFSolver(Solver):
         pos_i = self.particles_reordered[i, i_b].pos
         pos_j = self.particles_reordered[j, i_b].pos
         if not self._is_particle_absorbed_reordered(j, i_b) and not self._separated_by_static_colliders(
-            i_b, pos_i, pos_j
+            i, j, i_b, pos_i, pos_j
         ):
             mass_j = self.particles_info_reordered[j, i_b].mass
             rho_rest = self._density_target(i, i_b)
@@ -1409,7 +1484,7 @@ class PBSTFSolver(Solver):
         pos_i = self.particles_reordered[i, i_b].pos
         pos_j = self.particles_reordered[j, i_b].pos
         if not self._is_particle_absorbed_reordered(j, i_b) and not self._separated_by_static_colliders(
-            i_b, pos_i, pos_j
+            i, j, i_b, pos_i, pos_j
         ):
             rho_rest = self._density_target(i, i_b)
             mass_j = self.particles_info_reordered[j, i_b].mass
@@ -1522,7 +1597,7 @@ class PBSTFSolver(Solver):
             and not self._is_particle_absorbed_reordered(j, i_b)
             and self.on_surface[i, i_b] == self.on_surface[j, i_b]
             and not self._separated_by_static_colliders(
-                i_b, self.particles_reordered[i, i_b].pos, self.particles_reordered[j, i_b].pos
+                i, j, i_b, self.particles_reordered[i, i_b].pos, self.particles_reordered[j, i_b].pos
             )
         ):
             pi = self.particles_reordered[i, i_b].pos
@@ -1683,9 +1758,11 @@ class PBSTFSolver(Solver):
                                 relative_vel = vel - collider_vel
                                 relative_vel_normal = relative_vel.dot(normal) * normal
                                 relative_vel_tangent = relative_vel - relative_vel_normal
-                                vel = collider_vel + relative_vel_normal + (
-                                    1.0 - self._material.collider_friction
-                                ) * relative_vel_tangent
+                                vel = (
+                                    collider_vel
+                                    + relative_vel_normal
+                                    + (1.0 - self._material.collider_friction) * relative_vel_tangent
+                                )
                         self.particles_reordered[i, i_b].vel = vel
                 pos = self.boundary.impose_pos(
                     self.particles_reordered[i, i_b].ipos + self._substep_dt * self.particles_reordered[i, i_b].vel
@@ -1755,10 +1832,13 @@ class PBSTFSolver(Solver):
         self._kernel_reorder_particles(f)
 
         for iteration in range(self._max_solver_iterations):
-            if iteration % self._topology_rebuild_interval == 0:
+            is_topology_rebuild = iteration % self._topology_rebuild_interval == 0
+            if is_topology_rebuild:
                 if iteration > 0:
                     self._kernel_copy_from_reordered(f)
                     self._kernel_reorder_particles(f)
+            self._update_deformable_collider_particle_cache()
+            if is_topology_rebuild:
                 self._rebuild_topology(f)
 
             # One Jacobi accumulation combines density and area constraints,
@@ -1780,6 +1860,7 @@ class PBSTFSolver(Solver):
         # XSPH uses a fresh final neighbor search, as in the CPU reference.
         self._kernel_copy_from_reordered(f)
         self._kernel_reorder_particles(f)
+        self._update_deformable_collider_particle_cache()
         self._kernel_compute_density(f)
         self._kernel_compute_viscosity()
         self._kernel_apply_viscosity()
@@ -1867,8 +1948,9 @@ class PBSTFSolver(Solver):
                             collider,
                         )
                         pbstf_absorption.kernel_check_deformable_collider_geometry(
-                            collider, error_code=int(ErrorCode.INVALID_PBSTF_DEFORMABLE_COLLIDER), errno=self._errno,
+                            collider, error_code=int(ErrorCode.INVALID_PBSTF_DEFORMABLE_COLLIDER), errno=self._errno
                         )
+                        refit_deformable_surface_bvh(collider)
                         if collider.has_sdf:
                             surface_state_end = collider.surface_vertex_state_start + collider.n_surface_vertices
                             surface_positions = state.deformable_static_colliders_surface_vertices[
@@ -1878,9 +1960,7 @@ class PBSTFSolver(Solver):
                                 collider,
                                 envs_idx,
                                 surface_positions,
-                                state.is_deformable_static_colliders_sdf_active[
-                                    envs_idx, collider.sdf_state_idx
-                                ],
+                                state.is_deformable_static_colliders_sdf_active[envs_idx, collider.sdf_state_idx],
                             )
             if self._n_absorbent_static_colliders > 0:
                 pbstf_absorption.kernel_set_absorption_capture_budget(

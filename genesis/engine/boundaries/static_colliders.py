@@ -11,10 +11,17 @@ import trimesh
 import quadrants as qd
 
 import genesis as gs
+from genesis.engine.bvh import AABB, LBVH, STACK_SIZE
 import genesis.utils.geom as gu
 import genesis.utils.mesh as mesh_utils
 from genesis.utils.misc import get_assets_dir, get_gsd_cache_dir
-from genesis.utils.triangle_qd import closest_point_on_triangle, triangle_face_normal
+from genesis.utils.triangle_qd import (
+    closest_point_on_triangle,
+    ray_aabb_intersection,
+    ray_projection,
+    ray_triangle_intersection,
+    triangle_face_normal,
+)
 
 _COLLIDER_CONE = 0
 _COLLIDER_MESH = 1
@@ -134,6 +141,7 @@ class AbsorbentBoxStaticCollider(BoxStaticCollider, AbsorbentStaticCollider):
         self.surface_faces_tensor = None
         self.surface_faces = None
         self.surface_vertices = None
+        self.surface_bvh = None
         self.sdf = None
         self.sdf_lower = None
         self.sdf_inv_cell_size = None
@@ -281,6 +289,43 @@ def load_or_build_mesh_sdf(vertices, faces, sdf_res):
     return sdf_data
 
 
+@qd.kernel
+def kernel_update_deformable_surface_aabbs(
+    surface_vertices: qd.template(),
+    surface_faces: qd.template(),
+    surface_aabbs: qd.template(),
+):
+    for env_idx, triangle_idx in qd.ndrange(surface_vertices.shape[1], surface_faces.shape[0]):
+        face = surface_faces[triangle_idx]
+        v0 = surface_vertices[face[0], env_idx]
+        v1 = surface_vertices[face[1], env_idx]
+        v2 = surface_vertices[face[2], env_idx]
+        surface_aabbs[env_idx, triangle_idx].min = qd.min(v0, v1, v2)
+        surface_aabbs[env_idx, triangle_idx].max = qd.max(v0, v1, v2)
+
+
+def build_deformable_surface_bvh(collider, n_batches):
+    """Build one linear bounding volume hierarchy (BVH) per batch over a deformable collider surface."""
+    surface_aabbs = AABB(n_batches=n_batches, n_aabbs=collider.n_surface_triangles)
+    collider.surface_bvh = LBVH(surface_aabbs, max_n_query_result_per_aabb=0)
+    kernel_update_deformable_surface_aabbs(
+        collider.surface_vertices,
+        collider.surface_faces,
+        collider.surface_bvh.aabbs,
+    )
+    collider.surface_bvh.build()
+
+
+def refit_deformable_surface_bvh(collider):
+    """Refit a deformable surface BVH after its vertices change while preserving its leaf topology."""
+    kernel_update_deformable_surface_aabbs(
+        collider.surface_vertices,
+        collider.surface_faces,
+        collider.surface_bvh.aabbs,
+    )
+    collider.surface_bvh.compute_bounds()
+
+
 @qd.func
 def _cone_radial_direction(pos, collider: qd.template()):
     axis = collider.height_qd.normalized()
@@ -396,65 +441,136 @@ def _query_sdf_local(
 
 
 @qd.func
-def _query_deformable_surface_local(env_idx, pos, collider: qd.template()):
+def _point_aabb_distance_sqr(pos, lower, upper):
+    delta = qd.Vector.zero(gs.qd_float, 3)
+    for axis in qd.static(range(3)):
+        if pos[axis] < lower[axis]:
+            delta[axis] = lower[axis] - pos[axis]
+        elif pos[axis] > upper[axis]:
+            delta[axis] = pos[axis] - upper[axis]
+    return delta.norm_sqr()
+
+
+@qd.func
+def _query_deformable_surface_bvh_local(env_idx, max_distance, pos, collider: qd.template()):
     closest_position = pos
     closest_normal = qd.Vector([1.0, 0.0, 0.0], dt=gs.qd_float)
     closest_normal_sum = qd.Vector.zero(gs.qd_float, 3)
-    surface_distance_sqr = gs.qd_float(1.0e20)
+    closest_triangle_idx = collider.n_surface_triangles
+    surface_distance_sqr = max_distance * max_distance
     has_closest = False
-    for triangle_idx in range(collider.n_surface_triangles):
-        face = collider.surface_faces[triangle_idx]
-        v0 = collider.surface_vertices[face[0], env_idx]
-        v1 = collider.surface_vertices[face[1], env_idx]
-        v2 = collider.surface_vertices[face[2], env_idx]
-        candidate_normal = triangle_face_normal(v0, v1, v2)
-        candidate = closest_point_on_triangle(pos, v0, v1, v2)
-        candidate_distance_sqr = (pos - candidate).norm_sqr()
-        if not has_closest:
-            closest_position = candidate
-            closest_normal = candidate_normal
-            closest_normal_sum = candidate_normal
-            surface_distance_sqr = candidate_distance_sqr
-            has_closest = True
-        else:
-            distance_tolerance = 8.0 * gs.EPS * qd.max(1.0, candidate_distance_sqr, surface_distance_sqr)
-            if candidate_distance_sqr < surface_distance_sqr - distance_tolerance:
-                closest_normal_sum = candidate_normal
-            elif qd.abs(candidate_distance_sqr - surface_distance_sqr) <= distance_tolerance:
-                # Equidistant face normals give edges and vertices a stable sign while preserving surface dents.
-                closest_normal_sum += candidate_normal
-            if candidate_distance_sqr < surface_distance_sqr:
-                closest_position = candidate
-                closest_normal = candidate_normal
-                surface_distance_sqr = candidate_distance_sqr
 
-    delta = pos - closest_position
-    surface_distance = qd.sqrt(surface_distance_sqr)
+    node_stack = qd.Vector.zero(gs.qd_int, qd.static(STACK_SIZE))
+    node_stack[0] = 0
+    stack_idx = 1
+    while stack_idx > 0:
+        stack_idx -= 1
+        node_idx = node_stack[stack_idx]
+        node = collider.surface_bvh.nodes[env_idx, node_idx]
+        distance_tolerance = 8.0 * gs.EPS * qd.max(1.0, surface_distance_sqr)
+        node_distance_sqr = _point_aabb_distance_sqr(pos, node.bound.min, node.bound.max)
+        if node_distance_sqr <= surface_distance_sqr + distance_tolerance:
+            if node.left == -1:
+                sorted_leaf_idx = node_idx - (collider.n_surface_triangles - 1)
+                triangle_idx = qd.cast(collider.surface_bvh.morton_codes[env_idx, sorted_leaf_idx][1], gs.qd_int)
+                face = collider.surface_faces[triangle_idx]
+                v0 = collider.surface_vertices[face[0], env_idx]
+                v1 = collider.surface_vertices[face[1], env_idx]
+                v2 = collider.surface_vertices[face[2], env_idx]
+                candidate_normal = triangle_face_normal(v0, v1, v2)
+                candidate = closest_point_on_triangle(pos, v0, v1, v2)
+                candidate_distance_sqr = (pos - candidate).norm_sqr()
+                candidate_tolerance = 8.0 * gs.EPS * qd.max(1.0, candidate_distance_sqr, surface_distance_sqr)
+                if candidate_distance_sqr <= surface_distance_sqr + candidate_tolerance:
+                    if not has_closest or candidate_distance_sqr < surface_distance_sqr - candidate_tolerance:
+                        closest_normal_sum = candidate_normal
+                    elif qd.abs(candidate_distance_sqr - surface_distance_sqr) <= candidate_tolerance:
+                        # Equidistant faces share normals so edge and vertex queries have a stable direction.
+                        closest_normal_sum += candidate_normal
+                    if (
+                        not has_closest
+                        or candidate_distance_sqr < surface_distance_sqr
+                        or (candidate_distance_sqr == surface_distance_sqr and triangle_idx < closest_triangle_idx)
+                    ):
+                        closest_position = candidate
+                        closest_normal = candidate_normal
+                        closest_triangle_idx = triangle_idx
+                        surface_distance_sqr = candidate_distance_sqr
+                    has_closest = True
+            elif stack_idx < qd.static(STACK_SIZE - 2):
+                left = node.left
+                right = node.right
+                left_node = collider.surface_bvh.nodes[env_idx, left]
+                right_node = collider.surface_bvh.nodes[env_idx, right]
+                left_distance_sqr = _point_aabb_distance_sqr(pos, left_node.bound.min, left_node.bound.max)
+                right_distance_sqr = _point_aabb_distance_sqr(pos, right_node.bound.min, right_node.bound.max)
+                if left_distance_sqr < right_distance_sqr:
+                    node_stack[stack_idx] = right
+                    node_stack[stack_idx + 1] = left
+                else:
+                    node_stack[stack_idx] = left
+                    node_stack[stack_idx + 1] = right
+                stack_idx += 2
+
+    surface_distance = 2.0 * max_distance
     inside_normal = closest_normal
-    if closest_normal_sum.norm_sqr() > gs.EPS**2:
-        inside_normal = closest_normal_sum.normalized()
+    if has_closest:
+        surface_distance = qd.sqrt(surface_distance_sqr)
+        if closest_normal_sum.norm_sqr() > gs.EPS**2:
+            inside_normal = closest_normal_sum.normalized()
+    return closest_position, closest_normal, inside_normal, surface_distance
+
+
+@qd.func
+def _is_inside_deformable_surface_bvh_local(env_idx, pos, collider: qd.template()):
+    # An oblique unit ray avoids systematic alignment with axis-aligned surface edges.
+    ray_dir = qd.Vector([0.8192319205, 0.4630140578, 0.3395271683], dt=gs.qd_float)
+    axes, shear, is_valid_dir = ray_projection(ray_dir, gs.EPS)
+    # Oriented crossings cancel outside a closed surface and leave one net exit for a point inside it.
+    winding_crossings = gs.qd_int(0)
+
+    node_stack = qd.Vector.zero(gs.qd_int, qd.static(STACK_SIZE))
+    node_stack[0] = 0
+    stack_idx = 1
+    if not is_valid_dir:
+        stack_idx = 0
+    while stack_idx > 0:
+        stack_idx -= 1
+        node_idx = node_stack[stack_idx]
+        node = collider.surface_bvh.nodes[env_idx, node_idx]
+        if ray_aabb_intersection(pos, ray_dir, node.bound.min, node.bound.max, gs.EPS) >= 0.0:
+            if node.left == -1:
+                sorted_leaf_idx = node_idx - (collider.n_surface_triangles - 1)
+                triangle_idx = qd.cast(collider.surface_bvh.morton_codes[env_idx, sorted_leaf_idx][1], gs.qd_int)
+                face = collider.surface_faces[triangle_idx]
+                v0 = collider.surface_vertices[face[0], env_idx]
+                v1 = collider.surface_vertices[face[1], env_idx]
+                v2 = collider.surface_vertices[face[2], env_idx]
+                hit_distance = ray_triangle_intersection(axes, pos, shear, v0, v1, v2, gs.EPS)
+                if hit_distance >= 0.0:
+                    alignment = triangle_face_normal(v0, v1, v2).dot(ray_dir)
+                    if alignment > gs.EPS:
+                        winding_crossings += 1
+                    elif alignment < -gs.EPS:
+                        winding_crossings -= 1
+            elif stack_idx < qd.static(STACK_SIZE - 2):
+                node_stack[stack_idx] = node.left
+                node_stack[stack_idx + 1] = node.right
+                stack_idx += 2
+
+    return winding_crossings != 0
+
+
+@qd.func
+def _query_deformable_surface_local(env_idx, pos, collider: qd.template()):
+    closest_position, closest_normal, inside_normal, surface_distance = _query_deformable_surface_bvh_local(
+        env_idx, 1.0e10, pos, collider
+    )
+    delta = pos - closest_position
     is_inside_candidate = delta.dot(inside_normal) <= 0.0
     is_inside = surface_distance <= gs.EPS
     if is_inside_candidate and not is_inside:
-        # The solid-angle winding number gives a closed concave surface its global inside sign.
-        winding_angle = gs.qd_float(0.0)
-        for triangle_idx in range(collider.n_surface_triangles):
-            face = collider.surface_faces[triangle_idx]
-            a = collider.surface_vertices[face[0], env_idx] - pos
-            b = collider.surface_vertices[face[1], env_idx] - pos
-            c = collider.surface_vertices[face[2], env_idx] - pos
-            a_length = a.norm()
-            b_length = b.norm()
-            c_length = c.norm()
-            numerator = a.dot(b.cross(c))
-            denominator = (
-                a_length * b_length * c_length
-                + a.dot(b) * c_length
-                + b.dot(c) * a_length
-                + c.dot(a) * b_length
-            )
-            winding_angle += 2.0 * qd.atan2(numerator, denominator)
-        is_inside = qd.abs(winding_angle) > 2.0 * qd.math.pi
+        is_inside = _is_inside_deformable_surface_bvh_local(env_idx, pos, collider)
     if not is_inside and surface_distance > gs.EPS:
         closest_normal = delta / surface_distance
     return closest_position, closest_normal, is_inside, surface_distance
@@ -597,6 +713,54 @@ def query_static_collider(collider_idx, env_idx, pos, colliders_pos, colliders_q
 
 
 @qd.func
+def query_deformable_static_collider_surface(
+    collider_idx,
+    env_idx,
+    max_distance,
+    pos,
+    colliders_pos,
+    colliders_quat,
+    collider: qd.template(),
+):
+    collider_pos = colliders_pos[collider_idx, env_idx]
+    collider_quat = colliders_quat[collider_idx, env_idx]
+    pos_local = gu.qd_inv_transform_by_trans_quat(pos, collider_pos, collider_quat)
+    closest_local = pos_local
+    normal_local = qd.Vector([1.0, 0.0, 0.0], dt=gs.qd_float)
+    inside_normal_local = normal_local
+    is_inside = False
+    is_bvh_query = True
+    surface_distance = 2.0 * max_distance
+    if qd.static(collider.has_sdf):
+        if collider.is_sdf_active[env_idx]:
+            closest_local, normal_local, is_inside, surface_distance = _query_sdf_local(
+                env_idx,
+                pos_local,
+                collider.sdf_lower[env_idx],
+                collider.sdf_inv_cell_size[env_idx],
+                collider.sdf,
+                collider.sdf_res,
+                is_sdf_batched=True,
+            )
+            is_bvh_query = False
+
+    if is_bvh_query:
+        closest_local, normal_local, inside_normal_local, surface_distance = _query_deformable_surface_bvh_local(
+            env_idx, max_distance, pos_local, collider
+        )
+        delta = pos_local - closest_local
+        is_inside_candidate = surface_distance <= max_distance and delta.dot(inside_normal_local) <= 0.0
+        is_inside = surface_distance <= gs.EPS
+        if is_inside_candidate and not is_inside:
+            is_inside = _is_inside_deformable_surface_bvh_local(env_idx, pos_local, collider)
+        if not is_inside and surface_distance > gs.EPS:
+            normal_local = delta / surface_distance
+    closest = gu.qd_transform_by_trans_quat(closest_local, collider_pos, collider_quat)
+    normal = gu.qd_transform_by_quat(normal_local, collider_quat)
+    return closest, normal, is_inside, surface_distance
+
+
+@qd.func
 def query_static_collider_contact(
     collider_idx,
     env_idx,
@@ -636,12 +800,24 @@ def project_out_static_collider(
 def static_collider_separates(
     collider_idx, env_idx, pos_i, pos_j, particle_radius, colliders_pos, colliders_quat, collider: qd.template()
 ):
-    _, normal_i, _, distance_i = query_static_collider(
-        collider_idx, env_idx, pos_i, colliders_pos, colliders_quat, collider
-    )
-    _, normal_j, _, distance_j = query_static_collider(
-        collider_idx, env_idx, pos_j, colliders_pos, colliders_quat, collider
-    )
+    normal_i = qd.Vector([1.0, 0.0, 0.0], dt=gs.qd_float)
+    normal_j = qd.Vector([1.0, 0.0, 0.0], dt=gs.qd_float)
+    distance_i = gs.qd_float(1.0e20)
+    distance_j = gs.qd_float(1.0e20)
+    if qd.static(collider.kind == _COLLIDER_BOX and collider.is_deformable):
+        _, normal_i, _, distance_i = query_deformable_static_collider_surface(
+            collider_idx, env_idx, particle_radius, pos_i, colliders_pos, colliders_quat, collider
+        )
+        _, normal_j, _, distance_j = query_deformable_static_collider_surface(
+            collider_idx, env_idx, particle_radius, pos_j, colliders_pos, colliders_quat, collider
+        )
+    else:
+        _, normal_i, _, distance_i = query_static_collider(
+            collider_idx, env_idx, pos_i, colliders_pos, colliders_quat, collider
+        )
+        _, normal_j, _, distance_j = query_static_collider(
+            collider_idx, env_idx, pos_j, colliders_pos, colliders_quat, collider
+        )
     return distance_i <= particle_radius and distance_j <= particle_radius and normal_i.dot(normal_j) < 0.0
 
 
@@ -668,10 +844,13 @@ __all__ = [
     "BoxStaticCollider",
     "ConeStaticCollider",
     "MeshStaticCollider",
+    "build_deformable_surface_bvh",
     "create_static_collider",
     "load_or_build_mesh_sdf",
     "project_out_static_collider",
+    "query_deformable_static_collider_surface",
     "query_static_collider",
     "query_static_collider_contact",
+    "refit_deformable_surface_bvh",
     "static_collider_separates",
 ]

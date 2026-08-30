@@ -5,7 +5,13 @@ from genesis.engine.bvh import STACK_SIZE
 from genesis.engine.solvers.rigid.rigid_solver import func_update_all_verts
 import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
-from genesis.utils.triangle_qd import closest_point_on_triangle, triangle_face_normal
+from genesis.utils.triangle_qd import (
+    closest_point_on_triangle,
+    ray_aabb_intersection,
+    ray_projection,
+    ray_triangle_intersection,
+    triangle_face_normal,
+)
 
 
 # FIXME: get_triangle_vertices/bvh_ray_cast/update_aabbs duplicate their visual counterparts below. The two paths
@@ -118,145 +124,6 @@ def bvh_ray_cast(
                     stack_idx += 2
 
     return hit_face, closest_distance, hit_normal
-
-
-@qd.func
-def ray_projection(ray_dir: qd.types.vector(3), eps: float):
-    """
-    Axis permutation and shear mapping a ray onto +Z, shared by every triangle test of that ray.
-
-    The transform is a function of the ray alone, so two triangles sharing an edge project that edge's vertices to
-    bit-identical coordinates, leaving their tests of it identical up to the order of the two products. Permuting the
-    largest absolute direction component last bounds the shear, and swapping the first two axes when that component is
-    negative preserves the triangle winding.
-
-    Returns
-    -------
-    axes : gs.qd_ivec3
-        Permuted axis indices: the last one carries the ray, the first two span the plane the edge tests run in.
-    shear : qd.math.vec3
-        Shear along the first two axes, then the 1 / ray_dir[axes[2]] scale keeping hit distances in ray_dir units.
-    is_valid : bool
-        False for a direction too short to define a ray, whose traversal must report no hit.
-    """
-    dir_abs = qd.abs(ray_dir)
-    kz = 0
-    if dir_abs[1] > dir_abs[0]:
-        kz = 1
-    if dir_abs[2] > dir_abs[kz]:
-        kz = 2
-    kx = (kz + 1) % 3
-    ky = (kx + 1) % 3
-    if ray_dir[kz] < 0.0:
-        k_swap = kx
-        kx = ky
-        ky = k_swap
-
-    shear = qd.math.vec3(0.0, 0.0, 0.0)
-    is_valid = dir_abs[kz] > eps
-    if is_valid:
-        shear = qd.math.vec3(ray_dir[kx], ray_dir[ky], 1.0) / ray_dir[kz]
-
-    return gs.qd_ivec3(kx, ky, kz), shear, is_valid
-
-
-@qd.func
-def ray_triangle_intersection(
-    axes: qd.types.vector(3),
-    ray_start: qd.types.vector(3),
-    shear: qd.types.vector(3),
-    v0: qd.types.vector(3),
-    v1: qd.types.vector(3),
-    v2: qd.types.vector(3),
-    eps: float,
-):
-    """
-    Watertight ray-triangle intersection in the ray frame produced by ray_projection.
-
-    The ray is inside the triangle when its three edge tests agree in sign, a test within its own rounding bound
-    counting for either side. A ray crossing an edge shared by two triangles is therefore taken by both of them rather
-    than dropped through the surface, which is what an inside test on barycentric coordinates does whenever rounding
-    places the ray just outside both neighbours at once. The triangles are widened by the uncertainty of their own edge
-    tests, and by no more than that.
-
-    Returns
-    -------
-    hit_distance : gs.qd_float
-        Distance along the ray to the intersection, -1.0 if the ray misses the triangle.
-    """
-    hit_distance = gs.qd_float(-1.0)
-
-    # Vertices relative to the ray origin, sheared so the ray becomes +Z and the edge tests become 2D. Each of the
-    # three vectors below holds one projected coordinate of all three vertices.
-    verts_rel = qd.Matrix.cols([v0 - ray_start, v1 - ray_start, v2 - ray_start])
-    verts_along = verts_rel[axes[2], :]
-    verts_x = verts_rel[axes[0], :] - shear[0] * verts_along
-    verts_y = verts_rel[axes[1], :] - shear[1] * verts_along
-    verts_z = shear[2] * verts_along
-
-    # Twice the signed area the ray forms with each edge, weighting the vertex that edge faces and vanishing when the
-    # ray crosses it, together with the bound its two products may cancel down to. That cancellation reaches the point
-    # where the sign comes from rounding alone: each of the two triangles holding an edge rounds its own copy of the
-    # value, all the more freely as the backend compiler may contract either product into a fused multiply-add. Hence
-    # the bound, which lets an area within it count as a crossing - the verdict both triangles then reach.
-    edge_areas = verts_y.cross(verts_x)
-    edge_bound = 2.0 * eps * verts_x.norm() * verts_y.norm()
-
-    is_crossing = not ((edge_areas < -edge_bound).any() and (edge_areas > edge_bound).any())
-    det = edge_areas.sum()
-    if is_crossing and det != 0.0:
-        # A zero determinant means the ray runs within the triangle plane, where it has no single crossing point.
-        t = edge_areas.dot(verts_z) / det
-        if t > eps:
-            hit_distance = t
-
-    return hit_distance
-
-
-@qd.func
-def ray_aabb_intersection(
-    ray_start: qd.types.vector(3),
-    ray_dir: qd.types.vector(3),
-    aabb_min: qd.types.vector(3),
-    aabb_max: qd.types.vector(3),
-    eps: float,
-):
-    """
-    Fast ray-AABB intersection test.
-
-    Culling stays conservative, i.e. a box the ray does touch is never rejected, so that the watertight triangle test
-    of ray_triangle_intersection is reached for every crossing of the surface.
-
-    Returns the t value of intersection, or -1.0 if no intersection.
-    """
-    result = -1.0
-
-    # Use the slab method for ray-AABB intersection. The direction is floored only to keep its reciprocal finite, at a
-    # magnitude far below any meaningful direction component: flooring at a comparable magnitude instead would
-    # overstate how fast the ray leaves the slab of a near-parallel axis, cutting the interval short of a real hit.
-    sign = qd.select(ray_dir >= 0.0, 1.0, -1.0)
-    inv_dir = sign / qd.max(qd.abs(ray_dir), eps * eps)
-
-    t1 = (aabb_min - ray_start) * inv_dir
-    t2 = (aabb_max - ray_start) * inv_dir
-
-    tmin = qd.min(t1, t2)
-    tmax = qd.max(t1, t2)
-
-    t_near = qd.max(tmin.x, tmin.y, tmin.z, gs.qd_float(0.0))
-    t_far = qd.min(tmax.x, tmax.y, tmax.z)
-
-    # A masked-out face leaves an inverted AABB (min=+inf, max=-inf) as an "unhittable" sentinel. The slab test alone
-    # treats that as covering all space (t_near=0 <= t_far=+inf), so the box must be checked non-empty for the sentinel
-    # to be a definitive miss regardless of platform NaN/inf comparison behavior.
-    is_non_empty = aabb_min.x <= aabb_max.x and aabb_min.y <= aabb_max.y and aabb_min.z <= aabb_max.z
-    # The slab bounds carry the rounding of two operations each, so widening the interval by that much keeps culling
-    # conservative: a triangle grazed at a corner of its own box stays a candidate, which is what makes the watertight
-    # triangle test of ray_triangle_intersection reach every crossing of the surface.
-    if is_non_empty and t_near * (1.0 - 2.0 * eps) <= t_far * (1.0 + 2.0 * eps):
-        result = t_near
-
-    return result
 
 
 @qd.func

@@ -145,6 +145,7 @@ Both cases use these `WipeSettings` values:
 | `collider_idx` | `1` | Moving sweep-box or sponge index; the table is collider index 0. |
 | `collider_lower` | `(-0.6, 0.02, -1.2)` | Collider rest-space lower corner. |
 | `collider_upper` | `(0.6, 0.85, 1.2)` | Collider rest-space upper corner. |
+| `table_entity_name` | `"wipe_table"` | Invisible rigid table proxy used by the FEM sponge collision projection. |
 | `table_pos` | `(0.0, -0.25, 0.0)` | Table world position. |
 | `table_size` | `(12.0, 0.5, 8.0)` | Table dimensions. Its top surface is at world Y = 0. |
 | `liquid_lower` | `(-2.5, 0.05, -0.7)` | Initial liquid lower corner. |
@@ -158,33 +159,35 @@ Both cases use these `WipeSettings` values:
 `wipe_pose()` keeps the active collider at `start_pos` through `settle_time`, linearly interpolates to `end_pos`
 during `wipe_time`, and keeps it at `end_pos` afterward. With the default `dt`, settling lasts 100 steps and the
 stroke ends at step 600. `update_wipe_case()` moves the sweep box. `update_mop_case()` coordinates the Franka,
-sponge constraints, deformable collider geometry, and the same trajectory.
+sponge simulation, deformable collider geometry, and the same trajectory.
 
 ### Mop gripper and sponge phases
 
-The mop uses `urdf/panda_bullet/panda.urdf` at scale `15`. Rigid collision and constraint dynamics are disabled; the
-seven arm joints come directly from inverse kinematics (IK), and the two finger joints are authored positions. The
-tool center targets the sponge top center with the finger opening aligned to world X, keeping the gripper above the
-liquid region.
+The mop uses `urdf/panda_bullet/panda.urdf` at scale `15`. The seven arm joints come directly from inverse kinematics
+(IK), and the two finger joints are authored positions. The tool center targets the sponge top center with the finger
+opening aligned to world X, keeping the gripper above the liquid region.
 
 | Simulated time | Sponge and gripper behavior |
 | --- | --- |
-| `0.0` to `1.0 s` | Fingers close from `0.60` to `0.54`; local top-center sponge patches follow the finger links while the spatially separated liquid uses the initial surface SDF. |
-| at `1.0 s` | Synchronize the final FEM surface and voxels, build its SDF, then link every sponge vertex to the hand. |
-| `1.0` to `6.0 s` | IK moves the hand and frozen sponge along the linear wiping stroke. |
-| after `6.0 s` | The hand and sponge hold the end pose. |
+| `0.0` to `1.0 s` | Fingers close from `0.60` to `0.40` while gravity and rigid point collisions drive the sponge deformation. |
+| `1.0` to `6.0 s` | IK moves the hand along the wiping stroke while the sponge remains fully simulated. |
+| after `6.0 s` | The hand holds the end pose while the sponge continues responding to elasticity, gravity, and contact. |
 
-The FEM sponge uses a refined tetrahedral mesh with a `0.01` maximum tetrahedron volume and a linear-corotated elastic
-material with `E=1e4`, `nu=0.2`, and `rho=100`. Its FEM gravity is zero, so the settling phase isolates the local grip
-indentation. Finger-to-sponge coupling is one-way through hard vertex boundary conditions. Once linked to the hand,
-the deformed shape stays fixed in the hand frame.
+The FEM sponge uses a regular tetrahedral grid and a linear-corotated elastic material with `E=1e4`, `nu=0.4`, and
+`rho=30`. Earth gravity remains `(0.0, -9.8, 0.0)`; the low foam density gives the sponge a light physical weight.
+No sponge vertex is attached to a rigid link. Every vertex is instead projected outside every coupled collider geom.
+The projection removes only inward normal motion, so the contacts are frictionless and transfer no reaction force to
+the kinematically driven robot or fixed table.
+
+The Panda loads collision geometry from every authored link. An invisible fixed rigid box duplicates the table only
+for FEM collision queries. Both use one-way rigid-to-FEM coupling. They are separate from the two PBSTF static
+colliders, so the liquid still sees only the analytic table and the absorbent sponge surface.
 
 The sponge is authored from the refined tetrahedral boundary, so its rendered triangles are the same triangles as the
-FEM volume boundary. The PBSTF collider builds a `150^3` signed distance field (SDF) from those actual boundary
-vertices and faces at initialization and again after the grip deformation. Runtime collision and absorption queries
-use trilinear interpolation of the eight surrounding SDF samples, as in the teapot collider. `collider_lower` and
-`collider_upper` define the rest-space material voxel lattice; the deformed tetrahedral boundary defines the contact
-and absorption surface.
+FEM volume boundary. `update_mop_case()` synchronizes those boundary vertices and the embedded absorption voxels on
+every step. Runtime fluid queries use the current triangles directly, which keeps the collider current while the FEM
+shape continues changing. `collider_lower` and `collider_upper` define the rest-space material voxel lattice; the
+deformed tetrahedral boundary defines the contact and absorption surface.
 
 ## Configuring the absorbent box
 
@@ -199,15 +202,13 @@ wipe_collider = gs.options.PBSTFAbsorbentBoxStaticColliderOptions(
     absorption_rate=2000.0,
     absorption_capacity_fraction=1.0,
     fem_entity_name="sponge",
-    sdf_res=150,
 )
 ```
 
 `lower` and `upper` define the rest material grid in collider-local coordinates. `pos` and `quat` place that frame in
 world space. `fem_entity_name` binds the collision surface and material targets to the named volumetric FEM entity.
-`sdf_res` controls the contact-field resolution: higher values retain smaller dents at cubic memory and preprocessing
-cost. The generated field is cached by surface geometry, so repeated runs reuse both the initial and gripped shapes.
-The two absorption fields control different parts of the behavior.
+Leaving `sdf_res` unset keeps exact triangle queries active for the continuously deforming shape. The two absorption
+fields control different parts of the behavior.
 
 ### `absorption_rate`
 

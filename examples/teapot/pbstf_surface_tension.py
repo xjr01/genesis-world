@@ -100,6 +100,7 @@ class MopManipulatorSettings(NamedTuple):
     entity_name: str
     sponge_entity_name: str
     sponge_grid_resolution: tuple[int, int, int]
+    sponge_density: float
     asset: str
     is_visible: bool
     scale: float
@@ -108,7 +109,6 @@ class MopManipulatorSettings(NamedTuple):
     hand_link_name: str
     left_finger_link_name: str
     right_finger_link_name: str
-    collider_link_names: tuple[str, ...]
     tool_center_point: tuple[float, float, float]
     grasp_quat: tuple[float, float, float, float]
     initial_qpos: tuple[float, ...]
@@ -120,6 +120,7 @@ class WipeSettings(NamedTuple):
     collider_idx: int
     collider_lower: tuple[float, float, float]
     collider_upper: tuple[float, float, float]
+    table_entity_name: str
     table_pos: tuple[float, float, float]
     table_size: tuple[float, float, float]
     liquid_lower: tuple[float, float, float]
@@ -134,7 +135,6 @@ class WipeSettings(NamedTuple):
 
 class MopUpdate(NamedTuple):
     qpos: gs.Tensor
-    is_sponge_frozen: bool
     wipe_pos: tuple[float, float, float]
 
 
@@ -323,6 +323,7 @@ def case_settings(case):
                 entity_name="mop_manipulator",
                 sponge_entity_name="sponge",
                 sponge_grid_resolution=(15, 10, 30),
+                sponge_density=30.0,
                 asset="urdf/panda_bullet/panda.urdf",
                 is_visible=True,
                 scale=15.0,
@@ -331,7 +332,6 @@ def case_settings(case):
                 hand_link_name="panda_link7",
                 left_finger_link_name="panda_leftfinger",
                 right_finger_link_name="panda_rightfinger",
-                collider_link_names=("panda_leftfinger", "panda_rightfinger"),
                 tool_center_point=(0.0, 0.0, 3.02),
                 grasp_quat=(0.6532814824, 0.6532814824, 0.2705980501, -0.2705980501),
                 initial_qpos=(0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785, 0.6, 0.6),
@@ -342,6 +342,7 @@ def case_settings(case):
             collider_idx=1,
             collider_lower=(-0.6, 0.02, -1.2),
             collider_upper=(0.6, 0.85, 1.2),
+            table_entity_name="wipe_table",
             table_pos=(0.0, -0.25, 0.0),
             table_size=(12.0, 0.5, 8.0),
             liquid_lower=(-2.5, 0.05, -0.7),
@@ -362,7 +363,6 @@ def case_settings(case):
                 absorption_rate=2000.0,
                 absorption_capacity_fraction=1.0,
                 fem_entity_name=mop_manipulator.sponge_entity_name,
-                sdf_res=150,
             )
         else:
             wipe_collider = gs.options.PBSTFBoxStaticColliderOptions(
@@ -556,9 +556,9 @@ def add_case_entities(
                     pos=sponge_pos,
                 ),
                 material=gs.materials.FEM.Elastic(
-                    E=1.0e2,
+                    E=1.0e4,
                     nu=0.4,
-                    rho=100.0,
+                    rho=manipulator.sponge_density,
                     model="linear_corotated",
                 ),
                 surface=gs.surfaces.Default(
@@ -569,20 +569,31 @@ def add_case_entities(
                 name=manipulator.sponge_entity_name,
             )
             scene.add_entity(
+                morph=gs.morphs.Box(
+                    pos=wipe.table_pos,
+                    quat=wipe.quat,
+                    size=wipe.table_size,
+                    visualization=False,
+                    fixed=True,
+                ),
+                material=gs.materials.Rigid(
+                    coup_friction=0.0,
+                    is_coup_reaction_enabled=False,
+                ),
+                name=wipe.table_entity_name,
+            )
+            scene.add_entity(
                 morph=gs.morphs.URDF(
                     file=manipulator.asset,
                     scale=manipulator.scale,
                     pos=manipulator.base_pos,
                     quat=manipulator.base_quat,
                     visualization=manipulator.is_visible,
-                    collision=True,
                     convexify=False,
-                    collision_links=manipulator.collider_link_names,
                     fixed=True,
                 ),
                 material=gs.materials.Rigid(
-                    needs_coup=True,
-                    coup_links=manipulator.collider_link_names,
+                    coup_friction=0.0,
                     is_coup_reaction_enabled=False,
                     gravity_compensation=1.0,
                 ),
@@ -671,17 +682,16 @@ def initialize_mop_manipulator(scene, settings):
         settings,
         manipulator_entity.get_qpos(),
     )
-    scene.pbstf_solver.update_static_collider_deformation(settings.collider_idx, is_sdf_enabled=True)
+    scene.pbstf_solver.update_static_collider_deformation(settings.collider_idx, is_sdf_enabled=False)
     return qpos
 
 
-def update_mop_case(scene, time, settings, init_qpos, is_sponge_frozen):
-    """Close the gripper during settling, freeze the compressed sponge, and execute the wiping stroke."""
+def update_mop_case(scene, time, settings, init_qpos):
+    """Close the gripper and execute the wiping stroke while synchronizing the simulated sponge collider."""
     manipulator = settings.mop_manipulator
     if manipulator is None:
         gs.raise_exception("Mop motion requires manipulator settings.")
     manipulator_entity = scene.get_entity(name=manipulator.entity_name)
-    sponge_entity = scene.get_entity(name=manipulator.sponge_entity_name)
     wipe_pos = wipe_pose(time, settings)
     grip_phase = min(max((time + scene.dt) / settings.settle_time, 0.0), 1.0)
     grip_progress = grip_phase**3 * (grip_phase * (grip_phase * 6.0 - 15.0) + 10.0)
@@ -689,21 +699,13 @@ def update_mop_case(scene, time, settings, init_qpos, is_sponge_frozen):
         manipulator.finger_closed_qpos - manipulator.finger_open_qpos
     )
     qpos = mop_manipulator_qpos(manipulator_entity, wipe_pos, finger_qpos, settings, init_qpos)
-
-    is_grip_complete = time + gs.EPS >= settings.settle_time
-    if not is_sponge_frozen and is_grip_complete:
-        scene.pbstf_solver.update_static_collider_deformation(settings.collider_idx, is_sdf_enabled=True)
-        sponge_entity.set_vertex_constraints(
-            range(sponge_entity.n_vertices),
-            link=manipulator_entity.get_link(manipulator.hand_link_name),
-        )
-        is_sponge_frozen = True
     scene.pbstf_solver.set_static_colliders_pose(
         pos=wipe_pos,
         quat=settings.quat,
         colliders_idx=settings.collider_idx,
     )
-    return MopUpdate(qpos=qpos, is_sponge_frozen=is_sponge_frozen, wipe_pos=wipe_pos)
+    scene.pbstf_solver.update_static_collider_deformation(settings.collider_idx, is_sdf_enabled=False)
+    return MopUpdate(qpos=qpos, wipe_pos=wipe_pos)
 
 
 def draw_case_colliders(scene, case):
@@ -799,9 +801,8 @@ def build_scene(
         ),
         fem_options=(
             gs.options.FEMOptions(
-                gravity=(0.0, 0.0, 0.0),
+                gravity=settings.gravity,
                 use_implicit_solver=True,
-                enable_vertex_constraints=True,
             )
             if case == CASE_MOP
             else None
@@ -918,13 +919,11 @@ def main():
         kuka_qpos = kuka.get_qpos()
     if settings.mop is None:
         mop_qpos = None
-        is_sponge_frozen = False
     else:
         mop_manipulator = settings.mop.mop_manipulator
         if mop_manipulator is None:
             gs.raise_exception("The mop case requires manipulator settings.")
         mop_qpos = scene.get_entity(name=mop_manipulator.entity_name).get_qpos()
-        is_sponge_frozen = False
 
     steps = settings.steps if args.steps is None else args.steps
     if "PYTEST_VERSION" in os.environ:
@@ -958,10 +957,8 @@ def main():
                         scene.cur_t,
                         wipe_settings,
                         mop_qpos,
-                        is_sponge_frozen,
                     )
                     mop_qpos = mop_update.qpos
-                    is_sponge_frozen = mop_update.is_sponge_frozen
                     wipe_pos = mop_update.wipe_pos
                 else:
                     wipe_pos = update_wipe_case(scene.pbstf_solver, scene.cur_t, wipe_settings)
