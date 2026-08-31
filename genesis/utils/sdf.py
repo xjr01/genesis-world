@@ -3,9 +3,16 @@ import numpy as np
 import quadrants as qd
 
 import genesis as gs
+from genesis.engine.bvh import STACK_SIZE, point_aabb_distance_sqr
 import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
-from genesis.utils.triangle_qd import closest_point_on_triangle, triangle_face_normal
+from genesis.utils.triangle_qd import (
+    closest_point_on_triangle,
+    ray_aabb_intersection,
+    ray_projection,
+    ray_triangle_intersection,
+    triangle_face_normal,
+)
 
 
 class SDF:
@@ -479,78 +486,167 @@ def sdf_func_grad_world_local_consistent(
 
 
 @qd.func
-def sdf_func_exact_mesh_surface(
+def sdf_func_exact_mesh_surface_bvh_local(
     geom_idx,
-    env_idx,
-    pos_world: qd.types.vector(3),
-    dyn_state: array_class.DynState,
+    pos_mesh,
+    bvh_nodes: qd.template(),
+    bvh_morton_codes: qd.template(),
     dyn_info: array_class.DynInfo,
     rigid_info: array_class.RigidInfo,
+    surface_info: array_class.FEMRigidSurfaceInfo,
 ):
-    """Return the exact closest point, outward direction, inside flag, and distance for a rigid triangle mesh."""
-    geom_pos = dyn_state.geoms.pos[geom_idx, env_idx]
-    geom_quat = dyn_state.geoms.quat[geom_idx, env_idx]
-    pos_mesh = gu.qd_inv_transform_by_trans_quat(pos_world, geom_pos, geom_quat)
-    closest_position = pos_mesh
+    """Query one rigid geom in a shared local-coordinate bounding volume hierarchy (BVH)."""
+    surface_geom_slot = surface_info.surface_geom_slots[geom_idx]
+    atlas_offset = surface_info.atlas_offsets[surface_geom_slot]
+    pos_atlas = pos_mesh + atlas_offset
+    geom_extent = rigid_info.geoms_init_AABB[geom_idx, 7] - rigid_info.geoms_init_AABB[geom_idx, 0]
+    max_distance = 2.0 * qd.max(1.0e-3, geom_extent.norm())
+    surface_distance_sqr = gs.qd_float(1.0e30)
+    closest_position = pos_atlas
+    closest_normal = qd.Vector([1.0, 0.0, 0.0], dt=gs.qd_float)
     closest_normal_sum = qd.Vector.zero(gs.qd_float, 3)
-    closest_face_normal = qd.Vector([1.0, 0.0, 0.0], dt=gs.qd_float)
-    surface_distance_sqr = gs.qd_float(1.0e20)
-    winding_angle = gs.qd_float(0.0)
+    closest_face_idx = dyn_info.faces.verts_idx.shape[0]
     has_closest = False
 
-    for face_idx in range(dyn_info.geoms.face_start[geom_idx], dyn_info.geoms.face_end[geom_idx]):
-        face = dyn_info.faces.verts_idx[face_idx]
-        v0 = dyn_info.verts.init_pos[face[0]]
-        v1 = dyn_info.verts.init_pos[face[1]]
-        v2 = dyn_info.verts.init_pos[face[2]]
-        candidate_normal = triangle_face_normal(v0, v1, v2)
-        candidate = closest_point_on_triangle(pos_mesh, v0, v1, v2)
-        candidate_distance_sqr = (pos_mesh - candidate).norm_sqr()
-        a = v0 - pos_mesh
-        b = v1 - pos_mesh
-        c = v2 - pos_mesh
-        a_length = a.norm()
-        b_length = b.norm()
-        c_length = c.norm()
-        # Global winding keeps the inside sign valid at concave edges where the nearest face alone is ambiguous.
-        winding_angle += 2.0 * qd.atan2(
-            a.dot(b.cross(c)),
-            a_length * b_length * c_length
-            + a.dot(b) * c_length
-            + b.dot(c) * a_length
-            + c.dot(a) * b_length,
-        )
-        if not has_closest:
-            closest_position = candidate
-            closest_normal_sum = candidate_normal
-            closest_face_normal = candidate_normal
-            surface_distance_sqr = candidate_distance_sqr
-            has_closest = True
-        else:
-            distance_tolerance = 8.0 * rigid_info.EPS[None] * qd.max(
-                1.0, candidate_distance_sqr, surface_distance_sqr
-            )
-            if candidate_distance_sqr < surface_distance_sqr - distance_tolerance:
-                closest_normal_sum = candidate_normal
-            elif qd.abs(candidate_distance_sqr - surface_distance_sqr) <= distance_tolerance:
-                closest_normal_sum += candidate_normal
-            if candidate_distance_sqr < surface_distance_sqr:
-                closest_position = candidate
-                closest_face_normal = candidate_normal
-                surface_distance_sqr = candidate_distance_sqr
+    n_triangles = bvh_morton_codes.shape[1]
+    node_stack = qd.Vector.zero(gs.qd_int, qd.static(STACK_SIZE))
+    node_stack[0] = 0
+    stack_idx = 1
+    while stack_idx > 0:
+        stack_idx -= 1
+        node_idx = node_stack[stack_idx]
+        node = bvh_nodes[0, node_idx]
+        distance_tolerance = 8.0 * rigid_info.EPS[None] * qd.max(1.0, surface_distance_sqr)
+        node_distance_sqr = point_aabb_distance_sqr(pos_atlas, node.bound.min, node.bound.max)
+        if node_distance_sqr <= surface_distance_sqr + distance_tolerance:
+            if node.left == -1:
+                sorted_leaf_idx = node_idx - (n_triangles - 1)
+                face_idx = qd.cast(bvh_morton_codes[0, sorted_leaf_idx][1], gs.qd_int)
+                if dyn_info.faces.geom_idx[face_idx] == geom_idx:
+                    face = dyn_info.faces.verts_idx[face_idx]
+                    v0 = dyn_info.verts.init_pos[face[0]] + atlas_offset
+                    v1 = dyn_info.verts.init_pos[face[1]] + atlas_offset
+                    v2 = dyn_info.verts.init_pos[face[2]] + atlas_offset
+                    candidate_normal = triangle_face_normal(v0, v1, v2)
+                    candidate = closest_point_on_triangle(pos_atlas, v0, v1, v2)
+                    candidate_distance_sqr = (pos_atlas - candidate).norm_sqr()
+                    candidate_tolerance = (
+                        8.0 * rigid_info.EPS[None] * qd.max(1.0, candidate_distance_sqr, surface_distance_sqr)
+                    )
+                    if candidate_distance_sqr <= surface_distance_sqr + candidate_tolerance:
+                        if not has_closest or candidate_distance_sqr < surface_distance_sqr - candidate_tolerance:
+                            closest_normal_sum = candidate_normal
+                        elif qd.abs(candidate_distance_sqr - surface_distance_sqr) <= candidate_tolerance:
+                            closest_normal_sum += candidate_normal
+                        if (
+                            not has_closest
+                            or candidate_distance_sqr < surface_distance_sqr
+                            or (candidate_distance_sqr == surface_distance_sqr and face_idx < closest_face_idx)
+                        ):
+                            closest_position = candidate
+                            closest_normal = candidate_normal
+                            closest_face_idx = face_idx
+                            surface_distance_sqr = candidate_distance_sqr
+                        has_closest = True
+            elif stack_idx < qd.static(STACK_SIZE - 2):
+                left = node.left
+                right = node.right
+                left_distance_sqr = point_aabb_distance_sqr(
+                    pos_atlas, bvh_nodes[0, left].bound.min, bvh_nodes[0, left].bound.max
+                )
+                right_distance_sqr = point_aabb_distance_sqr(
+                    pos_atlas, bvh_nodes[0, right].bound.min, bvh_nodes[0, right].bound.max
+                )
+                if left_distance_sqr < right_distance_sqr:
+                    node_stack[stack_idx] = right
+                    node_stack[stack_idx + 1] = left
+                else:
+                    node_stack[stack_idx] = left
+                    node_stack[stack_idx + 1] = right
+                stack_idx += 2
 
-    surface_distance = qd.sqrt(surface_distance_sqr)
-    closest_normal = closest_face_normal
-    if closest_normal_sum.norm_sqr() > rigid_info.EPS[None] ** 2:
-        closest_normal = closest_normal_sum.normalized()
-    is_inside = surface_distance <= rigid_info.EPS[None] or qd.abs(winding_angle) > 2.0 * qd.math.pi
+    surface_distance = max_distance
+    inside_normal = closest_normal
+    if has_closest:
+        surface_distance = qd.sqrt(surface_distance_sqr)
+        if closest_normal_sum.norm_sqr() > rigid_info.EPS[None] ** 2:
+            inside_normal = closest_normal_sum.normalized()
+
+    delta = pos_atlas - closest_position
+    is_inside_candidate = delta.dot(inside_normal) <= 0.0
+    is_inside = surface_distance <= rigid_info.EPS[None]
+    if is_inside_candidate and not is_inside:
+        ray_dir = qd.Vector([0.8192319205, 0.4630140578, 0.3395271683], dt=gs.qd_float)
+        axes, shear, is_valid_dir = ray_projection(ray_dir, rigid_info.EPS[None])
+        winding_crossings = gs.qd_int(0)
+        node_stack[0] = 0
+        stack_idx = 1
+        if not is_valid_dir:
+            stack_idx = 0
+        while stack_idx > 0:
+            stack_idx -= 1
+            node_idx = node_stack[stack_idx]
+            node = bvh_nodes[0, node_idx]
+            aabb_distance = ray_aabb_intersection(
+                pos_atlas, ray_dir, node.bound.min, node.bound.max, rigid_info.EPS[None]
+            )
+            if aabb_distance >= 0.0 and aabb_distance <= max_distance:
+                if node.left == -1:
+                    sorted_leaf_idx = node_idx - (n_triangles - 1)
+                    face_idx = qd.cast(bvh_morton_codes[0, sorted_leaf_idx][1], gs.qd_int)
+                    if dyn_info.faces.geom_idx[face_idx] == geom_idx:
+                        face = dyn_info.faces.verts_idx[face_idx]
+                        v0 = dyn_info.verts.init_pos[face[0]] + atlas_offset
+                        v1 = dyn_info.verts.init_pos[face[1]] + atlas_offset
+                        v2 = dyn_info.verts.init_pos[face[2]] + atlas_offset
+                        hit_distance = ray_triangle_intersection(
+                            axes, pos_atlas, shear, v0, v1, v2, rigid_info.EPS[None]
+                        )
+                        if hit_distance >= 0.0 and hit_distance <= max_distance:
+                            alignment = triangle_face_normal(v0, v1, v2).dot(ray_dir)
+                            if alignment > rigid_info.EPS[None]:
+                                winding_crossings += 1
+                            elif alignment < -rigid_info.EPS[None]:
+                                winding_crossings -= 1
+                elif stack_idx < qd.static(STACK_SIZE - 2):
+                    node_stack[stack_idx] = node.left
+                    node_stack[stack_idx + 1] = node.right
+                    stack_idx += 2
+        is_inside = winding_crossings != 0
 
     if surface_distance > rigid_info.EPS[None]:
         if is_inside:
-            closest_normal = (closest_position - pos_mesh) / surface_distance
+            closest_normal = -delta / surface_distance
         else:
-            closest_normal = (pos_mesh - closest_position) / surface_distance
+            closest_normal = delta / surface_distance
 
+    return closest_position - atlas_offset, closest_normal, is_inside, surface_distance
+
+
+@qd.func
+def sdf_func_exact_mesh_surface_bvh(
+    geom_idx,
+    env_idx,
+    pos_world,
+    bvh_nodes: qd.template(),
+    bvh_morton_codes: qd.template(),
+    dyn_state: array_class.DynState,
+    dyn_info: array_class.DynInfo,
+    rigid_info: array_class.RigidInfo,
+    surface_info: array_class.FEMRigidSurfaceInfo,
+):
+    geom_pos = dyn_state.geoms.pos[geom_idx, env_idx]
+    geom_quat = dyn_state.geoms.quat[geom_idx, env_idx]
+    pos_mesh = gu.qd_inv_transform_by_trans_quat(pos_world, geom_pos, geom_quat)
+    closest_position, closest_normal, is_inside, surface_distance = sdf_func_exact_mesh_surface_bvh_local(
+        geom_idx,
+        pos_mesh,
+        bvh_nodes,
+        bvh_morton_codes,
+        dyn_info,
+        rigid_info,
+        surface_info,
+    )
     return (
         gu.qd_transform_by_trans_quat(closest_position, geom_pos, geom_quat),
         gu.qd_transform_by_quat(closest_normal, geom_quat),
@@ -560,36 +656,105 @@ def sdf_func_exact_mesh_surface(
 
 
 @qd.func
+def sdf_func_surface_bvh_ray_cast_local(
+    geom_idx,
+    ray_start_mesh,
+    ray_dir,
+    max_range,
+    bvh_nodes: qd.template(),
+    bvh_morton_codes: qd.template(),
+    dyn_info: array_class.DynInfo,
+    rigid_info: array_class.RigidInfo,
+    surface_info: array_class.FEMRigidSurfaceInfo,
+):
+    """Return the first hit along a geom-local ray in the shared rigid-surface BVH."""
+    atlas_offset = surface_info.atlas_offsets[surface_info.surface_geom_slots[geom_idx]]
+    ray_start = ray_start_mesh + atlas_offset
+    axes, shear, is_valid_dir = ray_projection(ray_dir, rigid_info.EPS[None])
+    closest_distance = max_range
+    has_hit = False
+    n_triangles = bvh_morton_codes.shape[1]
+    node_stack = qd.Vector.zero(gs.qd_int, qd.static(STACK_SIZE))
+    node_stack[0] = 0
+    stack_idx = 1
+    if not is_valid_dir:
+        stack_idx = 0
+    while stack_idx > 0:
+        stack_idx -= 1
+        node_idx = node_stack[stack_idx]
+        node = bvh_nodes[0, node_idx]
+        aabb_distance = ray_aabb_intersection(ray_start, ray_dir, node.bound.min, node.bound.max, rigid_info.EPS[None])
+        if aabb_distance >= 0.0 and aabb_distance < closest_distance:
+            if node.left == -1:
+                sorted_leaf_idx = node_idx - (n_triangles - 1)
+                face_idx = qd.cast(bvh_morton_codes[0, sorted_leaf_idx][1], gs.qd_int)
+                if dyn_info.faces.geom_idx[face_idx] == geom_idx:
+                    face = dyn_info.faces.verts_idx[face_idx]
+                    hit_distance = ray_triangle_intersection(
+                        axes,
+                        ray_start,
+                        shear,
+                        dyn_info.verts.init_pos[face[0]] + atlas_offset,
+                        dyn_info.verts.init_pos[face[1]] + atlas_offset,
+                        dyn_info.verts.init_pos[face[2]] + atlas_offset,
+                        rigid_info.EPS[None],
+                    )
+                    if hit_distance >= 0.0 and hit_distance < closest_distance:
+                        closest_distance = hit_distance
+                        has_hit = True
+            elif stack_idx < qd.static(STACK_SIZE - 2):
+                node_stack[stack_idx] = node.left
+                node_stack[stack_idx + 1] = node.right
+                stack_idx += 2
+    return closest_distance, has_hit
+
+
+@qd.func
+def sdf_func_collision_clearance(geom_idx, rigid_info: array_class.RigidInfo):
+    """Return a scale-aware clearance that exceeds accumulated transform and projection roundoff."""
+    geom_extent = rigid_info.geoms_init_AABB[geom_idx, 7] - rigid_info.geoms_init_AABB[geom_idx, 0]
+    return 512.0 * rigid_info.EPS[None] * qd.max(1.0, geom_extent.norm())
+
+
+@qd.func
 def sdf_func_project_vertex_outside_geom(
     geom_idx,
     env_idx,
     pos_world: qd.types.vector(3),
+    bvh_nodes: qd.template(),
+    bvh_morton_codes: qd.template(),
     dyn_state: array_class.DynState,
     dyn_info: array_class.DynInfo,
     rigid_info: array_class.RigidInfo,
     collider_info: array_class.ColliderInfo,
+    surface_info: array_class.FEMRigidSurfaceInfo,
 ):
     """Project a point onto the feasible side of one rigid geom and return its active contact normal."""
     # The local bounds remain valid for coupling geoms whose rigid broadphase and runtime AABBs are disabled.
     geom_lower = rigid_info.geoms_init_AABB[geom_idx, 0]
     geom_upper = rigid_info.geoms_init_AABB[geom_idx, 7]
-    geom_extent = geom_upper - geom_lower
-    clearance = 128.0 * rigid_info.EPS[None] * qd.max(1.0, geom_extent.norm())
+    clearance = sdf_func_collision_clearance(geom_idx, rigid_info)
     contact_tolerance = 2.0 * clearance
     corrected_position = pos_world
     normal = qd.Vector.zero(gs.qd_float, 3)
     is_active = False
 
     if dyn_info.geoms.type[geom_idx] == gs.GEOM_TYPE.MESH:
-        pos_mesh = gu.qd_inv_transform_by_trans_quat(
-            pos_world,
-            dyn_state.geoms.pos[geom_idx, env_idx],
-            dyn_state.geoms.quat[geom_idx, env_idx],
-        )
+        geom_pos = dyn_state.geoms.pos[geom_idx, env_idx]
+        geom_quat = dyn_state.geoms.quat[geom_idx, env_idx]
+        pos_mesh = gu.qd_inv_transform_by_trans_quat(pos_world, geom_pos, geom_quat)
         is_in_query_aabb = (pos_mesh >= geom_lower - clearance).all() and (pos_mesh <= geom_upper + clearance).all()
         if is_in_query_aabb:
-            closest_position, normal, is_inside, surface_distance = sdf_func_exact_mesh_surface(
-                geom_idx, env_idx, pos_world, dyn_state, dyn_info, rigid_info
+            closest_position, normal, is_inside, surface_distance = sdf_func_exact_mesh_surface_bvh(
+                geom_idx,
+                env_idx,
+                pos_world,
+                bvh_nodes,
+                bvh_morton_codes,
+                dyn_state,
+                dyn_info,
+                rigid_info,
+                surface_info,
             )
             is_active = is_inside or surface_distance <= clearance + contact_tolerance
             if is_inside or surface_distance < clearance:

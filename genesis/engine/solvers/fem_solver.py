@@ -2,18 +2,26 @@ import numpy as np
 import torch
 
 import igl
+
 import quadrants as qd
 
 import genesis as gs
-import genesis.utils.array_class as array_class
-import genesis.utils.sdf as sdf
 from genesis.engine.boundaries import FloorBoundary
+from genesis.engine.bvh import STACK_SIZE
 from genesis.engine.entities.fem_entity import FEMEntity
 from genesis.engine.states.solvers import FEMSolverState
-from genesis.utils.geom import qd_transform_by_quat, qd_transform_quat_by_quat
+import genesis.utils.array_class as array_class
+from genesis.utils.geom import qd_inv_transform_by_trans_quat, qd_transform_by_quat, qd_transform_quat_by_quat
 from genesis.utils.misc import qd_to_torch
+import genesis.utils.sdf as sdf
+from genesis.utils.triangle_qd import (
+    triangle_triangle_intersection,
+    triangle_triangle_previous_separating_correction,
+)
 
 from .base_solver import Solver
+
+FEM_RIGID_SURFACE_PROJECTION_ITERATIONS = 16
 
 
 @qd.data_oriented
@@ -852,12 +860,14 @@ class FEMSolver(Solver):
     def _func_project_vertex_against_rigid(
         self,
         env_idx,
-        n_rigid_geoms,
         pos,
+        bvh_nodes: qd.template(),
+        bvh_morton_codes: qd.template(),
         dyn_state: array_class.DynState,
         dyn_info: array_class.DynInfo,
         rigid_info: array_class.RigidInfo,
         collider_info: array_class.ColliderInfo,
+        surface_info: array_class.FEMRigidSurfaceInfo,
     ):
         corrected_pos = pos
         collision_normal = qd.Vector.zero(gs.qd_float, 3)
@@ -866,20 +876,23 @@ class FEMSolver(Solver):
             if qd.static(projection_pass == 1):
                 collision_normal = qd.Vector.zero(gs.qd_float, 3)
                 is_collision_active = False
-            for geom_idx in range(n_rigid_geoms):
-                if dyn_info.geoms.needs_coup[geom_idx] and not dyn_info.geoms.is_coup_reaction_enabled[geom_idx]:
-                    corrected_pos, normal, is_active = sdf.sdf_func_project_vertex_outside_geom(
-                        geom_idx,
-                        env_idx,
-                        corrected_pos,
-                        dyn_state,
-                        dyn_info,
-                        rigid_info,
-                        collider_info,
-                    )
-                    if qd.static(projection_pass == 1) and is_active:
-                        collision_normal += normal
-                        is_collision_active = True
+            for projection_geom_slot in range(surface_info.projection_geoms_idx.shape[0]):
+                geom_idx = surface_info.projection_geoms_idx[projection_geom_slot]
+                corrected_pos, normal, is_active = sdf.sdf_func_project_vertex_outside_geom(
+                    geom_idx,
+                    env_idx,
+                    corrected_pos,
+                    bvh_nodes,
+                    bvh_morton_codes,
+                    dyn_state,
+                    dyn_info,
+                    rigid_info,
+                    collider_info,
+                    surface_info,
+                )
+                if qd.static(projection_pass == 1) and is_active:
+                    collision_normal += normal
+                    is_collision_active = True
         if collision_normal.norm_sqr() > rigid_info.EPS[None] ** 2:
             collision_normal = collision_normal.normalized()
         return corrected_pos, collision_normal, is_collision_active
@@ -888,12 +901,14 @@ class FEMSolver(Solver):
     def _func_project_pcg_positions(
         self,
         f,
-        n_rigid_geoms,
-        projection_state: array_class.FEMProjectionState,
+        bvh_nodes: qd.template(),
+        bvh_morton_codes: qd.template(),
         dyn_state: array_class.DynState,
+        projection_state: array_class.FEMProjectionState,
         dyn_info: array_class.DynInfo,
         rigid_info: array_class.RigidInfo,
         collider_info: array_class.ColliderInfo,
+        surface_info: array_class.FEMRigidSurfaceInfo,
     ):
         for env_idx in range(self._B):
             if projection_state.is_processed[env_idx]:
@@ -911,12 +926,14 @@ class FEMSolver(Solver):
             pos = self.elements_v[f + 1, vertex_idx, env_idx].pos + self.pcg_state_v[env_idx, vertex_idx].x
             corrected_pos, collision_normal, is_collision_active = self._func_project_vertex_against_rigid(
                 env_idx,
-                n_rigid_geoms,
                 pos,
+                bvh_nodes,
+                bvh_morton_codes,
                 dyn_state,
                 dyn_info,
                 rigid_info,
                 collider_info,
+                surface_info,
             )
             correction = corrected_pos - pos
             self.pcg_state_v[env_idx, vertex_idx].Ap = correction
@@ -990,36 +1007,42 @@ class FEMSolver(Solver):
     def project_initial_pcg_positions(
         self,
         f: qd.i32,
-        n_rigid_geoms: qd.i32,
-        projection_state: array_class.FEMProjectionState,
+        bvh_nodes: qd.template(),
+        bvh_morton_codes: qd.template(),
         dyn_state: array_class.DynState,
+        projection_state: array_class.FEMProjectionState,
         dyn_info: array_class.DynInfo,
         rigid_info: array_class.RigidInfo,
         collider_info: array_class.ColliderInfo,
+        surface_info: array_class.FEMRigidSurfaceInfo,
     ):
         for env_idx in range(self._B):
             projection_state.is_processed[env_idx] = self.batch_active[env_idx]
             projection_state.is_pcg_active_saved[env_idx] = self.batch_pcg_active[env_idx]
         self._func_project_pcg_positions(
             f,
-            n_rigid_geoms,
-            projection_state,
+            bvh_nodes,
+            bvh_morton_codes,
             dyn_state,
+            projection_state,
             dyn_info,
             rigid_info,
             collider_info,
+            surface_info,
         )
 
     @qd.kernel
     def one_projected_pcg_iter(
         self,
         f: qd.i32,
-        n_rigid_geoms: qd.i32,
-        projection_state: array_class.FEMProjectionState,
+        bvh_nodes: qd.template(),
+        bvh_morton_codes: qd.template(),
         dyn_state: array_class.DynState,
+        projection_state: array_class.FEMProjectionState,
         dyn_info: array_class.DynInfo,
         rigid_info: array_class.RigidInfo,
         collider_info: array_class.ColliderInfo,
+        surface_info: array_class.FEMRigidSurfaceInfo,
     ):
         for env_idx in range(self._B):
             projection_state.is_processed[env_idx] = self.batch_pcg_active[env_idx]
@@ -1028,39 +1051,338 @@ class FEMSolver(Solver):
             projection_state.is_pcg_active_saved[env_idx] = self.batch_pcg_active[env_idx]
         self._func_project_pcg_positions(
             f,
-            n_rigid_geoms,
-            projection_state,
+            bvh_nodes,
+            bvh_morton_codes,
             dyn_state,
+            projection_state,
             dyn_info,
             rigid_info,
             collider_info,
+            surface_info,
         )
 
     @qd.kernel
     def project_implicit_positions(
         self,
         f: qd.i32,
-        n_rigid_geoms: qd.i32,
+        bvh_nodes: qd.template(),
+        bvh_morton_codes: qd.template(),
         dyn_state: array_class.DynState,
         dyn_info: array_class.DynInfo,
         rigid_info: array_class.RigidInfo,
         collider_info: array_class.ColliderInfo,
+        surface_info: array_class.FEMRigidSurfaceInfo,
+        is_committed: qd.template(),
     ):
         for env_idx, vertex_idx in qd.ndrange(self._B, self.n_vertices):
-            if self.batch_active[env_idx] and self._func_is_vertex_projection_enabled(vertex_idx, env_idx):
+            is_env_active = self.batch_active[env_idx]
+            if qd.static(is_committed):
+                is_env_active = True
+            if is_env_active and self._func_is_vertex_projection_enabled(vertex_idx, env_idx):
                 corrected_pos, _, _ = self._func_project_vertex_against_rigid(
                     env_idx,
-                    n_rigid_geoms,
                     self.elements_v[f + 1, vertex_idx, env_idx].pos,
+                    bvh_nodes,
+                    bvh_morton_codes,
                     dyn_state,
                     dyn_info,
                     rigid_info,
                     collider_info,
+                    surface_info,
                 )
                 correction = corrected_pos - self.elements_v[f + 1, vertex_idx, env_idx].pos
                 self.elements_v[f + 1, vertex_idx, env_idx].pos = corrected_pos
                 if correction.norm_sqr() > rigid_info.EPS[None] ** 2:
                     self.elements_v[f + 1, vertex_idx, env_idx].vel += correction / self.substep_dt
+
+    @qd.kernel
+    def init_implicit_surface_projection(self, surface_state: array_class.FEMRigidSurfaceState):
+        for env_idx in range(self._B):
+            surface_state.is_active[env_idx] = True
+            surface_state.has_intersection[env_idx] = 0
+
+    @qd.kernel
+    def detect_implicit_surface_intersections(
+        self,
+        f: qd.i32,
+        bvh_nodes: qd.template(),
+        bvh_morton_codes: qd.template(),
+        dyn_state: array_class.DynState,
+        surface_state: array_class.FEMRigidSurfaceState,
+        dyn_info: array_class.DynInfo,
+        rigid_info: array_class.RigidInfo,
+        surface_info: array_class.FEMRigidSurfaceInfo,
+        is_audit: qd.template(),
+        errno: qd.Tensor,
+    ):
+        """Detect deformable-rigid surface intersections and accumulate frictionless one-way corrections."""
+        n_surface_faces = bvh_morton_codes.shape[1]
+        if qd.static(is_audit):
+            for env_idx in range(self._B):
+                surface_state.has_intersection[env_idx] = 0
+        for env_idx, surface_idx in qd.ndrange(self._B, self.n_surfaces):
+            is_env_active = surface_state.is_active[env_idx]
+            if qd.static(is_audit):
+                is_env_active = True
+            if not is_env_active or not self.surface[surface_idx].active:
+                continue
+
+            vertices_idx = self.surface[surface_idx].tri2v
+            vertices_world = qd.Matrix.zero(gs.qd_float, 3, 3)
+            previous_vertices_world = qd.Matrix.zero(gs.qd_float, 3, 3)
+            previous_centroid_world = qd.Vector.zero(gs.qd_float, 3)
+            for vertex_slot in qd.static(range(3)):
+                vertex_idx = vertices_idx[vertex_slot]
+                vertices_world[:, vertex_slot] = self.elements_v[f + 1, vertex_idx, env_idx].pos
+                previous_vertices_world[:, vertex_slot] = self.elements_v[f, vertex_idx, env_idx].pos
+                previous_centroid_world += previous_vertices_world[:, vertex_slot] / 3.0
+
+            for surface_geom_slot in range(surface_info.surface_geoms_idx.shape[0]):
+                geom_idx = surface_info.surface_geoms_idx[surface_geom_slot]
+                geom_pos = dyn_state.geoms.pos[geom_idx, env_idx]
+                geom_quat = dyn_state.geoms.quat[geom_idx, env_idx]
+                atlas_offset = surface_info.atlas_offsets[surface_geom_slot]
+                vertices_atlas = qd.Matrix.zero(gs.qd_float, 3, 3)
+                previous_vertices_atlas = qd.Matrix.zero(gs.qd_float, 3, 3)
+                for vertex_slot in qd.static(range(3)):
+                    vertices_atlas[:, vertex_slot] = (
+                        qd_inv_transform_by_trans_quat(vertices_world[:, vertex_slot], geom_pos, geom_quat)
+                        + atlas_offset
+                    )
+                    previous_vertices_atlas[:, vertex_slot] = (
+                        qd_inv_transform_by_trans_quat(
+                            previous_vertices_world[:, vertex_slot],
+                            surface_state.previous_geoms_pos[env_idx, surface_geom_slot],
+                            surface_state.previous_geoms_quat[env_idx, surface_geom_slot],
+                        )
+                        + atlas_offset
+                    )
+
+                geom_lower = rigid_info.geoms_init_AABB[geom_idx, 0]
+                geom_upper = rigid_info.geoms_init_AABB[geom_idx, 7]
+                geom_extent = geom_upper - geom_lower
+                clearance = sdf.sdf_func_collision_clearance(geom_idx, rigid_info)
+                query_lower = qd.min(vertices_atlas[:, 0], vertices_atlas[:, 1], vertices_atlas[:, 2]) - clearance
+                query_upper = qd.max(vertices_atlas[:, 0], vertices_atlas[:, 1], vertices_atlas[:, 2]) + clearance
+                previous_direction_mesh = qd.Vector.zero(gs.qd_float, 3)
+                has_previous_direction = False
+
+                node_stack = qd.Vector.zero(gs.qd_int, qd.static(STACK_SIZE))
+                node_stack[0] = 0
+                stack_idx = 1
+                while stack_idx > 0:
+                    stack_idx -= 1
+                    node_idx = node_stack[stack_idx]
+                    node = bvh_nodes[0, node_idx]
+                    is_node_overlapping = (query_lower <= node.bound.max).all() and (
+                        query_upper >= node.bound.min
+                    ).all()
+                    if is_node_overlapping:
+                        if node.left == -1:
+                            sorted_leaf_idx = node_idx - (n_surface_faces - 1)
+                            face_idx = qd.cast(bvh_morton_codes[0, sorted_leaf_idx][1], gs.qd_int)
+                            if dyn_info.faces.geom_idx[face_idx] != geom_idx:
+                                continue
+                            face = dyn_info.faces.verts_idx[face_idx]
+                            rigid_vertices_atlas = qd.Matrix.cols(
+                                [
+                                    dyn_info.verts.init_pos[face[0]] + atlas_offset,
+                                    dyn_info.verts.init_pos[face[1]] + atlas_offset,
+                                    dyn_info.verts.init_pos[face[2]] + atlas_offset,
+                                ]
+                            )
+                            is_intersecting, hit_position_atlas = triangle_triangle_intersection(
+                                vertices_atlas, rigid_vertices_atlas, rigid_info.EPS[None]
+                            )
+                            if not is_intersecting:
+                                continue
+
+                            qd.atomic_max(surface_state.has_intersection[env_idx], 1)
+                            if qd.static(is_audit):
+                                qd.atomic_or(
+                                    errno[env_idx], array_class.ErrorCode.INVALID_FEM_RIGID_SURFACE_INTERSECTION
+                                )
+                                continue
+
+                            # A prior separating axis preserves the contact topology with a minimum normal
+                            # displacement in the current geom frame.
+                            has_history_correction, history_correction_mesh = (
+                                triangle_triangle_previous_separating_correction(
+                                    vertices_atlas,
+                                    previous_vertices_atlas,
+                                    rigid_vertices_atlas,
+                                    clearance,
+                                    rigid_info.EPS[None],
+                                )
+                            )
+                            if has_history_correction:
+                                history_correction_world = qd_transform_by_quat(history_correction_mesh, geom_quat)
+                                for vertex_slot in qd.static(range(3)):
+                                    vertex_idx = vertices_idx[vertex_slot]
+                                    if self._func_is_vertex_projection_enabled(vertex_idx, env_idx):
+                                        for axis in qd.static(range(3)):
+                                            qd.atomic_add(
+                                                surface_state.corrections[env_idx, vertex_idx][axis],
+                                                history_correction_world[axis],
+                                            )
+                                        qd.atomic_add(surface_state.n_corrections[env_idx, vertex_idx], 1)
+                                continue
+
+                            if not has_previous_direction:
+                                # The previous valid configuration selects the exterior side when the current
+                                # triangle spans both sides of a collider.
+                                previous_centroid_mesh = qd_inv_transform_by_trans_quat(
+                                    previous_centroid_world,
+                                    surface_state.previous_geoms_pos[env_idx, surface_geom_slot],
+                                    surface_state.previous_geoms_quat[env_idx, surface_geom_slot],
+                                )
+                                _, previous_direction_mesh, _, _ = sdf.sdf_func_exact_mesh_surface_bvh_local(
+                                    geom_idx,
+                                    previous_centroid_mesh,
+                                    bvh_nodes,
+                                    bvh_morton_codes,
+                                    dyn_info,
+                                    rigid_info,
+                                    surface_info,
+                                )
+                                if previous_direction_mesh.norm_sqr() > rigid_info.EPS[None] ** 2:
+                                    previous_direction_mesh = previous_direction_mesh.normalized()
+                                    has_previous_direction = True
+
+                            rigid_normal_mesh = (rigid_vertices_atlas[:, 1] - rigid_vertices_atlas[:, 0]).cross(
+                                rigid_vertices_atlas[:, 2] - rigid_vertices_atlas[:, 0]
+                            )
+                            if not has_previous_direction and rigid_normal_mesh.norm_sqr() > rigid_info.EPS[None] ** 2:
+                                previous_direction_mesh = rigid_normal_mesh.normalized()
+                                previous_centroid_mesh = qd_inv_transform_by_trans_quat(
+                                    previous_centroid_world,
+                                    surface_state.previous_geoms_pos[env_idx, surface_geom_slot],
+                                    surface_state.previous_geoms_quat[env_idx, surface_geom_slot],
+                                )
+                                if (previous_centroid_mesh - (rigid_vertices_atlas[:, 0] - atlas_offset)).dot(
+                                    previous_direction_mesh
+                                ) < 0.0:
+                                    previous_direction_mesh = -previous_direction_mesh
+                                has_previous_direction = True
+
+                            if not has_previous_direction:
+                                continue
+
+                            hit_position_mesh = hit_position_atlas - atlas_offset
+                            exit_position_mesh = hit_position_mesh
+                            rigid_normal_mesh = rigid_normal_mesh.normalized()
+                            if rigid_normal_mesh.dot(previous_direction_mesh) <= rigid_info.EPS[None]:
+                                ray_start_mesh = hit_position_mesh + clearance * previous_direction_mesh
+                                exit_distance, has_exit = sdf.sdf_func_surface_bvh_ray_cast_local(
+                                    geom_idx,
+                                    ray_start_mesh,
+                                    previous_direction_mesh,
+                                    2.0 * qd.max(1.0e-3, geom_extent.norm()),
+                                    bvh_nodes,
+                                    bvh_morton_codes,
+                                    dyn_info,
+                                    rigid_info,
+                                    surface_info,
+                                )
+                                if has_exit:
+                                    exit_position_mesh = ray_start_mesh + exit_distance * previous_direction_mesh
+                                else:
+                                    for axis in qd.static(range(3)):
+                                        exit_position_mesh[axis] = qd.select(
+                                            previous_direction_mesh[axis] >= 0.0, geom_upper[axis], geom_lower[axis]
+                                        )
+
+                            # A shared exit plane moves the whole intersecting feature coherently and eliminates
+                            # residual edge crossings.
+                            target_projection = exit_position_mesh.dot(previous_direction_mesh) + clearance
+                            for vertex_slot in qd.static(range(3)):
+                                vertex_idx = vertices_idx[vertex_slot]
+                                vertex_projection = (vertices_atlas[:, vertex_slot] - atlas_offset).dot(
+                                    previous_direction_mesh
+                                )
+                                penetration = target_projection - vertex_projection
+                                if penetration > 0.0 and self._func_is_vertex_projection_enabled(vertex_idx, env_idx):
+                                    correction_mesh = penetration * previous_direction_mesh
+                                    correction_world = qd_transform_by_quat(correction_mesh, geom_quat)
+                                    for axis in qd.static(range(3)):
+                                        qd.atomic_add(
+                                            surface_state.corrections[env_idx, vertex_idx][axis],
+                                            correction_world[axis],
+                                        )
+                                    qd.atomic_add(surface_state.n_corrections[env_idx, vertex_idx], 1)
+                        elif stack_idx < qd.static(STACK_SIZE - 2):
+                            node_stack[stack_idx] = node.left
+                            node_stack[stack_idx + 1] = node.right
+                            stack_idx += 2
+
+    @qd.kernel
+    def apply_implicit_surface_projection(
+        self,
+        f: qd.i32,
+        surface_state: array_class.FEMRigidSurfaceState,
+        rigid_info: array_class.RigidInfo,
+    ):
+        for env_idx in range(self._B):
+            if surface_state.is_active[env_idx]:
+                surface_state.is_active[env_idx] = surface_state.has_intersection[env_idx] != 0
+            surface_state.has_intersection[env_idx] = 0
+        for env_idx, vertex_idx in qd.ndrange(self._B, self.n_vertices):
+            n_corrections = surface_state.n_corrections[env_idx, vertex_idx]
+            if n_corrections > 0:
+                pos = self.elements_v[f + 1, vertex_idx, env_idx].pos
+                corrected_pos = pos + surface_state.corrections[env_idx, vertex_idx] / n_corrections
+                correction = corrected_pos - pos
+                self.elements_v[f + 1, vertex_idx, env_idx].pos = corrected_pos
+                if correction.norm_sqr() > rigid_info.EPS[None] ** 2:
+                    self.elements_v[f + 1, vertex_idx, env_idx].vel += correction / self.substep_dt
+            surface_state.corrections[env_idx, vertex_idx] = qd.Vector.zero(gs.qd_float, 3)
+            surface_state.n_corrections[env_idx, vertex_idx] = 0
+
+    def project_implicit_surface(
+        self,
+        f,
+        bvh_nodes,
+        bvh_morton_codes,
+        dyn_state,
+        surface_state,
+        dyn_info,
+        rigid_info,
+        collider_info,
+        surface_info,
+        errno,
+    ):
+        """Resolve committed surface intersections with a bounded active set and audit the final geometry."""
+        self.init_implicit_surface_projection(surface_state)
+        for _ in range(FEM_RIGID_SURFACE_PROJECTION_ITERATIONS):
+            self.detect_implicit_surface_intersections(
+                f,
+                bvh_nodes,
+                bvh_morton_codes,
+                dyn_state,
+                surface_state,
+                dyn_info,
+                rigid_info,
+                surface_info,
+                is_audit=False,
+                errno=errno,
+            )
+            self.apply_implicit_surface_projection(
+                f,
+                surface_state,
+                rigid_info,
+            )
+        self.detect_implicit_surface_intersections(
+            f,
+            bvh_nodes,
+            bvh_morton_codes,
+            dyn_state,
+            surface_state,
+            dyn_info,
+            rigid_info,
+            surface_info,
+            is_audit=True,
+            errno=errno,
+        )
 
     def pcg_solve(self, f):
         self.init_pcg_solve()
@@ -1183,7 +1505,7 @@ class FEMSolver(Solver):
             # line search
             self.linesearch(f)
             if self._is_implicit_rigid_projection_enabled:
-                self.sim._coupler.project_fem_implicit_positions(f)
+                self.sim._coupler.project_fem_implicit_positions(f, is_committed=False)
 
     @qd.kernel
     def setup_pos_vel(self, f: qd.i32):
@@ -1239,7 +1561,8 @@ class FEMSolver(Solver):
                 self.apply_hard_constraints(f)
             if self._is_implicit_rigid_projection_enabled:
                 # Coupling and hard constraints write positions after Newton, so the committed frame is projected too.
-                self.sim._coupler.project_fem_implicit_positions(f)
+                self.sim._coupler.project_fem_implicit_positions(f, is_committed=True)
+                self.sim._coupler.project_fem_implicit_surface(f)
 
     def substep_post_coupling_grad(self, f):
         if self.is_active:

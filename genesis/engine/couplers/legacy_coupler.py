@@ -1,3 +1,4 @@
+import math
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -5,18 +6,73 @@ import numpy as np
 import quadrants as qd
 
 import genesis as gs
-import genesis.utils.sdf as sdf
-
+from genesis.engine.bvh import AABB, LBVH, kernel_remap_leaf_faces
 from genesis.options.solvers import LegacyCouplerOptions
 from genesis.repr_base import RBC
 from genesis.utils import array_class
 from genesis.utils.array_class import LinksState
 from genesis.utils.geom import qd_inv_transform_by_trans_quat, qd_transform_by_trans_quat
+import genesis.utils.sdf as sdf
 
 if TYPE_CHECKING:
     from genesis.engine.simulator import Simulator
 
 CLAMPED_INV_DT = 50.0
+
+
+@qd.kernel
+def kernel_init_fem_rigid_surface_aabbs(
+    faces_idx: qd.types.ndarray(ndim=1),
+    surface_aabbs: qd.template(),
+    dyn_info: array_class.DynInfo,
+    surface_info: array_class.FEMRigidSurfaceInfo,
+):
+    for face_slot in range(faces_idx.shape[0]):
+        face_idx = faces_idx[face_slot]
+        geom_idx = dyn_info.faces.geom_idx[face_idx]
+        atlas_offset = surface_info.atlas_offsets[surface_info.surface_geom_slots[geom_idx]]
+        face = dyn_info.faces.verts_idx[face_idx]
+        v0 = dyn_info.verts.init_pos[face[0]] + atlas_offset
+        v1 = dyn_info.verts.init_pos[face[1]] + atlas_offset
+        v2 = dyn_info.verts.init_pos[face[2]] + atlas_offset
+        surface_aabbs[0, face_slot].min = qd.min(v0, v1, v2)
+        surface_aabbs[0, face_slot].max = qd.max(v0, v1, v2)
+
+
+@qd.kernel
+def kernel_reset_fem_rigid_surface_state(
+    envs_idx: qd.types.ndarray(ndim=1),
+    dyn_state: array_class.DynState,
+    surface_state: array_class.FEMRigidSurfaceState,
+    surface_info: array_class.FEMRigidSurfaceInfo,
+):
+    for env_slot, vertex_idx in qd.ndrange(envs_idx.shape[0], surface_state.corrections.shape[1]):
+        env_idx = envs_idx[env_slot]
+        surface_state.corrections[env_idx, vertex_idx] = qd.Vector.zero(gs.qd_float, 3)
+        surface_state.n_corrections[env_idx, vertex_idx] = 0
+    for env_slot in range(envs_idx.shape[0]):
+        env_idx = envs_idx[env_slot]
+        surface_state.is_active[env_idx] = False
+        surface_state.has_intersection[env_idx] = 0
+    for env_slot, surface_geom_slot in qd.ndrange(envs_idx.shape[0], surface_info.surface_geoms_idx.shape[0]):
+        env_idx = envs_idx[env_slot]
+        geom_idx = surface_info.surface_geoms_idx[surface_geom_slot]
+        surface_state.previous_geoms_pos[env_idx, surface_geom_slot] = dyn_state.geoms.pos[geom_idx, env_idx]
+        surface_state.previous_geoms_quat[env_idx, surface_geom_slot] = dyn_state.geoms.quat[geom_idx, env_idx]
+
+
+@qd.kernel
+def kernel_store_fem_rigid_surface_poses(
+    dyn_state: array_class.DynState,
+    surface_state: array_class.FEMRigidSurfaceState,
+    surface_info: array_class.FEMRigidSurfaceInfo,
+):
+    for env_idx, surface_geom_slot in qd.ndrange(
+        surface_state.previous_geoms_pos.shape[0], surface_info.surface_geoms_idx.shape[0]
+    ):
+        geom_idx = surface_info.surface_geoms_idx[surface_geom_slot]
+        surface_state.previous_geoms_pos[env_idx, surface_geom_slot] = dyn_state.geoms.pos[geom_idx, env_idx]
+        surface_state.previous_geoms_quat[env_idx, surface_geom_slot] = dyn_state.geoms.quat[geom_idx, env_idx]
 
 
 @qd.data_oriented
@@ -41,6 +97,9 @@ class LegacyCoupler(RBC):
         self.fem_solver = self.sim.fem_solver
         self.sf_solver = self.sim.sf_solver
         self.fem_projection_state = None
+        self.fem_rigid_surface_info = None
+        self.fem_rigid_surface_state = None
+        self.fem_rigid_surface_bvh = None
 
     def build(self) -> None:
         self._rigid_mpm = self.rigid_solver.is_active and self.mpm_solver.is_active and self.options.rigid_mpm
@@ -74,6 +133,85 @@ class LegacyCoupler(RBC):
                 has_contact=qd.field(dtype=gs.qd_int, shape=(self.fem_solver._B,)),
                 is_pcg_active_saved=qd.field(dtype=gs.qd_bool, shape=(self.fem_solver._B,)),
             )
+
+            projection_geoms = [
+                geom for geom in self.rigid_solver.geoms if geom.needs_coup and not geom.is_coup_reaction_enabled
+            ]
+            surface_geoms = [geom for geom in projection_geoms if geom.n_faces > 0]
+            if not surface_geoms:
+                gs.raise_exception("One-way implicit FEM coupling requires collider surface triangles.")
+
+            projection_geoms_idx = np.array([geom.idx for geom in projection_geoms], dtype=gs.np_int)
+            surface_geoms_idx = np.array([geom.idx for geom in surface_geoms], dtype=gs.np_int)
+            surface_geom_slots = np.full(self.rigid_solver.n_geoms, -1, dtype=gs.np_int)
+            surface_geom_slots[surface_geoms_idx] = np.arange(len(surface_geoms), dtype=gs.np_int)
+
+            geoms_lower = np.stack(tuple(geom.init_verts.min(axis=0) for geom in surface_geoms))
+            geoms_upper = np.stack(tuple(geom.init_verts.max(axis=0) for geom in surface_geoms))
+            max_geom_diagonal = np.linalg.norm(geoms_upper - geoms_lower, axis=1).max()
+            # Bounded atlas coordinates retain local-feature precision. Large geoms may overlap neighboring cells;
+            # leaf geom filtering preserves correctness and their coarse faces add little traversal work.
+            atlas_spacing = 4.0 * max(min(max_geom_diagonal, 1.0), 1.0e-3)
+            atlas_width = math.ceil(len(surface_geoms) ** (1.0 / 3.0))
+            atlas_slots = np.arange(len(surface_geoms), dtype=gs.np_int)
+            atlas_cells = np.empty((len(surface_geoms), 3), dtype=gs.np_float)
+            atlas_cells[:, 0] = atlas_slots % atlas_width
+            atlas_cells[:, 1] = atlas_slots // atlas_width % atlas_width
+            atlas_cells[:, 2] = atlas_slots // (atlas_width * atlas_width)
+            atlas_offsets = np.empty((len(surface_geoms), 3), dtype=gs.np_float)
+            atlas_offsets[:] = atlas_spacing * atlas_cells - 0.5 * (geoms_lower + geoms_upper)
+
+            projection_geoms_idx_qd = qd.field(dtype=gs.qd_int, shape=(len(projection_geoms_idx),))
+            projection_geoms_idx_qd.from_numpy(projection_geoms_idx)
+            surface_geom_slots_qd = qd.field(dtype=gs.qd_int, shape=(len(surface_geom_slots),))
+            surface_geom_slots_qd.from_numpy(surface_geom_slots)
+            surface_geoms_idx_qd = qd.field(dtype=gs.qd_int, shape=(len(surface_geoms_idx),))
+            surface_geoms_idx_qd.from_numpy(surface_geoms_idx)
+            atlas_offsets_qd = qd.Vector.field(3, dtype=gs.qd_float, shape=(len(atlas_offsets),))
+            atlas_offsets_qd.from_numpy(atlas_offsets)
+            self.fem_rigid_surface_info = array_class.FEMRigidSurfaceInfo(
+                projection_geoms_idx=projection_geoms_idx_qd,
+                surface_geom_slots=surface_geom_slots_qd,
+                surface_geoms_idx=surface_geoms_idx_qd,
+                atlas_offsets=atlas_offsets_qd,
+            )
+            self.fem_rigid_surface_state = array_class.FEMRigidSurfaceState(
+                corrections=qd.Vector.field(
+                    3,
+                    dtype=gs.qd_float,
+                    shape=(self.fem_solver._B, self.fem_solver.n_vertices),
+                ),
+                n_corrections=qd.field(
+                    dtype=gs.qd_int,
+                    shape=(self.fem_solver._B, self.fem_solver.n_vertices),
+                ),
+                is_active=qd.field(dtype=gs.qd_bool, shape=(self.fem_solver._B,)),
+                has_intersection=qd.field(dtype=gs.qd_int, shape=(self.fem_solver._B,)),
+                previous_geoms_pos=qd.Vector.field(
+                    3,
+                    dtype=gs.qd_float,
+                    shape=(self.fem_solver._B, len(surface_geoms)),
+                ),
+                previous_geoms_quat=qd.Vector.field(
+                    4,
+                    dtype=gs.qd_float,
+                    shape=(self.fem_solver._B, len(surface_geoms)),
+                ),
+            )
+
+            faces_idx = np.concatenate(
+                tuple(np.arange(geom.face_start, geom.face_end, dtype=gs.np_int) for geom in surface_geoms)
+            )
+            surface_aabb = AABB(n_batches=1, n_aabbs=len(faces_idx))
+            self.fem_rigid_surface_bvh = LBVH(surface_aabb, max_n_query_result_per_aabb=0)
+            kernel_init_fem_rigid_surface_aabbs(
+                faces_idx,
+                self.fem_rigid_surface_bvh.aabbs,
+                self.rigid_solver.dyn_info,
+                self.fem_rigid_surface_info,
+            )
+            self.fem_rigid_surface_bvh.build()
+            kernel_remap_leaf_faces(faces_idx, self.fem_rigid_surface_bvh.morton_codes)
 
         if (self._rigid_mpm or self._rigid_sph or self._rigid_pbd or self._rigid_fem) and any(
             geom.needs_coup for geom in self.rigid_solver.geoms
@@ -135,6 +273,16 @@ class LegacyCoupler(RBC):
             self.fem_projection_state.has_contact.fill(0)
             self.fem_projection_state.is_pcg_active_saved.fill(False)
 
+        if self.fem_rigid_surface_state is not None:
+            if envs_idx is None:
+                envs_idx = self.sim.scene._envs_idx
+            kernel_reset_fem_rigid_surface_state(
+                envs_idx,
+                self.rigid_solver.dyn_state,
+                self.fem_rigid_surface_state,
+                self.fem_rigid_surface_info,
+            )
+
         if self._rigid_mpm and self.mpm_solver.enable_CPIC:
             if envs_idx is None:
                 self.mpm_rigid_normal.fill(0)
@@ -176,8 +324,7 @@ class LegacyCoupler(RBC):
     ):
         for i_g in range(self.rigid_solver.n_geoms):
             if geoms_info.needs_coup[i_g] and (
-                not qd.static(is_imposed_boundary_projection_enabled)
-                or geoms_info.is_coup_reaction_enabled[i_g]
+                not qd.static(is_imposed_boundary_projection_enabled) or geoms_info.is_coup_reaction_enabled[i_g]
             ):
                 vel = self._func_collide_with_rigid_geom(
                     pos_world,
@@ -631,32 +778,58 @@ class LegacyCoupler(RBC):
         if is_initial:
             self.fem_solver.project_initial_pcg_positions(
                 f,
-                self.rigid_solver.n_geoms,
-                self.fem_projection_state,
+                self.fem_rigid_surface_bvh.nodes,
+                self.fem_rigid_surface_bvh.morton_codes,
                 self.rigid_solver.dyn_state,
+                self.fem_projection_state,
                 self.rigid_solver.dyn_info,
                 self.rigid_solver.rigid_info,
                 self.rigid_solver.collider._collider_info,
+                self.fem_rigid_surface_info,
             )
         else:
             self.fem_solver.one_projected_pcg_iter(
                 f,
-                self.rigid_solver.n_geoms,
-                self.fem_projection_state,
+                self.fem_rigid_surface_bvh.nodes,
+                self.fem_rigid_surface_bvh.morton_codes,
                 self.rigid_solver.dyn_state,
+                self.fem_projection_state,
                 self.rigid_solver.dyn_info,
                 self.rigid_solver.rigid_info,
                 self.rigid_solver.collider._collider_info,
+                self.fem_rigid_surface_info,
             )
 
-    def project_fem_implicit_positions(self, f):
+    def project_fem_implicit_positions(self, f, is_committed):
         self.fem_solver.project_implicit_positions(
             f,
-            self.rigid_solver.n_geoms,
+            self.fem_rigid_surface_bvh.nodes,
+            self.fem_rigid_surface_bvh.morton_codes,
             self.rigid_solver.dyn_state,
             self.rigid_solver.dyn_info,
             self.rigid_solver.rigid_info,
             self.rigid_solver.collider._collider_info,
+            self.fem_rigid_surface_info,
+            is_committed=is_committed,
+        )
+
+    def project_fem_implicit_surface(self, f):
+        self.fem_solver.project_implicit_surface(
+            f,
+            self.fem_rigid_surface_bvh.nodes,
+            self.fem_rigid_surface_bvh.morton_codes,
+            self.rigid_solver.dyn_state,
+            self.fem_rigid_surface_state,
+            self.rigid_solver.dyn_info,
+            self.rigid_solver.rigid_info,
+            self.rigid_solver.collider._collider_info,
+            self.fem_rigid_surface_info,
+            self.rigid_solver._errno,
+        )
+        kernel_store_fem_rigid_surface_poses(
+            self.rigid_solver.dyn_state,
+            self.fem_rigid_surface_state,
+            self.fem_rigid_surface_info,
         )
 
     @qd.kernel

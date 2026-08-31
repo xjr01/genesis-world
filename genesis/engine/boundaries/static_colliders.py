@@ -11,7 +11,7 @@ import trimesh
 import quadrants as qd
 
 import genesis as gs
-from genesis.engine.bvh import AABB, LBVH, STACK_SIZE
+from genesis.engine.bvh import AABB, LBVH, STACK_SIZE, point_aabb_distance_sqr
 import genesis.utils.geom as gu
 import genesis.utils.mesh as mesh_utils
 from genesis.utils.misc import get_assets_dir, get_gsd_cache_dir
@@ -441,17 +441,6 @@ def _query_sdf_local(
 
 
 @qd.func
-def _point_aabb_distance_sqr(pos, lower, upper):
-    delta = qd.Vector.zero(gs.qd_float, 3)
-    for axis in qd.static(range(3)):
-        if pos[axis] < lower[axis]:
-            delta[axis] = lower[axis] - pos[axis]
-        elif pos[axis] > upper[axis]:
-            delta[axis] = pos[axis] - upper[axis]
-    return delta.norm_sqr()
-
-
-@qd.func
 def _query_deformable_surface_bvh_local(env_idx, max_distance, pos, collider: qd.template()):
     closest_position = pos
     closest_normal = qd.Vector([1.0, 0.0, 0.0], dt=gs.qd_float)
@@ -468,7 +457,7 @@ def _query_deformable_surface_bvh_local(env_idx, max_distance, pos, collider: qd
         node_idx = node_stack[stack_idx]
         node = collider.surface_bvh.nodes[env_idx, node_idx]
         distance_tolerance = 8.0 * gs.EPS * qd.max(1.0, surface_distance_sqr)
-        node_distance_sqr = _point_aabb_distance_sqr(pos, node.bound.min, node.bound.max)
+        node_distance_sqr = point_aabb_distance_sqr(pos, node.bound.min, node.bound.max)
         if node_distance_sqr <= surface_distance_sqr + distance_tolerance:
             if node.left == -1:
                 sorted_leaf_idx = node_idx - (collider.n_surface_triangles - 1)
@@ -502,8 +491,8 @@ def _query_deformable_surface_bvh_local(env_idx, max_distance, pos, collider: qd
                 right = node.right
                 left_node = collider.surface_bvh.nodes[env_idx, left]
                 right_node = collider.surface_bvh.nodes[env_idx, right]
-                left_distance_sqr = _point_aabb_distance_sqr(pos, left_node.bound.min, left_node.bound.max)
-                right_distance_sqr = _point_aabb_distance_sqr(pos, right_node.bound.min, right_node.bound.max)
+                left_distance_sqr = point_aabb_distance_sqr(pos, left_node.bound.min, left_node.bound.max)
+                right_distance_sqr = point_aabb_distance_sqr(pos, right_node.bound.min, right_node.bound.max)
                 if left_distance_sqr < right_distance_sqr:
                     node_stack[stack_idx] = right
                     node_stack[stack_idx + 1] = left

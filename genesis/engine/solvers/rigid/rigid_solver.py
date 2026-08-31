@@ -1428,6 +1428,11 @@ class RigidSolver(KinematicSolver):
             gs.raise_exception("Invalid accelerations causing 'nan'. Please decrease Rigid simulation timestep.")
         if errno & array_class.ErrorCode.OVERFLOW_HIBERNATION_ISLANDS:
             gs.raise_exception("Contact island buffer overflow. Please increase RigidOptions 'max_collision_pairs'.")
+        if errno & array_class.ErrorCode.INVALID_FEM_RIGID_SURFACE_INTERSECTION:
+            gs.raise_exception(
+                "One-way implicit FEM surface projection did not resolve every rigid surface intersection. Please "
+                "decrease the simulation timestep."
+            )
 
     def _kernel_detect_collision(self):
         self.collider.clear()

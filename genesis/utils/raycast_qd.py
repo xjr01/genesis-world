@@ -1,7 +1,7 @@
 import quadrants as qd
 
 import genesis as gs
-from genesis.engine.bvh import STACK_SIZE
+from genesis.engine.bvh import STACK_SIZE, kernel_remap_leaf_faces
 from genesis.engine.solvers.rigid.rigid_solver import func_update_all_verts
 import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
@@ -12,7 +12,6 @@ from genesis.utils.triangle_qd import (
     ray_triangle_intersection,
     triangle_face_normal,
 )
-
 
 # FIXME: get_triangle_vertices/bvh_ray_cast/update_aabbs duplicate their visual counterparts below. The two paths
 # differ only in the leaf-data fetch (fixed/free verts split vs vverts_state_idx + FK fallback) and in the dataclass
@@ -256,19 +255,6 @@ def kernel_update_grouped_subset_aabbs(
     """Compacted-subset variant of kernel_update_grouped_aabbs; see update_subset_aabbs for faces_idx."""
     for i_t, i_a in qd.ndrange(aabb_state.aabbs.shape[0], faces_idx.shape[0]):
         update_face_aabb(i_t, i_a, faces_idx[i_a], batch_repr_env[i_t], dyn_state, aabb_state, dyn_info, rigid_config)
-
-
-@qd.kernel
-def kernel_remap_leaf_faces(faces_idx: qd.types.ndarray(ndim=1), bvh_morton_codes: qd.template()):
-    """Rewrite the sorted leaf payloads of a compacted-subset BVH from subset slots to global face indices.
-
-    Run once after each such build (build() recomputes the payloads); every traversal then reads global faces
-    directly, with no per-leaf indirection and no knowledge of the subset. A zero-copy view write would be preferred
-    for a pure accessor like this, but quadrants' DLPack export does not support u32 fields, so the kernel is the
-    only implementation.
-    """
-    for i_b, i in qd.ndrange(bvh_morton_codes.shape[0], bvh_morton_codes.shape[1]):
-        bvh_morton_codes[i_b, i][1] = qd.cast(faces_idx[qd.cast(bvh_morton_codes[i_b, i][1], gs.qd_int)], qd.u32)
 
 
 # =========================================== Visual Mesh Raycasting ===========================================

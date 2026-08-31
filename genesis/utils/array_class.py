@@ -1,11 +1,13 @@
 import dataclasses
-import math
 from enum import IntEnum
+import math
 
-import quadrants as qd
-from typing_extensions import dataclass_transform  # Made it into standard lib from Python 3.12
 import numpy as np
 import torch
+
+from typing_extensions import dataclass_transform  # Made it into standard lib from Python 3.12
+
+import quadrants as qd
 
 import genesis as gs
 
@@ -91,6 +93,7 @@ class ErrorCode(IntEnum):
     INVALID_IPBSTF_STATE_NAN = 0b00000000000000000000000010000000
     INVALID_PBSTF_STATE_NAN = 0b00000000000000000000000100000000
     INVALID_PBSTF_DEFORMABLE_COLLIDER = 0b00000000000000000000001000000000
+    INVALID_FEM_RIGID_SURFACE_INTERSECTION = 0b00000000000000000000010000000000
 
 
 # =========================================== RigidInfo ===========================================
@@ -2353,6 +2356,24 @@ class FEMProjectionState:
     has_changed: qd.Tensor
     has_contact: qd.Tensor
     is_pcg_active_saved: qd.Tensor
+
+
+@dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
+class FEMRigidSurfaceInfo:
+    projection_geoms_idx: qd.Tensor
+    surface_geom_slots: qd.Tensor
+    surface_geoms_idx: qd.Tensor
+    atlas_offsets: qd.Tensor
+
+
+@dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
+class FEMRigidSurfaceState:
+    corrections: qd.Tensor
+    n_corrections: qd.Tensor
+    is_active: qd.Tensor
+    has_intersection: qd.Tensor
+    previous_geoms_pos: qd.Tensor
+    previous_geoms_quat: qd.Tensor
 
 
 # =========================================== DynInfo and DynState ===========================================

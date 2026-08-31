@@ -563,6 +563,54 @@ def test_implicit_sap_coupler_collide_sphere_box(show_viewer):
         assert_allclose(entity_center[2], init_height, tol=5e-3)
 
 
+@pytest.mark.required
+@pytest.mark.parametrize("n_envs", [0, 2])
+def test_implicit_one_way_rigid_surface_projection(n_envs, show_viewer):
+    vertices, elements = element_utils.create_tetrahedral_grid(
+        lower=(-0.16, -0.16, -0.16),
+        upper=(0.0, 0.0, 0.0),
+        resolution=(1, 1, 1),
+    )
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            gravity=(0.0, 0.0, 0.0),
+        ),
+        fem_options=gs.options.FEMOptions(
+            use_implicit_solver=True,
+        ),
+        coupler_options=gs.options.LegacyCouplerOptions(),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(0.5, 0.5, 0.4),
+            camera_lookat=(-0.05, -0.05, -0.05),
+        ),
+        show_viewer=show_viewer,
+    )
+    fem = scene.add_entity(
+        morph=gs.morphs.TetrahedralMesh(
+            vertices=vertices,
+            elements=elements,
+        ),
+        material=gs.materials.FEM.Elastic(),
+    )
+    rigid = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(0.04, -0.08, -0.08),
+            size=(0.02, 0.24, 0.24),
+            fixed=True,
+        ),
+        material=gs.materials.Rigid(
+            coup_friction=0.0,
+            is_coup_reaction_enabled=False,
+        ),
+    )
+    scene.build(n_envs=n_envs)
+
+    rigid.set_pos((-0.04, -0.08, -0.08))
+    scene.step()
+
+    assert (fem.get_state().pos[..., 0] < -0.05).all()
+
+
 # This test cannot be flagged as required because it takes 400s to run on CPU.
 # @pytest.mark.required
 @pytest.mark.parametrize("precision", ["64"])
