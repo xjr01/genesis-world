@@ -20,7 +20,6 @@ from examples.teapot.pbstf_surface_tension import (
     CASES,
     build_scene,
     case_settings,
-    draw_case_colliders,
     get_wipe_settings,
     teapot_pose,
     update_mop_case,
@@ -811,9 +810,11 @@ def test_case_settings():
     assert sweep_settings.mop is None
     assert sweep_settings.sweep is sweep
     assert mop is not sweep
-    assert mop._replace(mop_manipulator=None) == sweep
+    assert mop._replace(collider_entity_name=sweep.collider_entity_name, mop_manipulator=None) == sweep
     assert mop.mop_manipulator is not None
     assert sweep.mop_manipulator is None
+    assert mop.collider_entity_name == "sponge"
+    assert sweep.collider_entity_name == "sweep_collider"
     assert isinstance(mop_settings.static_colliders[1], gs.options.PBSTFAbsorbentBoxStaticColliderOptions)
     assert type(sweep_settings.static_colliders[1]) is gs.options.PBSTFBoxStaticColliderOptions
     assert_equal(mop_settings.static_colliders[1].lower, sweep_settings.static_colliders[1].lower)
@@ -822,7 +823,7 @@ def test_case_settings():
     assert_equal(mop_settings.static_colliders[1].quat, sweep_settings.static_colliders[1].quat)
     assert_equal(mop_settings.static_colliders[1].absorption_rate, 2000.0)
     assert_equal(mop_settings.static_colliders[1].absorption_capacity_fraction, 1.0)
-    assert mop_settings.static_colliders[1].fem_entity_name == mop.mop_manipulator.sponge_entity_name
+    assert mop_settings.static_colliders[1].fem_entity_name == mop.collider_entity_name
     assert mop_settings.static_colliders[1].sdf_res is None
     assert mop.mop_manipulator.asset == "urdf/panda_bullet/panda.urdf"
     assert mop.mop_manipulator.is_visible
@@ -970,9 +971,10 @@ def test_mop_sponge_full_simulation_and_collision(n_envs, show_viewer):
     manipulator = settings.mop_manipulator
     sponge_grid_resolution = manipulator.sponge_grid_resolution
     manipulator_entity = scene.get_entity(name=manipulator.entity_name)
-    sponge_entity = scene.get_entity(name=manipulator.sponge_entity_name)
+    sponge_entity = scene.get_entity(name=settings.collider_entity_name)
     table_entity = scene.get_entity(name=settings.table_entity_name)
     assert sponge_entity.surface.vis_mode == "tetrahedral"
+    assert sponge_entity.surface.opacity is None
     assert isinstance(sponge_entity.morph, gs.morphs.TetrahedralMesh)
     assert sponge_entity.n_vertices == math.prod(resolution + 1 for resolution in sponge_grid_resolution)
     assert sponge_entity.n_elements == 6 * math.prod(sponge_grid_resolution)
@@ -1014,7 +1016,7 @@ def test_mop_sponge_full_simulation_and_collision(n_envs, show_viewer):
     )
     assert all(geom.get_trimesh().is_watertight for link in collider_links for geom in link.geoms)
     assert any(link.vgeoms for link in manipulator_entity.links) == manipulator.is_visible
-    assert not any(link.vgeoms for link in table_entity.links)
+    assert any(link.vgeoms for link in table_entity.links)
     assert_allclose(scene.fem_options.gravity, (0.0, -9.8, 0.0), atol=1e-12)
     assert_equal(sponge_entity.material.rho, manipulator.sponge_density)
     sponge_x = sponge_init_positions[:, 0]
@@ -1396,11 +1398,16 @@ def test_pbstf_cpp_drop_hits_cone_tip(show_viewer):
     """C++ buildCase15 must collide with the analytic cone and rebound without penetration."""
     scene, (drop,) = build_scene(case=CASE_CONE, scale=10, show_viewer=show_viewer)
     solver = scene.pbstf_solver
+    cone_entity = scene.get_entity(name="cone_collider")
     hit_cone = False
     rebounded = False
 
     assert solver._n_static_colliders == 1
     assert isinstance(solver._static_colliders[0], ConeStaticCollider)
+    assert isinstance(cone_entity.morph, gs.morphs.MeshSet)
+    assert cone_entity.surface.opacity is None
+    assert any(link.vgeoms for link in cone_entity.links)
+    assert_allclose(cone_entity.get_pos(), solver._static_colliders[0].center, atol=1e-6)
     for _ in range(20):
         scene.step()
         positions = drop.get_particles_pos().cpu().numpy()
@@ -1433,10 +1440,13 @@ def test_sweep_box_pushes_water(show_viewer):
     assert type(settings.static_colliders[1]) is gs.options.PBSTFBoxStaticColliderOptions
 
     scene, (liquid,) = build_scene(case=CASE_SWEEP, show_viewer=show_viewer)
-    sweep_debug_object = draw_case_colliders(scene, CASE_SWEEP)
-    sweep_debug_transform = geom_utils.trans_quat_to_T(np.array(sweep.start_pos), np.array(sweep.quat))
-    scene.update_debug_objects((sweep_debug_object,), (sweep_debug_transform,))
+    sweep_entity = scene.get_entity(name=sweep.collider_entity_name)
+    table_entity = scene.get_entity(name=sweep.table_entity_name)
     positions_initial = tensor_to_array(liquid.get_particles_pos())
+    assert isinstance(sweep_entity.morph, gs.morphs.MeshSet)
+    assert sweep_entity.surface.opacity is None
+    assert any(link.vgeoms for link in sweep_entity.links)
+    assert any(link.vgeoms for link in table_entity.links)
     assert liquid.n_particles == 840
     assert liquid.material.collider_friction == 0.5
     with pytest.raises(gs.GenesisException, match="not absorbent"):
@@ -1446,7 +1456,7 @@ def test_sweep_box_pushes_water(show_viewer):
         scene.step()
     for step_idx in range(70):
         time = sweep.settle_time + sweep.wipe_time * step_idx / 69
-        update_wipe_case(scene.pbstf_solver, time, sweep)
+        update_wipe_case(scene.pbstf_solver, sweep_entity, time, sweep)
         scene.step()
 
     positions = tensor_to_array(liquid.get_particles_pos())
@@ -1458,6 +1468,7 @@ def test_sweep_box_pushes_water(show_viewer):
     assert displacement_x.mean() > 3.0
     assert (displacement_x > 0.1).mean() > 0.99
     assert is_ahead_of_initial_water.mean() > 2.0 / 3.0
+    assert_allclose(sweep_entity.get_pos(), sweep.end_pos, atol=1e-6)
 
 
 @pytest.mark.required

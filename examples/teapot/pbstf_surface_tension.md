@@ -143,9 +143,10 @@ Both cases use these `WipeSettings` values:
 | Field | Default | Meaning |
 | --- | --- | --- |
 | `collider_idx` | `1` | Moving sweep-box or sponge index; the table is collider index 0. |
+| `collider_entity_name` | `"sponge"` / `"sweep_collider"` | Ordinary visual entity corresponding to the moving collider. |
 | `collider_lower` | `(-0.6, 0.02, -1.2)` | Collider rest-space lower corner. |
 | `collider_upper` | `(0.6, 0.85, 1.2)` | Collider rest-space upper corner. |
-| `table_entity_name` | `"wipe_table"` | Invisible rigid table proxy used by the FEM sponge collision projection. |
+| `table_entity_name` | `"wipe_table"` | Rendered rigid table entity, also used by the FEM sponge collision projection. |
 | `table_pos` | `(0.0, -0.25, 0.0)` | Table world position. |
 | `table_size` | `(12.0, 0.5, 8.0)` | Table dimensions. Its top surface is at world Y = 0. |
 | `liquid_lower` | `(-2.5, 0.05, -0.7)` | Initial liquid lower corner. |
@@ -158,8 +159,8 @@ Both cases use these `WipeSettings` values:
 
 `wipe_pose()` keeps the active collider at `start_pos` through `settle_time`, linearly interpolates to `end_pos`
 during `wipe_time`, and keeps it at `end_pos` afterward. With the default `dt`, settling lasts 100 steps and the
-stroke ends at step 600. `update_wipe_case()` moves the sweep box. `update_mop_case()` coordinates the Franka,
-sponge simulation, deformable collider geometry, and the same trajectory.
+stroke ends at step 600. `update_wipe_case()` moves the analytic sweep box and its ordinary visual entity together.
+`update_mop_case()` coordinates the Franka, sponge simulation, deformable collider geometry, and the same trajectory.
 
 ### Mop gripper and sponge phases
 
@@ -179,9 +180,9 @@ No sponge vertex is attached to a rigid link. Every vertex is instead projected 
 The projection removes only inward normal motion, so the contacts are frictionless and transfer no reaction force to
 the kinematically driven robot or fixed table.
 
-The Panda loads collision geometry from every authored link. An invisible fixed rigid box duplicates the table only
-for FEM collision queries. Both use one-way rigid-to-FEM coupling. They are separate from the two PBSTF static
-colliders, so the liquid still sees only the analytic table and the absorbent sponge surface.
+The Panda loads collision geometry from every authored link. The rendered fixed rigid table also serves FEM collision
+queries. Both use one-way rigid-to-FEM coupling. They are separate from the two PBSTF static colliders, so the liquid
+still sees only the analytic table and the absorbent sponge surface.
 
 The sponge is authored from the refined tetrahedral boundary, so its rendered triangles are the same triangles as the
 FEM volume boundary. `update_mop_case()` synchronizes those boundary vertices and the embedded absorption voxels on

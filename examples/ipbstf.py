@@ -16,7 +16,6 @@ if __package__:
         CASES as PBSTF_CASES,
         add_case_entities,
         case_settings,
-        draw_case_colliders,
         start_viewer_recording,
         stop_viewer,
     )
@@ -32,7 +31,6 @@ else:
         CASES as PBSTF_CASES,
         add_case_entities,
         case_settings,
-        draw_case_colliders,
         start_viewer_recording,
         stop_viewer,
     )
@@ -206,8 +204,6 @@ def build_scene(
             entity.set_particles_vel(velocity)
     if settings.teapot is not None:
         initialize_teapot_manipulator(scene, settings.teapot)
-    if show_viewer:
-        draw_case_colliders(scene, case)
 
     return scene, tuple(entity for entity, _ in entities_and_velocities)
 
