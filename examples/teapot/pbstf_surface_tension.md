@@ -27,7 +27,7 @@ The command-line options are:
 | `--record` | Opens the viewer, records it, and prompts for an output path when the run ends. |
 
 Higher `scale` gives smaller particles and more spatial detail, with particle count, memory, and runtime generally
-growing approximately cubically. The `teapot` case requires `scale >= 20` so its initial liquid sampling remains dense
+growing approximately cubically. The `teapot` case requires `scale >= 300` so its initial liquid sampling remains dense
 enough. The motion schedules use simulated seconds, so changing `dt` changes how many steps each motion phase takes.
 Changing `steps` changes the total simulated duration without changing the schedule itself.
 
@@ -38,15 +38,20 @@ values are configured in [`fluid_helper.py`](fluid_helper.py).
 ## Shared solver defaults
 
 `build_scene()` converts `scale` to `particle_size = 2 / scale` and uses a topology rebuild interval of 10 steps.
+World geometry and prescribed linear speeds use a uniform length factor `s = 1/15`, anchored by the Franka model at
+its authored scale `1`. The default particle scale increases by 15 so the particle count and relative resolution stay
+constant. At fixed time step, density compliance scales as `1/s^2`, surface-tension compliance as `s^2`, and distance
+and collider-adhesion compliance stay constant. Rest density, viscosity, friction, timing, gravity, iteration counts,
+and discrete resolutions retain their configured values.
 
 | Setting | `teapot` | `sweep` and `mop` |
 | --- | ---: | ---: |
-| `scale` | `20` | `20` |
-| `particle_size` | `0.1` | `0.1` |
+| `scale` | `300` | `300` |
+| `particle_size` | `1 / 150` | `1 / 150` |
 | `dt` | `0.01` | `0.01` |
 | gravity | `(0.0, -9.8, 0.0)` | `(0.0, -9.8, 0.0)` |
-| lower bound | `(-20.0, -6.04186, -20.0)` | `(-6.0, -1.0, -4.0)` |
-| upper bound | `(20.0, 15.0, 20.0)` | `(6.0, 4.0, 4.0)` |
+| lower bound | `(-4/3, -6.04186/15, -4/3)` | `(-0.4, -1/15, -4/15)` |
+| upper bound | `(4/3, 1.0, 4/3)` | `(0.4, 4/15, 4/15)` |
 | solver iterations | `5` | `10` |
 | surface-neighbor capacity | `128` | `128` |
 | local-mesh-neighbor capacity | `64` | `64` |
@@ -60,8 +65,8 @@ The liquid material parameters are:
 | --- | ---: | ---: |
 | sampler | `regular` | `regular` |
 | rest density | `1000.0` | `1000.0` |
-| density compliance | `150.0` | `150.0` |
-| surface-tension compliance | `3.0` | `1.0` |
+| density compliance | `33750.0` | `33750.0` |
+| surface-tension compliance | `3 / 225` | `1 / 225` |
 | surface-distance compliance | `40.0` | `40.0` |
 | interior-distance compliance | `180.0` | `180.0` |
 | surface viscosity | `0.2` | `0.5` |
@@ -86,12 +91,12 @@ These values come from `create_teapot_settings()` in `fluid_helper.py`:
 | Field | Default | Effect |
 | --- | --- | --- |
 | `asset` | `meshes/utah_teapot_modified.obj` | Visual mesh, cavity sampling mesh, and collider source. |
-| `mesh_scale` | `2.25` | Uniformly scales the teapot and its local grasp position. |
-| `offset` | `(0.0, -3.79, 0.0)` | Initial world position. |
+| `mesh_scale` | `0.15` | Uniformly scales the teapot and its local grasp position. |
+| `offset` | `(0.0, -3.79/15, 0.0)` | Initial world position. |
 | `quat` | `(sqrt(0.5), 0.0, -sqrt(0.5), 0.0)` | Initial world orientation. |
 | collider `sdf_res` | `150` | Signed distance field resolution for the teapot wall. |
-| `particles_seed` | `(0.0, -3.15, 0.0)` | Seed point used to find the interior liquid cavity. |
-| `particles_max_height` | `0.7` | Highest world-Y level filled with liquid. |
+| `particles_seed` | `(0.0, -0.21, 0.0)` | Seed point used to find the interior liquid cavity. |
+| `particles_max_height` | `0.7/15` | Highest world-Y level filled with liquid. |
 | `particles_vel` | `(0.0, 0.0, 0.0)` | Initial liquid velocity. |
 
 The cavity sampler keeps half a particle diameter of clearance from the wall. Raising `particles_max_height` adds
@@ -127,6 +132,9 @@ the moving collider supplies the intended wall velocity to the fluid.
 - End-effector `tool_center_point` used by inverse kinematics.
 - Viewer `camera_pos` and `camera_lookat`.
 
+The KUKA scale is `0.8` and the Shadow Hand scale is `14/15`, preserving their authored proportions when the scene is
+uniformly reduced to the real-world scale set by the Franka model.
+
 Use [`pbstf_teapot_grasp_editor.py`](pbstf_teapot_grasp_editor.py) when authoring or checking the grasp transform. The
 arm and hand have collision disabled in this demo; the PBSTF mesh static collider is the fluid boundary.
 
@@ -143,16 +151,16 @@ Both cases use these `WipeSettings` values:
 | Field | Default | Meaning |
 | --- | --- | --- |
 | `collider_idx` | `1` | Moving sweep-box or sponge index; the table is collider index 0. |
-| `collider_entity_name` | `"sponge"` / `"sweep_collider"` | Ordinary visual entity corresponding to the moving collider. |
-| `collider_lower` | `(-0.6, 0.02, -1.2)` | Collider rest-space lower corner. |
-| `collider_upper` | `(0.6, 0.85, 1.2)` | Collider rest-space upper corner. |
-| `table_entity_name` | `"wipe_table"` | Rendered rigid table entity, also used by the FEM sponge collision projection. |
-| `table_pos` | `(0.0, -0.25, 0.0)` | Table world position. |
-| `table_size` | `(12.0, 0.5, 8.0)` | Table dimensions. Its top surface is at world Y = 0. |
-| `liquid_lower` | `(-2.5, 0.05, -0.7)` | Initial liquid lower corner. |
-| `liquid_upper` | `(-0.5, 0.35, 0.7)` | Initial liquid upper corner. |
-| `start_pos` | `(-3.5, 0.0, 0.0)` | Moving box position before the stroke. |
-| `end_pos` | `(3.5, 0.0, 0.0)` | Moving box position after the stroke. |
+| `collider_entity_name` | `"sponge"` / `"sweep_collider"` | Visual entity for the moving collider. |
+| `collider_lower` | `(-0.04, 0.02/15, -0.08)` | Collider rest-space lower corner. |
+| `collider_upper` | `(0.04, 0.85/15, 0.08)` | Collider rest-space upper corner. |
+| `table_entity_name` | `"wipe_table"` | Rendered table, also used for FEM sponge collision. |
+| `table_pos` | `(0.0, -1/60, 0.0)` | Table world position. |
+| `table_size` | `(0.8, 1/30, 8/15)` | Table dimensions. Its top surface is at world Y = 0. |
+| `liquid_lower` | `(-1/6, 1/300, -7/150)` | Initial liquid lower corner. |
+| `liquid_upper` | `(-1/30, 7/300, 7/150)` | Initial liquid upper corner. |
+| `start_pos` | `(-7/30, 0.0, 0.0)` | Moving box position before the stroke. |
+| `end_pos` | `(7/30, 0.0, 0.0)` | Moving box position after the stroke. |
 | `quat` | `(1.0, 0.0, 0.0, 0.0)` | Moving box and table orientation. |
 | `settle_time` | `1.0 s` | Time allowed for the initial liquid to settle. |
 | `wipe_time` | `5.0 s` | Duration of the linear wiping stroke. |
@@ -164,15 +172,15 @@ stroke ends at step 600. `update_wipe_case()` moves the analytic sweep box and i
 
 ### Mop gripper and sponge phases
 
-The mop uses `urdf/panda_bullet/panda.urdf` at scale `15`. The seven arm joints come directly from inverse kinematics
-(IK), and the two finger joints are authored positions. The tool center targets the sponge top center with the finger
-opening aligned to world X, keeping the gripper above the liquid region.
+The mop uses `urdf/panda_bullet/panda.urdf` at its authored scale `1`. The seven arm joints come directly from inverse
+kinematics (IK), and the two finger joints are authored positions. The tool center targets the sponge top center with
+the finger opening aligned to world X, keeping the gripper above the liquid region.
 
 | Simulated time | Sponge and gripper behavior |
 | --- | --- |
-| `0.0` to `1.0 s` | Fingers close from `0.60` to `0.40` while gravity and rigid point collisions drive the sponge deformation. |
+| `0.0` to `1.0 s` | Fingers close from `0.04` to `0.4/15` as gravity and rigid contact deform the sponge. |
 | `1.0` to `6.0 s` | IK moves the hand along the wiping stroke while the sponge remains fully simulated. |
-| after `6.0 s` | The hand holds the end pose while the sponge continues responding to elasticity, gravity, and contact. |
+| after `6.0 s` | The hand holds the end pose while the sponge continues its elastic and contact response. |
 
 The FEM sponge uses a regular tetrahedral grid and a linear-corotated elastic material with `E=1e4`, `nu=0.4`, and
 `rho=30`. Earth gravity remains `(0.0, -9.8, 0.0)`; the low foam density gives the sponge a light physical weight.
@@ -248,8 +256,9 @@ total_capacity = floor(
 )
 ```
 
-The default box has volume `1.2 * 0.83 * 2.4 = 2.3904`. Its fraction of `1.0` makes that full volume available before
-conversion to particle slots. The exact particle count depends on PBSTF mass calibration and particle resolution.
+The default box has volume `0.08 * (0.83 / 15) * 0.16 = 0.0007082667`. Its fraction of `1.0` makes that full volume
+available before conversion to particle slots. The exact particle count depends on PBSTF mass calibration and particle
+resolution.
 
 - Raise the fraction to absorb more liquid and delay saturation.
 - Lower the fraction to saturate sooner and make the box push additional water sooner.
@@ -263,7 +272,7 @@ The box is divided automatically using the PBSTF support radius:
 grid_res = ceil((upper - lower) / support_radius)
 ```
 
-At the default `scale=20`, `particle_size=0.1` and `support_radius=0.3`. The default mop box therefore uses a
+At the default `scale=300`, `particle_size=1/150` and `support_radius=0.02`. The default mop box therefore uses a
 `(4, 3, 8)` grid. Integer slot counts are distributed uniformly over these 96 voxels while preserving the exact total
 capacity.
 

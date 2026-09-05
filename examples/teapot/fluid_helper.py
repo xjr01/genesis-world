@@ -55,8 +55,8 @@ def create_teapot_settings():
     manipulator = TeapotManipulatorSettings(
         kuka_asset="urdf/kuka_iiwa/model.urdf",
         kuka_entity_name="teapot_kuka",
-        kuka_scale=12.0,
-        kuka_base_pos=(-3.165, -7.8945, -10.5525),
+        kuka_scale=0.8,
+        kuka_base_pos=(-0.211, -0.5263, -0.7035),
         kuka_base_quat=(math.sqrt(0.5), -math.sqrt(0.5), 0.0, 0.0),
         kuka_end_effector_link="lbr_iiwa_link_7",
         kuka_qpos=(
@@ -70,8 +70,8 @@ def create_teapot_settings():
         ),
         hand_asset="urdf/shadow_hand/shadow_hand.urdf",
         hand_entity_name="teapot_shadow_hand",
-        hand_scale=14.0,
-        hand_mount_pos=(0.0, 0.0, 0.54),
+        hand_scale=14.0 / 15.0,
+        hand_mount_pos=(0.0, 0.0, 0.036),
         hand_mount_quat=(1.0, 0.0, 0.0, 0.0),
         hand_qpos=(
             0.0000012000000424450263,
@@ -101,12 +101,12 @@ def create_teapot_settings():
         ),
         grasp_pos=(-2.6035435064512424, 1.692335, 0.2395262797782305),
         grasp_quat=(0.5957038027506156, 0.38096847558355235, 0.38096847558355235, 0.5957038027506156),
-        tool_center_point=(0.0, -0.525, 5.5275),
-        camera_pos=(30.0, 13.0, -1.5),
-        camera_lookat=(-1.5, -2.0, -4.0),
+        tool_center_point=(0.0, -0.035, 0.3685),
+        camera_pos=(2.0, 13.0 / 15.0, -0.1),
+        camera_lookat=(-0.1, -2.0 / 15.0, -4.0 / 15.0),
     )
-    mesh_scale = 2.25
-    offset = (0.0, -3.79, 0.0)
+    mesh_scale = 0.15
+    offset = (0.0, -3.79 / 15.0, 0.0)
     quat = (math.sqrt(0.5), 0.0, -math.sqrt(0.5), 0.0)
     turning_axis_pos = tuple(
         geom_utils.transform_by_trans_quat(
@@ -122,8 +122,8 @@ def create_teapot_settings():
         offset=offset,
         quat=quat,
         turning_axis_pos=turning_axis_pos,
-        particles_seed=(0.0, -3.15, 0.0),
-        particles_max_height=0.7,
+        particles_seed=(0.0, -0.21, 0.0),
+        particles_max_height=0.7 / 15.0,
         particles_vel=(0.0, 0.0, 0.0),
         manipulator=manipulator,
     )

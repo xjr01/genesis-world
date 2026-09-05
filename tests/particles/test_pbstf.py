@@ -719,7 +719,7 @@ def test_static_collider_adhesion_and_friction(asset_tmp_path, n_envs, show_view
 @pytest.mark.parametrize("backend", [gs.cpu])
 def test_teapot_initial_particles_pose_and_case_time_steps():
     teapot_settings = case_settings(CASE_TEAPOT).teapot
-    particle_size = 0.1
+    particle_size = 1.0 / 150.0
     teapot_mesh = mesh_utils.load_mesh(os.path.join(gs.utils.get_assets_dir(), teapot_settings.asset)).copy()
     teapot_mesh.merge_vertices(merge_tex=True, merge_norm=True)
     teapot_mesh.vertices = geom_utils.transform_by_quat(
@@ -736,19 +736,24 @@ def test_teapot_initial_particles_pose_and_case_time_steps():
     signed_distance, *_ = igl.signed_distance(particles, teapot_mesh.vertices, teapot_mesh.faces)
 
     assert teapot_settings.asset == "meshes/utah_teapot_modified.obj"
+    assert_equal(teapot_settings.mesh_scale, 0.15)
+    assert_equal(teapot_settings.manipulator.kuka_scale, 0.8)
+    assert_equal(teapot_settings.manipulator.hand_scale, 14.0 / 15.0)
+    assert_equal(teapot_settings.manipulator.hand_mount_pos, (0.0, 0.0, 0.036))
+    assert_equal(teapot_settings.manipulator.tool_center_point, (0.0, -0.035, 0.3685))
     assert teapot_mesh.is_watertight
     assert_equal(len(particles), 188716)
     assert (signed_distance >= 0.5 * particle_size).all()
-    assert particles[:, 1].min() < -3.2
+    assert particles[:, 1].min() < -3.2 / 15.0
     max_height_steps = math.floor(
         (teapot_settings.particles_max_height - teapot_settings.particles_seed[1]) / particle_size
     )
     expected_max_height = teapot_settings.particles_seed[1] + max_height_steps * particle_size
     assert_allclose(particles[:, 1].max(), expected_max_height, atol=1e-12)
-    assert particles[:, 2].max() > 5.0
+    assert particles[:, 2].max() > 1.0 / 3.0
     for case in CASES:
         settings = case_settings(case)
-        expected_scale = 20 if case in (CASE_MOP, CASE_SWEEP, CASE_TAP, CASE_TEAPOT) else 10
+        expected_scale = 300 if case in (CASE_MOP, CASE_SWEEP, CASE_TAP, CASE_TEAPOT) else 150
         expected_dt = 0.01 if case in (CASE_MOP, CASE_SWEEP, CASE_TEAPOT) else 1.0 / 30.0
         assert_equal(settings.scale, expected_scale)
         assert_equal(settings.dt, expected_dt)
@@ -780,11 +785,11 @@ def test_teapot_initial_particles_pose_and_case_time_steps():
 def test_case_settings():
     settings = case_settings(CASE_TAP)
     assert CASE_TAP in CASES
-    assert settings.scale == 20
+    assert settings.scale == 300
     assert_equal(settings.dt, 1.0 / 30.0)
-    assert_equal(settings.gravity, (0.0, -9.8, 0.0))
-    assert_equal(settings.lower_bound, (-500.0, -50.0, -500.0))
-    assert_equal(settings.upper_bound, (500.0, 500.0, 500.0))
+    assert_equal(settings.gravity, (0.0, -1.0, 0.0))
+    assert_equal(settings.lower_bound, (-100.0 / 3.0, -4.0 / 3.0, -100.0 / 3.0))
+    assert_equal(settings.upper_bound, (100.0 / 3.0, 100.0 / 3.0, 100.0 / 3.0))
     assert settings.static_colliders == ()
     assert settings.max_surface_neighbors == 768
     assert settings.max_localmesh_neighbors == 64
@@ -792,10 +797,10 @@ def test_case_settings():
     assert settings.steps == 2000
     assert settings.emitter is not None
     assert settings.emitter.max_particles == 200000
-    assert_equal(settings.emitter.pos, (0.0, 5.0, 0.0))
+    assert_equal(settings.emitter.pos, (0.0, 1.0 / 3.0, 0.0))
     assert_equal(settings.emitter.direction, (0.0, -1.0, 0.0))
-    assert_equal(settings.emitter.droplet_size, 2.0)
-    assert_equal(settings.emitter.generation_speed, 3.0)
+    assert_equal(settings.emitter.droplet_size, 2.0 / 15.0)
+    assert_equal(settings.emitter.generation_speed, 1.0 / 15.0)
     assert_equal(settings.emitter.initial_speed, 0.0)
 
     mop_settings = case_settings(CASE_MOP)
@@ -829,11 +834,11 @@ def test_case_settings():
     assert mop.mop_manipulator.is_visible
     assert_equal(mop.mop_manipulator.sponge_grid_resolution, (15, 10, 30))
     assert_equal(mop.mop_manipulator.sponge_density, 30.0)
-    assert_equal(mop.mop_manipulator.scale, 15.0)
-    assert_equal(mop.mop_manipulator.finger_open_qpos, 0.6)
+    assert_equal(mop.mop_manipulator.scale, 1.0)
+    assert_equal(mop.mop_manipulator.finger_open_qpos, 0.04)
     assert mop.table_entity_name == "wipe_table"
-    assert_equal(mop.mop_manipulator.tool_center_point, (0.0, 0.0, 3.02))
-    assert_equal(mop.mop_manipulator.finger_closed_qpos, 0.4)
+    assert_equal(mop.mop_manipulator.tool_center_point, (0.0, 0.0, 3.02 / 15.0))
+    assert_equal(mop.mop_manipulator.finger_closed_qpos, 0.4 / 15.0)
     for time in (0.0, mop.settle_time, mop.settle_time + 0.5 * mop.wipe_time, 20.0):
         assert_equal(wipe_pose(time, mop), wipe_pose(time, sweep))
 
@@ -962,7 +967,7 @@ def test_teapot_manipulator_tracks_grasp_pose(show_viewer):
 def test_mop_sponge_full_simulation_and_collision(n_envs, show_viewer):
     scene, (liquid_entity,) = build_scene(
         case=CASE_MOP,
-        scale=5,
+        scale=75,
         show_viewer=show_viewer,
         dt=0.05,
         n_envs=n_envs,
@@ -1018,7 +1023,13 @@ def test_mop_sponge_full_simulation_and_collision(n_envs, show_viewer):
     assert any(link.vgeoms for link in manipulator_entity.links) == manipulator.is_visible
     assert any(link.vgeoms for link in table_entity.links)
     assert_allclose(scene.fem_options.gravity, (0.0, -9.8, 0.0), atol=1e-12)
+    assert_equal(sponge_entity.material.E, 1.0e4)
     assert_equal(sponge_entity.material.rho, manipulator.sponge_density)
+    assert_equal(liquid_entity.material.density_compliance, 33750.0)
+    assert_equal(liquid_entity.material.surface_tension_compliance, 1.0 / 225.0)
+    assert_equal(liquid_entity.material.surface_distance_compliance, 40.0)
+    assert_equal(liquid_entity.material.interior_distance_compliance, 180.0)
+    assert_equal(liquid_entity.material.collider_adhesion_compliance, 20.0)
     sponge_x = sponge_init_positions[:, 0]
     sponge_y = sponge_init_positions[:, 1]
     finger_contact_mask = np.isclose(sponge_y, sponge_y.max())
@@ -1083,8 +1094,8 @@ def test_mop_sponge_full_simulation_and_collision(n_envs, show_viewer):
         2.0 * manipulator.finger_closed_qpos,
         atol=2.0 * max(finger_sdf_cell_sizes),
     )
-    assert (top_width - contact_inner_width > 0.05).all()
-    assert (lower_width - contact_inner_width > 0.05).all()
+    assert (top_width - contact_inner_width > 0.05 / 15.0).all()
+    assert (lower_width - contact_inner_width > 0.05 / 15.0).all()
     assert (settled_extents[:, 0] > 0.95 * (settings.collider_upper[0] - settings.collider_lower[0])).all()
     assert_allclose(qpos[..., -2:], manipulator.finger_closed_qpos, atol=1e-6)
     assert_allclose(manipulator_entity.get_qpos(), qpos, atol=1e-6)
@@ -1115,7 +1126,7 @@ def test_mop_sponge_full_simulation_and_collision(n_envs, show_viewer):
         pre_move_positions - pre_move_hand_pos[:, None, :], geom_utils.inv_quat(pre_move_hand_quat)[:, None, :]
     )
     expected_positions = hand_pos[:, None, :] + geom_utils.transform_by_quat(sponge_hand_pos, hand_quat[:, None, :])
-    assert np.linalg.norm(moved_positions - expected_positions, axis=-1).max() > 1e-3
+    assert np.linalg.norm(moved_positions - expected_positions, axis=-1).max() > 1e-3 / 15.0
     collider_signed_distances = []
     for link in collider_links:
         for geom in link.geoms:
@@ -1335,8 +1346,13 @@ def test_pbstf_cpp_cube_converges_to_sphere(show_viewer):
 @pytest.mark.parametrize("backend", [gs.cuda])
 def test_pbstf_cpp_two_cubes_merge(show_viewer):
     """C++ buildCase3 must turn two opposing box droplets into one connected drop."""
-    scene, (left, right) = build_scene(case=CASE_MERGE, scale=10, show_viewer=show_viewer)
+    scene, (left, right) = build_scene(case=CASE_MERGE, scale=150, show_viewer=show_viewer)
     solver = scene.pbstf_solver
+
+    assert_equal(left.material.density_compliance, 112500.0)
+    assert_equal(left.material.surface_tension_compliance, 1.0 / 225.0)
+    assert_equal(left.material.surface_distance_compliance, 40.0)
+    assert_equal(left.material.interior_distance_compliance, 180.0)
 
     left_initial = left.get_particles_pos().cpu().numpy()
     right_initial = right.get_particles_pos().cpu().numpy()
@@ -1358,19 +1374,22 @@ def test_pbstf_cpp_two_cubes_merge(show_viewer):
     # Each staggered droplet is internally connected at one particle diameter;
     # this cross-edge therefore joins them into a single neighbor component.
     assert final_gap < solver.particle_size
-    assert abs(velocities[:, 0].mean()) < 5e-3
-    assert abs(velocities[:, 2].mean()) < 5e-3
+    assert abs(velocities[:, 0].mean()) < 5e-3 / 15.0
+    assert abs(velocities[:, 2].mean()) < 5e-3 / 15.0
 
 
 @pytest.mark.required
 @pytest.mark.parametrize("backend", [gs.cuda])
 def test_pbstf_cpp_drop_hits_floor_and_bounces(show_viewer):
     """C++ buildCase0 must hit y=-2, rebound, and leave the floor without penetration."""
-    scene, (drop,) = build_scene(case=CASE_BOUNCE, scale=10, show_viewer=show_viewer)
-    floor_height = -2.0
+    scene, (drop,) = build_scene(case=CASE_BOUNCE, scale=150, show_viewer=show_viewer)
+    floor_height = -2.0 / 15.0
     touched_floor = False
     upward_after_contact = False
     left_floor = False
+
+    assert_equal(drop.material.density_compliance, 112500.0)
+    assert_equal(drop.material.surface_tension_compliance, 0.8 / 225.0)
 
     for _ in range(25):
         scene.step()
@@ -1382,9 +1401,9 @@ def test_pbstf_cpp_drop_hits_floor_and_bounces(show_viewer):
         assert min_y >= floor_height - 1e-6
         if min_y <= floor_height + 1e-5:
             touched_floor = True
-        if touched_floor and velocities[:, 1].mean() > 0.05:
+        if touched_floor and velocities[:, 1].mean() > 0.05 / 15.0:
             upward_after_contact = True
-        if touched_floor and min_y > floor_height + 0.01:
+        if touched_floor and min_y > floor_height + 0.01 / 15.0:
             left_floor = True
 
     assert touched_floor
@@ -1396,7 +1415,7 @@ def test_pbstf_cpp_drop_hits_floor_and_bounces(show_viewer):
 @pytest.mark.parametrize("backend", [gs.cuda])
 def test_pbstf_cpp_drop_hits_cone_tip(show_viewer):
     """C++ buildCase15 must collide with the analytic cone and rebound without penetration."""
-    scene, (drop,) = build_scene(case=CASE_CONE, scale=10, show_viewer=show_viewer)
+    scene, (drop,) = build_scene(case=CASE_CONE, scale=150, show_viewer=show_viewer)
     solver = scene.pbstf_solver
     cone_entity = scene.get_entity(name="cone_collider")
     hit_cone = False
@@ -1404,6 +1423,9 @@ def test_pbstf_cpp_drop_hits_cone_tip(show_viewer):
 
     assert solver._n_static_colliders == 1
     assert isinstance(solver._static_colliders[0], ConeStaticCollider)
+    assert_equal(drop.material.density_compliance, 112500.0)
+    assert_equal(drop.material.surface_tension_compliance, 1.0 / 225.0)
+    assert_equal(drop.material.interior_distance_compliance, 90.0)
     assert isinstance(cone_entity.morph, gs.morphs.MeshSet)
     assert cone_entity.surface.opacity is None
     assert any(link.vgeoms for link in cone_entity.links)
@@ -1413,15 +1435,16 @@ def test_pbstf_cpp_drop_hits_cone_tip(show_viewer):
         positions = drop.get_particles_pos().cpu().numpy()
         velocities = drop.get_particles_vel().cpu().numpy()
         radial = np.linalg.norm(positions[:, (0, 2)], axis=1)
-        cone_radius = np.sqrt(3.0) * (-2.0 - positions[:, 1])
-        below_tip = positions[:, 1] <= -2.0
-        above_base = positions[:, 1] >= -7.0
+        cone_radius = np.sqrt(3.0) * (-2.0 / 15.0 - positions[:, 1])
+        particle_center_radius = cone_radius + solver.particle_size
+        below_tip = positions[:, 1] <= -2.0 / 15.0
+        above_base = positions[:, 1] >= -7.0 / 15.0
 
         assert np.isfinite(positions).all()
-        assert not np.any(below_tip & above_base & (radial < cone_radius - 2e-5))
-        if np.any(below_tip & (radial <= cone_radius + 2e-3)):
+        assert not np.any(below_tip & above_base & (radial < particle_center_radius - 2e-5 / 15.0))
+        if np.any(below_tip & above_base & (radial <= particle_center_radius + 2e-3 / 15.0)):
             hit_cone = True
-        if hit_cone and velocities[:, 1].mean() > 0.05:
+        if hit_cone and velocities[:, 1].mean() > 0.05 / 15.0:
             rebounded = True
 
     on_surface = solver.on_surface.to_numpy()[:, 0].astype(bool)
@@ -1448,6 +1471,9 @@ def test_sweep_box_pushes_water(show_viewer):
     assert any(link.vgeoms for link in sweep_entity.links)
     assert any(link.vgeoms for link in table_entity.links)
     assert liquid.n_particles == 840
+    assert_equal(liquid.material.density_compliance, 33750.0)
+    assert_equal(liquid.material.surface_tension_compliance, 1.0 / 225.0)
+    assert_equal(liquid.material.collider_adhesion_compliance, 20.0)
     assert liquid.material.collider_friction == 0.5
     with pytest.raises(gs.GenesisException, match="not absorbent"):
         scene.pbstf_solver.get_static_collider_wetness(1)
@@ -1465,8 +1491,8 @@ def test_sweep_box_pushes_water(show_viewer):
 
     assert np.isfinite(positions).all()
     assert positions[:, 1].min() >= -1e-5
-    assert displacement_x.mean() > 3.0
-    assert (displacement_x > 0.1).mean() > 0.99
+    assert displacement_x.mean() > 0.2
+    assert (displacement_x > 0.1 / 15.0).mean() > 0.99
     assert is_ahead_of_initial_water.mean() > 2.0 / 3.0
     assert_allclose(sweep_entity.get_pos(), sweep.end_pos, atol=1e-6)
 

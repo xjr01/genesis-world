@@ -160,8 +160,8 @@ class CaseSettings(NamedTuple):
 def _liquid_material(
     sampler="staggered",
     rho=1000.0,
-    density_compliance=500.0,
-    surface_tension_compliance=0.8,
+    density_compliance=112500.0,
+    surface_tension_compliance=0.8 / 225.0,
     surface_distance_compliance=40.0,
     interior_distance_compliance=180.0,
     surface_viscosity=0.3,
@@ -188,13 +188,13 @@ def _liquid_material(
 def _case_liquid_material(case):
     if case == CASE_MERGE:
         return _liquid_material(
-            surface_tension_compliance=1.0,
+            surface_tension_compliance=1.0 / 225.0,
             surface_viscosity=0.05,
             interior_viscosity=0.05,
         )
     if case == CASE_CONE:
         return _liquid_material(
-            surface_tension_compliance=1.0,
+            surface_tension_compliance=1.0 / 225.0,
             interior_distance_compliance=90.0,
             surface_viscosity=0.05,
             interior_viscosity=0.05,
@@ -202,7 +202,7 @@ def _case_liquid_material(case):
     if case == CASE_TAP:
         return _liquid_material(
             sampler="regular",
-            surface_tension_compliance=0.21,
+            surface_tension_compliance=0.21 / 225.0,
             interior_distance_compliance=90.0,
             surface_viscosity=0.2,
             interior_viscosity=0.2,
@@ -210,8 +210,8 @@ def _case_liquid_material(case):
     if case == CASE_TEAPOT:
         return _liquid_material(
             sampler="regular",
-            density_compliance=150.0,
-            surface_tension_compliance=3.0,
+            density_compliance=33750.0,
+            surface_tension_compliance=3.0 / 225.0,
             surface_distance_compliance=40.0,
             interior_distance_compliance=180.0,
             surface_viscosity=0.2,
@@ -223,8 +223,8 @@ def _case_liquid_material(case):
     if case in (CASE_MOP, CASE_SWEEP):
         return _liquid_material(
             sampler="regular",
-            density_compliance=150.0,
-            surface_tension_compliance=1.0,
+            density_compliance=33750.0,
+            surface_tension_compliance=1.0 / 225.0,
             surface_distance_compliance=40.0,
             interior_distance_compliance=180.0,
             surface_viscosity=0.5,
@@ -239,14 +239,14 @@ def _case_liquid_material(case):
 def case_settings(case):
     if case == CASE_CUBE:
         return CaseSettings(
-            scale=10,
+            scale=150,
             dt=DEFAULT_CASE_DT,
             gravity=(0.0, 0.0, 0.0),
-            lower_bound=(-2.0, -2.0, -2.0),
-            upper_bound=(2.0, 2.0, 2.0),
-            camera_pos=(4.0, 4.0, 3.0),
+            lower_bound=(-2.0 / 15.0, -2.0 / 15.0, -2.0 / 15.0),
+            upper_bound=(2.0 / 15.0, 2.0 / 15.0, 2.0 / 15.0),
+            camera_pos=(4.0 / 15.0, 4.0 / 15.0, 0.2),
             camera_lookat=(0.0, 0.0, 0.0),
-            ground_height=-2.0,
+            ground_height=-2.0 / 15.0,
             static_colliders=(),
             max_solver_iterations=100,
             max_surface_neighbors=128,
@@ -258,14 +258,14 @@ def case_settings(case):
         )
     if case == CASE_MERGE:
         return CaseSettings(
-            scale=10,
+            scale=150,
             dt=DEFAULT_CASE_DT,
             gravity=(0.0, 0.0, 0.0),
-            lower_bound=(-10.0, -10.0, -10.0),
-            upper_bound=(10.0, 10.0, 10.0),
-            camera_pos=(4.0, 3.0, 4.0),
-            camera_lookat=(0.0, -1.0, 0.0),
-            ground_height=-2.0,
+            lower_bound=(-2.0 / 3.0, -2.0 / 3.0, -2.0 / 3.0),
+            upper_bound=(2.0 / 3.0, 2.0 / 3.0, 2.0 / 3.0),
+            camera_pos=(4.0 / 15.0, 0.2, 4.0 / 15.0),
+            camera_lookat=(0.0, -1.0 / 15.0, 0.0),
+            ground_height=-2.0 / 15.0,
             static_colliders=(),
             max_solver_iterations=100,
             max_surface_neighbors=128,
@@ -277,14 +277,14 @@ def case_settings(case):
         )
     if case == CASE_BOUNCE:
         return CaseSettings(
-            scale=10,
+            scale=150,
             dt=DEFAULT_CASE_DT,
             gravity=(0.0, 0.0, 0.0),
-            lower_bound=(-10.0, -2.0, -10.0),
-            upper_bound=(10.0, 10.0, 10.0),
-            camera_pos=(16.0, 11.0, 16.0),
-            camera_lookat=(0.0, -1.0, 0.0),
-            ground_height=-2.0,
+            lower_bound=(-2.0 / 3.0, -2.0 / 15.0, -2.0 / 3.0),
+            upper_bound=(2.0 / 3.0, 2.0 / 3.0, 2.0 / 3.0),
+            camera_pos=(16.0 / 15.0, 11.0 / 15.0, 16.0 / 15.0),
+            camera_lookat=(0.0, -1.0 / 15.0, 0.0),
+            ground_height=-2.0 / 15.0,
             static_colliders=(),
             max_solver_iterations=100,
             max_surface_neighbors=128,
@@ -296,19 +296,19 @@ def case_settings(case):
         )
     if case == CASE_CONE:
         return CaseSettings(
-            scale=10,
+            scale=150,
             dt=DEFAULT_CASE_DT,
             gravity=(0.0, 0.0, 0.0),
-            lower_bound=(-20.0, -20.0, -20.0),
-            upper_bound=(20.0, 20.0, 20.0),
-            camera_pos=(12.0, 2.0, 12.0),
-            camera_lookat=(0.0, -3.0, 0.0),
-            ground_height=-7.0,
+            lower_bound=(-4.0 / 3.0, -4.0 / 3.0, -4.0 / 3.0),
+            upper_bound=(4.0 / 3.0, 4.0 / 3.0, 4.0 / 3.0),
+            camera_pos=(0.8, 2.0 / 15.0, 0.8),
+            camera_lookat=(0.0, -0.2, 0.0),
+            ground_height=-7.0 / 15.0,
             static_colliders=(
                 gs.options.PBSTFConeStaticColliderOptions(
-                    center=(0.0, -7.0, 0.0),
-                    height=(0.0, 5.0, 0.0),
-                    radius=5.0 * math.sqrt(3.0),
+                    center=(0.0, -7.0 / 15.0, 0.0),
+                    height=(0.0, 1.0 / 3.0, 0.0),
+                    radius=math.sqrt(3.0) / 3.0,
                 ),
             ),
             max_solver_iterations=100,
@@ -328,30 +328,30 @@ def case_settings(case):
                 sponge_density=30.0,
                 asset="urdf/panda_bullet/panda.urdf",
                 is_visible=True,
-                scale=15.0,
-                base_pos=(0.0, -0.25, -7.0),
+                scale=1.0,
+                base_pos=(0.0, -1.0 / 60.0, -7.0 / 15.0),
                 base_quat=(math.sqrt(0.5), -math.sqrt(0.5), 0.0, 0.0),
                 hand_link_name="panda_link7",
                 left_finger_link_name="panda_leftfinger",
                 right_finger_link_name="panda_rightfinger",
-                tool_center_point=(0.0, 0.0, 3.02),
+                tool_center_point=(0.0, 0.0, 3.02 / 15.0),
                 grasp_quat=(0.6532814824, 0.6532814824, 0.2705980501, -0.2705980501),
-                initial_qpos=(0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785, 0.6, 0.6),
-                finger_open_qpos=0.6,
-                finger_closed_qpos=0.4,
+                initial_qpos=(0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785, 0.04, 0.04),
+                finger_open_qpos=0.04,
+                finger_closed_qpos=0.4 / 15.0,
             )
         wipe = WipeSettings(
             collider_idx=1,
             collider_entity_name="sponge" if case == CASE_MOP else "sweep_collider",
-            collider_lower=(-0.6, 0.02, -1.2),
-            collider_upper=(0.6, 0.85, 1.2),
+            collider_lower=(-0.04, 0.02 / 15.0, -0.08),
+            collider_upper=(0.04, 0.85 / 15.0, 0.08),
             table_entity_name="wipe_table",
-            table_pos=(0.0, -0.25, 0.0),
-            table_size=(12.0, 0.5, 8.0),
-            liquid_lower=(-2.5, 0.05, -0.7),
-            liquid_upper=(-0.5, 0.35, 0.7),
-            start_pos=(-3.5, 0.0, 0.0),
-            end_pos=(3.5, 0.0, 0.0),
+            table_pos=(0.0, -1.0 / 60.0, 0.0),
+            table_size=(0.8, 1.0 / 30.0, 8.0 / 15.0),
+            liquid_lower=(-1.0 / 6.0, 1.0 / 300.0, -7.0 / 150.0),
+            liquid_upper=(-1.0 / 30.0, 7.0 / 300.0, 7.0 / 150.0),
+            start_pos=(-7.0 / 30.0, 0.0, 0.0),
+            end_pos=(7.0 / 30.0, 0.0, 0.0),
             quat=(1.0, 0.0, 0.0, 0.0),
             settle_time=1.0,
             wipe_time=5.0,
@@ -375,13 +375,13 @@ def case_settings(case):
                 upper=wipe.collider_upper,
             )
         return CaseSettings(
-            scale=20,
+            scale=300,
             dt=0.01,
             gravity=(0.0, -9.8, 0.0),
-            lower_bound=(-6.0, -1.0, -4.0),
-            upper_bound=(6.0, 4.0, 4.0),
-            camera_pos=(0.0, 4.5, 10.0) if case == CASE_MOP else (8.0, 6.0, 9.0),
-            camera_lookat=(0.0, 0.5, -1.5) if case == CASE_MOP else (0.0, 0.4, 0.0),
+            lower_bound=(-0.4, -1.0 / 15.0, -4.0 / 15.0),
+            upper_bound=(0.4, 4.0 / 15.0, 4.0 / 15.0),
+            camera_pos=(0.0, 0.3, 2.0 / 3.0) if case == CASE_MOP else (8.0 / 15.0, 0.4, 0.6),
+            camera_lookat=(0.0, 1.0 / 30.0, -0.1) if case == CASE_MOP else (0.0, 2.0 / 75.0, 0.0),
             ground_height=wipe.table_pos[1] - 0.5 * wipe.table_size[1],
             static_colliders=(
                 gs.options.PBSTFBoxStaticColliderOptions(
@@ -404,14 +404,14 @@ def case_settings(case):
         )
     if case == CASE_TAP:
         return CaseSettings(
-            scale=20,
+            scale=300,
             dt=DEFAULT_CASE_DT,
             gravity=(0.0, -1.0, 0.0),
-            lower_bound=(-500.0, -20.0, -500.0),
-            upper_bound=(500.0, 500.0, 500.0),
-            camera_pos=(20.0, 20.0, 20.0),
-            camera_lookat=(0.0, -5.0, 0.0),
-            ground_height=-20.0,
+            lower_bound=(-100.0 / 3.0, -4.0 / 3.0, -100.0 / 3.0),
+            upper_bound=(100.0 / 3.0, 100.0 / 3.0, 100.0 / 3.0),
+            camera_pos=(4.0 / 3.0, 4.0 / 3.0, 4.0 / 3.0),
+            camera_lookat=(0.0, -1.0 / 3.0, 0.0),
+            ground_height=-4.0 / 3.0,
             static_colliders=(),
             max_solver_iterations=100,
             max_surface_neighbors=768,
@@ -420,10 +420,10 @@ def case_settings(case):
             steps=2000,
             teapot=None,
             emitter=TapEmitterSettings(
-                pos=(0.0, 5.0, 0.0),
+                pos=(0.0, 1.0 / 3.0, 0.0),
                 direction=(0.0, -1.0, 0.0),
-                droplet_size=2.0,
-                generation_speed=1.0,
+                droplet_size=2.0 / 15.0,
+                generation_speed=1.0 / 15.0,
                 initial_speed=0.0,
                 max_particles=200000,
             ),
@@ -431,11 +431,11 @@ def case_settings(case):
     if case == CASE_TEAPOT:
         teapot = create_teapot_settings()
         return CaseSettings(
-            scale=20,
+            scale=300,
             dt=0.01,
             gravity=(0.0, -9.8, 0.0),
-            lower_bound=(-20.0, -6.04186, -20.0),
-            upper_bound=(20.0, 15.0, 20.0),
+            lower_bound=(-4.0 / 3.0, -6.04186 / 15.0, -4.0 / 3.0),
+            upper_bound=(4.0 / 3.0, 1.0, 4.0 / 3.0),
             camera_pos=teapot.manipulator.camera_pos,
             camera_lookat=teapot.manipulator.camera_lookat,
             ground_height=teapot.manipulator.kuka_base_pos[1],
@@ -483,8 +483,8 @@ def add_case_entities(
     if case == CASE_CUBE:
         liquid = scene.add_entity(
             morph=gs.morphs.Box(
-                lower=(-1.0, -1.0, -1.0),
-                upper=(1.0, 1.0, 1.0),
+                lower=(-1.0 / 15.0, -1.0 / 15.0, -1.0 / 15.0),
+                upper=(1.0 / 15.0, 1.0 / 15.0, 1.0 / 15.0),
             ),
             material=material_factory(case),
         )
@@ -493,38 +493,38 @@ def add_case_entities(
     if case == CASE_MERGE:
         left = scene.add_entity(
             morph=gs.morphs.Box(
-                lower=(-1.5, -0.625, -0.5),
-                upper=(-0.5, 0.375, 0.5),
+                lower=(-0.1, -1.0 / 24.0, -1.0 / 30.0),
+                upper=(-1.0 / 30.0, 0.025, 1.0 / 30.0),
             ),
             material=material_factory(case),
         )
         right = scene.add_entity(
             morph=gs.morphs.Box(
-                lower=(0.5, -0.375, -0.5),
-                upper=(1.5, 0.625, 0.5),
+                lower=(1.0 / 30.0, -0.025, -1.0 / 30.0),
+                upper=(0.1, 1.0 / 24.0, 1.0 / 30.0),
             ),
             material=material_factory(case),
         )
         return (
-            (left, (1.0, 0.0, 0.0)),
-            (right, (-1.0, 0.0, 0.0)),
+            (left, (1.0 / 15.0, 0.0, 0.0)),
+            (right, (-1.0 / 15.0, 0.0, 0.0)),
         )
 
     if case == CASE_BOUNCE:
         liquid = scene.add_entity(
             morph=gs.morphs.Sphere(
                 pos=(0.0, 0.0, 0.0),
-                radius=1.0,
+                radius=1.0 / 15.0,
             ),
             material=material_factory(case),
         )
-        return ((liquid, (0.0, -3.0, 0.0)),)
+        return ((liquid, (0.0, -0.2, 0.0)),)
 
     if case == CASE_CONE:
         liquid = scene.add_entity(
             morph=gs.morphs.Sphere(
                 pos=(0.0, 0.0, 0.0),
-                radius=1.0,
+                radius=1.0 / 15.0,
             ),
             material=material_factory(case),
         )
@@ -551,7 +551,7 @@ def add_case_entities(
             ),
             name="cone_collider",
         )
-        return ((liquid, (0.0, -4.0, 0.0)),)
+        return ((liquid, (0.0, -4.0 / 15.0, 0.0)),)
 
     if case in (CASE_MOP, CASE_SWEEP):
         wipe = get_wipe_settings(settings)
