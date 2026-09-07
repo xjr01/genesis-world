@@ -224,13 +224,13 @@ def _case_liquid_material(case):
         return _liquid_material(
             sampler="regular",
             density_compliance=33750.0,
-            surface_tension_compliance=1.0 / 225.0,
+            surface_tension_compliance=1.0 / 2000.0,
             surface_distance_compliance=40.0,
             interior_distance_compliance=180.0,
             surface_viscosity=0.5,
             interior_viscosity=0.5,
             is_collider_adhesion_friction_enabled=True,
-            collider_adhesion_compliance=20.0,
+            collider_adhesion_compliance=30.0,
             collider_friction=0.5,
         )
     return _liquid_material()
@@ -392,7 +392,7 @@ def case_settings(case):
                 ),
                 wipe_collider,
             ),
-            max_solver_iterations=10,
+            max_solver_iterations=30,
             max_surface_neighbors=128,
             max_localmesh_neighbors=64,
             enable_pca_normals=False,
@@ -836,7 +836,7 @@ def build_scene(
             lower_bound=settings.lower_bound,
             upper_bound=settings.upper_bound,
             max_solver_iterations=settings.max_solver_iterations,
-            topology_rebuild_interval=10,
+            topology_rebuild_interval=2,
             max_surface_neighbors=settings.max_surface_neighbors,
             max_localmesh_neighbors=settings.max_localmesh_neighbors,
             enable_pca_normals=settings.enable_pca_normals,
