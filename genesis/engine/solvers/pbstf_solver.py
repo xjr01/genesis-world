@@ -1753,7 +1753,8 @@ class PBSTFSolver(Solver):
                                 self._static_colliders_quat,
                                 self._static_colliders[collider_idx],
                             )
-                            if surface_distance <= self._particle_radius:
+                            # Collision projection offsets particle centers by one radius; friction reaches beyond it.
+                            if surface_distance <= 2.0 * self._particle_radius:
                                 collider_vel = self._static_collider_velocity_at_point(collider_idx, i_b, pos)
                                 relative_vel = vel - collider_vel
                                 relative_vel_normal = relative_vel.dot(normal) * normal

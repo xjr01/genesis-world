@@ -649,7 +649,12 @@ def test_static_collider_adhesion_and_friction(asset_tmp_path, n_envs, show_view
     )
     liquid = scene.add_entity(
         morph=gs.morphs.Particles(
-            positions=((0.0, -0.05, 0.0), (0.0, -0.15, 0.0), (1.5, -0.1, 0.0)),
+            positions=(
+                (0.0, -0.05, 0.0),
+                (0.0, -0.15, 0.0),
+                (1.5, -0.1, 0.0),
+                (-0.5, -0.25, 0.0),
+            ),
         ),
         material=gs.materials.PBSTF.Liquid(
             sampler="regular",
@@ -680,15 +685,12 @@ def test_static_collider_adhesion_and_friction(asset_tmp_path, n_envs, show_view
     solver.particles_reordered.dpos.fill(0.0)
     solver.particles_reordered.surface.fill(True)
     solver._kernel_apply_viscosity()
-    velocity = np.take_along_axis(
-        qd_to_numpy(solver.particles_reordered.vel, transpose=True), reordered_idx[..., None], axis=1
-    )
-    position = np.take_along_axis(
-        qd_to_numpy(solver.particles_reordered.pos, transpose=True), reordered_idx[..., None], axis=1
-    )
+    solver._kernel_copy_from_reordered(0)
+    velocity = tensor_to_array(liquid.get_particles_vel())
+    position = tensor_to_array(liquid.get_particles_pos())
     assert_allclose(
         velocity,
-        (((0.75, 1.0, 0.0), (1.0, 1.0, 0.0), (0.5625, 1.0, 0.0)),) * max(n_envs, 1),
+        (((0.75, 1.0, 0.0), (0.75, 1.0, 0.0), (0.5625, 1.0, 0.0), (1.0, 1.0, 0.0)),) * max(n_envs, 1),
         atol=1e-6,
     )
     assert_allclose(position[..., 2, 1], -0.1, atol=1e-6)
@@ -704,13 +706,11 @@ def test_static_collider_adhesion_and_friction(asset_tmp_path, n_envs, show_view
     solver.particles_reordered.dpos.fill(0.0)
     solver.particles_reordered.surface.fill(True)
     solver._kernel_apply_viscosity()
-    reordered_idx = qd_to_numpy(solver.particles_ng.reordered_idx, transpose=True)
-    velocity = np.take_along_axis(
-        qd_to_numpy(solver.particles_reordered.vel, transpose=True), reordered_idx[..., None], axis=1
-    )
+    solver._kernel_copy_from_reordered(0)
+    velocity = tensor_to_array(liquid.get_particles_vel())
     assert_allclose(
         velocity,
-        (((0.25, 0.0, 0.0), (0.0, 0.0, 0.0), (0.0, 0.0, 0.0)),) * max(n_envs, 1),
+        (((0.25, 0.0, 0.0), (0.25, 0.0, 0.0), (0.0, 0.0, 0.0), (0.0, 0.0, 0.0)),) * max(n_envs, 1),
         atol=1e-6,
     )
 

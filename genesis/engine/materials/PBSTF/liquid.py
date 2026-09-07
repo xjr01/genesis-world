@@ -15,8 +15,9 @@ class Liquid(Base):
     ``interior_viscosity`` are the reference XSPH velocity-filter coefficients.
 
     ``is_collider_adhesion_friction_enabled`` enables both wall effects. Adhesion keeps surface particles attached to
-    nearby collider surfaces but can make detachment harder; lower compliance strengthens it. Friction damps tangential
-    wall motion and reduces sliding at the cost of kinetic energy; zero preserves tangential speed and one removes it.
+    nearby collider surfaces but can make detachment harder; lower compliance strengthens it. Friction affects surface
+    particles whose centers lie within one particle diameter of a collider surface. It damps relative tangential motion
+    and reduces sliding at the cost of kinetic energy; zero preserves tangential speed and one removes it.
     """
 
     rho: PositiveFloat = 1000.0
