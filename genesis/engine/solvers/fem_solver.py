@@ -1388,7 +1388,10 @@ class FEMSolver(Solver):
         self.init_pcg_solve()
         if self._is_implicit_rigid_projection_enabled:
             self.sim._coupler.project_fem_implicit_pcg(f, is_initial=True)
-        for i in range(self._n_pcg_iterations):
+        for _ in range(self._n_pcg_iterations):
+            # Copy-backed conversions require a fresh read after each iteration.
+            if not qd_to_torch(self.batch_pcg_active, transpose=True).any():
+                break
             if self._is_implicit_rigid_projection_enabled:
                 self.sim._coupler.project_fem_implicit_pcg(f, is_initial=False)
             else:

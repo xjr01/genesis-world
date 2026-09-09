@@ -566,6 +566,8 @@ def test_implicit_sap_coupler_collide_sphere_box(show_viewer):
 @pytest.mark.required
 @pytest.mark.parametrize("n_envs", [0, 2])
 def test_implicit_one_way_rigid_surface_projection(n_envs, show_viewer):
+    DT = 0.01
+    DAMPING_ALPHA = 0.5
     vertices, elements = element_utils.create_tetrahedral_grid(
         lower=(-0.16, -0.16, -0.16),
         upper=(0.0, 0.0, 0.0),
@@ -573,10 +575,13 @@ def test_implicit_one_way_rigid_surface_projection(n_envs, show_viewer):
     )
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
+            dt=DT,
             gravity=(0.0, 0.0, 0.0),
         ),
         fem_options=gs.options.FEMOptions(
+            floor_height=-0.2,
             use_implicit_solver=True,
+            damping_alpha=DAMPING_ALPHA,
         ),
         coupler_options=gs.options.LegacyCouplerOptions(),
         viewer_options=gs.options.ViewerOptions(
@@ -605,6 +610,17 @@ def test_implicit_one_way_rigid_surface_projection(n_envs, show_viewer):
     )
     scene.build(n_envs=n_envs)
 
+    pos_initial = fem.get_state().pos
+    scene.fem_solver.set_gravity(gravity=(0.0, 1.0, 0.0), envs_idx=n_envs - 1 if n_envs else None)
+    scene.step()
+    state = fem.get_state()
+    velocity_expected = torch.zeros_like(state.vel)
+    velocity_expected[-1, :, 1] = DT / (1.0 + DAMPING_ALPHA * DT)
+    assert_allclose(state.vel, velocity_expected, atol=1e-5)
+    assert_allclose(state.pos, pos_initial + DT * velocity_expected, atol=1e-6)
+
+    scene.reset()
+    scene.fem_solver.set_gravity(gravity=(0.0, 0.0, 0.0))
     rigid.set_pos((-0.04, -0.08, -0.08))
     scene.step()
 
