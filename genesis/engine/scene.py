@@ -422,9 +422,10 @@ class Scene(RBC):
             morph_for_checks = morph
 
         if isinstance(morph_for_checks, gs.morphs.TetrahedralMesh) and (
-            not isinstance(material, gs.materials.FEM.Base) or isinstance(material, gs.materials.FEM.Cloth)
+            not isinstance(material, (gs.materials.FEM.Base, gs.materials.PBD.Elastic))
+            or isinstance(material, gs.materials.FEM.Cloth)
         ):
-            gs.raise_exception("TetrahedralMesh morphs require a volumetric finite element method material.")
+            gs.raise_exception("TetrahedralMesh morphs require a volumetric FEM or PBD elastic material.")
 
         if isinstance(material, gs.materials.Rigid):
             # small sdf res is sufficient for primitives regardless of size
@@ -498,9 +499,13 @@ class Scene(RBC):
             if surface.vis_mode is None:
                 surface.vis_mode = "visual"
 
-            if surface.vis_mode not in ("visual", "particle", "recon"):
+            vis_modes = ("visual", "particle", "recon")
+            if isinstance(material, gs.materials.PBD.Base):
+                vis_modes += ("collision",)
+            if surface.vis_mode not in vis_modes:
                 gs.raise_exception(
-                    f"Unsupported `surface.vis_mode` for material {material}: '{surface.vis_mode}'. Expected one of: ['visual', 'particle', 'recon']."
+                    f"Unsupported `surface.vis_mode` for material {material}: '{surface.vis_mode}'. "
+                    f"Expected one of: {vis_modes}."
                 )
 
         elif isinstance(material, gs.materials.FEM.Base):

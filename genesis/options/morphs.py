@@ -188,11 +188,12 @@ class Particles(Morph):
 
 
 class TetrahedralMesh(Morph):
-    """Explicit tetrahedral volume mesh for finite element method (FEM) entities.
+    """Explicit volume mesh for finite element method (FEM) and position-based dynamics (PBD) elastic entities.
 
     ``vertices`` contains local-frame positions and ``elements`` contains positively oriented groups of four vertex
-    indices. FEM preserves this discretization exactly, which makes this morph suitable for authored and structured
-    volume meshes.
+    indices. Both solvers preserve this discretization exactly, which makes this morph suitable for authored and
+    structured volume meshes. For PBD, the supplied vertices determine resolution and ``particle_size`` controls the
+    particle collision diameter.
     """
 
     vertices: Vec3FArrayType

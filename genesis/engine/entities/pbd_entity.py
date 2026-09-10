@@ -1,11 +1,28 @@
-import quadrants as qd
 import numpy as np
+
+import igl
 import trimesh
 
+import quadrants as qd
+
 import genesis as gs
+from genesis.engine.entities.particle_entity import ParticleEntity
 import genesis.utils.geom as gu
 import genesis.utils.mesh as mu
-from genesis.engine.entities.particle_entity import ParticleEntity
+
+
+@qd.kernel
+def kernel_bind_pbd_surface_vertices(
+    particles_idx: qd.types.ndarray(ndim=1),
+    particle_start: int,
+    vvert_start: int,
+    vverts_info: qd.template(),
+):
+    for i_v_ in range(particles_idx.shape[0]):
+        i_v = vvert_start + i_v_
+        vverts_info[i_v].support_idxs.fill(particle_start + particles_idx[i_v_])
+        vverts_info[i_v].support_weights.fill(0.0)
+        vverts_info[i_v].support_weights[0] = 1.0
 
 
 class PBDBaseEntity(ParticleEntity):
@@ -209,6 +226,21 @@ class PBDTetEntity(PBDBaseEntity):
             name=name,
         )
         self._edge_start = edge_start
+        self._vverts_particles_idx = None
+        if isinstance(self.morph, gs.morphs.TetrahedralMesh) or self.surface.vis_mode == "collision":
+            self._vverts_particles_idx, faces = np.unique(self.surface_triangles, return_inverse=True)
+            self._vverts = self._particles[self._vverts_particles_idx]
+            self._vfaces = faces.reshape((-1, 3))
+            self._vmesh = gs.Mesh.from_attrs(verts=self._vverts, faces=self._vfaces, surface=self.surface)
+
+    def _add_vverts_to_solver(self):
+        """Bind collision vertices to surface particles, or skin the authored visual mesh."""
+        if self._vverts_particles_idx is None:
+            super()._add_vverts_to_solver()
+        else:
+            kernel_bind_pbd_surface_vertices(
+                self._vverts_particles_idx, self._particle_start, self._vvert_start, self.solver.vverts_info
+            )
 
     def _add_particles_to_solver(self):
         self._kernel_add_particles_edges_to_solver(
@@ -259,10 +291,10 @@ class PBDTetEntity(PBDBaseEntity):
 
     def sample(self):
         """
-        Sample and preprocess the mesh for the PBD tetrahedral entity.
+        Transform the mesh into world coordinates and prepare its simulation surface.
 
-        Applies transformation from the morph, stores mesh vertices and faces, and performs remeshing based on the
-        particle size.
+        Explicit tetrahedral meshes retain their vertices and topology. Other morphs are remeshed using the particle
+        size as the target surface edge length.
         """
         # We don't use ParticleEntity.sample() because we need to maintain the remeshed self._mesh as well. The morph
         # pose offset (e.g. an up-axis conversion) is composed onto the morph pose.
@@ -279,7 +311,8 @@ class PBDTetEntity(PBDBaseEntity):
         self._vfaces = np.asarray(self._vmesh.faces, dtype=gs.np_int)
 
         self._mesh = self._vmesh.copy()
-        self._mesh.remesh(edge_len_abs=self.particle_size, fix=isinstance(self, PBD3DEntity))
+        if not isinstance(self.morph, gs.morphs.TetrahedralMesh):
+            self._mesh.remesh(edge_len_abs=self.particle_size, fix=isinstance(self, PBD3DEntity))
 
     def _reset_grad(self):
         pass
@@ -300,6 +333,14 @@ class PBDTetEntity(PBDBaseEntity):
     def edges(self):
         """Edge array of the mesh."""
         return self._edges
+
+    @property
+    def surface_triangles(self):
+        """Simulation surface triangles as local particle indices, with shape (n_triangles, 3)."""
+        if isinstance(self, PBD3DEntity):
+            faces, *_ = igl.boundary_facets(self._elems)
+            return faces
+        return self._mesh.faces
 
     @property
     def n_edges(self):
@@ -515,8 +556,12 @@ class PBD3DEntity(PBDTetEntity):
             gs.raise_exception("Input mesh has zero volume.")
         self._mass = self._vmesh.volume * self.material.rho
 
-        tet_cfg = mu.generate_tetgen_config_from_morph(self.morph)
-        particles, elems, *_ = self._mesh.tetrahedralize(tet_cfg)
+        if isinstance(self.morph, gs.morphs.TetrahedralMesh):
+            particles = self._mesh.verts
+            elems = np.array(self.morph.elements)
+        else:
+            tet_cfg = mu.generate_tetgen_config_from_morph(self.morph)
+            particles, elems, *_ = self._mesh.tetrahedralize(tet_cfg)
         self._particles = particles.astype(gs.np_float, copy=False)
         self._init_particles_offset = gs.tensor(self._particles) - gs.tensor(self._sampled_pos)
 

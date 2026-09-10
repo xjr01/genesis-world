@@ -56,6 +56,8 @@ class Rigid(Kinematic["RigidEntity"]):
         legacy coupling. True preserves two-way momentum exchange but can perturb an externally driven trajectory;
         False makes the rigid geometry an imposed moving boundary while omitting its coupled contact response. Default
         is True.
+        With False, position-based dynamics (PBD) cloth and elastic meshes also resolve edge and face intersections
+        with collider triangles, improving surface contact at additional collision-detection cost.
     sdf_cell_size : float, optional
         Cell size in SDF grid in meters. Defines grid resolution. Default is 0.005.
     sdf_min_res : int, optional

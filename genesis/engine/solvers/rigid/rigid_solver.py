@@ -1433,6 +1433,11 @@ class RigidSolver(KinematicSolver):
                 "One-way implicit FEM surface projection did not resolve every rigid surface intersection. Please "
                 "decrease the simulation timestep."
             )
+        if errno & array_class.ErrorCode.INVALID_PBD_RIGID_SURFACE_INTERSECTION:
+            gs.raise_exception(
+                "One-way PBD surface collision has unresolved rigid intersections. Please decrease the simulation "
+                "timestep or release particles pinned inside a collider."
+            )
 
     def _kernel_detect_collision(self):
         self.collider.clear()

@@ -55,7 +55,9 @@ class Surface(Options):
     vis_mode : str | None, optional
         How the entity should be visualized, e.g.
         - 'visual': Render the entity's visual geometry.
-        - 'collision': Render the entity's collision geometry.
+        - 'collision': Render the entity's collision geometry. For position-based dynamics (PBD) cloth and elastic
+          entities, display the simulation surface directly to show resolved contacts; mesh detail and texture
+          coordinates from the authored visual mesh are replaced by the simulation geometry.
         - 'particle': Render the entity's particle representation (if applicable).
         - 'sdf': Render the reconstructed surface mesh of the entity's sdf.
         - 'recon': Render the reconstructed surface mesh of the entity's particle representation.

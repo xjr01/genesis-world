@@ -12,6 +12,8 @@ from genesis.utils.triangle_qd import (
     ray_projection,
     ray_triangle_intersection,
     triangle_face_normal,
+    triangle_triangle_intersection,
+    triangle_triangle_previous_separating_correction,
 )
 
 
@@ -493,7 +495,7 @@ def sdf_func_exact_mesh_surface_bvh_local(
     bvh_morton_codes: qd.template(),
     dyn_info: array_class.DynInfo,
     rigid_info: array_class.RigidInfo,
-    surface_info: array_class.FEMRigidSurfaceInfo,
+    surface_info: array_class.RigidSurfaceInfo,
 ):
     """Query one rigid geom in a shared local-coordinate bounding volume hierarchy (BVH)."""
     surface_geom_slot = surface_info.surface_geom_slots[geom_idx]
@@ -633,7 +635,7 @@ def sdf_func_exact_mesh_surface_bvh(
     dyn_state: array_class.DynState,
     dyn_info: array_class.DynInfo,
     rigid_info: array_class.RigidInfo,
-    surface_info: array_class.FEMRigidSurfaceInfo,
+    surface_info: array_class.RigidSurfaceInfo,
 ):
     geom_pos = dyn_state.geoms.pos[geom_idx, env_idx]
     geom_quat = dyn_state.geoms.quat[geom_idx, env_idx]
@@ -665,7 +667,7 @@ def sdf_func_surface_bvh_ray_cast_local(
     bvh_morton_codes: qd.template(),
     dyn_info: array_class.DynInfo,
     rigid_info: array_class.RigidInfo,
-    surface_info: array_class.FEMRigidSurfaceInfo,
+    surface_info: array_class.RigidSurfaceInfo,
 ):
     """Return the first hit along a geom-local ray in the shared rigid-surface BVH."""
     atlas_offset = surface_info.atlas_offsets[surface_info.surface_geom_slots[geom_idx]]
@@ -727,7 +729,7 @@ def sdf_func_project_vertex_outside_geom(
     dyn_info: array_class.DynInfo,
     rigid_info: array_class.RigidInfo,
     collider_info: array_class.ColliderInfo,
-    surface_info: array_class.FEMRigidSurfaceInfo,
+    surface_info: array_class.RigidSurfaceInfo,
 ):
     """Project a point onto the feasible side of one rigid geom and return its active contact normal."""
     # The local bounds remain valid for coupling geoms whose rigid broadphase and runtime AABBs are disabled.
@@ -887,3 +889,184 @@ def sdf_func_find_closest_vert(
         ]
         + dyn_info.geoms.vert_start[geom_idx]
     )
+
+
+@qd.func
+def sdf_func_triangle_surface_corrections(
+    i_b,
+    i_g_,
+    clearance,
+    vertices_world,
+    previous_vertices_world,
+    bvh_nodes: qd.template(),
+    bvh_morton_codes: qd.template(),
+    dyn_state: array_class.DynState,
+    surface_state: array_class.RigidSurfaceContactState,
+    dyn_info: array_class.DynInfo,
+    rigid_info: array_class.RigidInfo,
+    surface_info: array_class.RigidSurfaceInfo,
+    is_audit: qd.template(),
+):
+    """Accumulate triangle corrections for rigid face and edge intersections, preserving the previous exterior side."""
+    n_surface_faces = bvh_morton_codes.shape[1]
+    previous_centroid_world = (
+        previous_vertices_world[:, 0] + previous_vertices_world[:, 1] + previous_vertices_world[:, 2]
+    ) / 3.0
+    corrections = qd.Matrix.zero(gs.qd_float, 3, 3)
+    n_corrections = qd.Vector.zero(gs.qd_int, 3)
+    has_intersection = False
+    i_g = surface_info.surface_geoms_idx[i_g_]
+    geom_pos = dyn_state.geoms.pos[i_g, i_b]
+    geom_quat = dyn_state.geoms.quat[i_g, i_b]
+    atlas_offset = surface_info.atlas_offsets[i_g_]
+    vertices_atlas = qd.Matrix.zero(gs.qd_float, 3, 3)
+    previous_vertices_atlas = qd.Matrix.zero(gs.qd_float, 3, 3)
+    for i_v_ in qd.static(range(3)):
+        vertices_atlas[:, i_v_] = (
+            gu.qd_inv_transform_by_trans_quat(vertices_world[:, i_v_], geom_pos, geom_quat) + atlas_offset
+        )
+        previous_vertices_atlas[:, i_v_] = (
+            gu.qd_inv_transform_by_trans_quat(
+                previous_vertices_world[:, i_v_],
+                surface_state.previous_geoms_pos[i_b, i_g_],
+                surface_state.previous_geoms_quat[i_b, i_g_],
+            )
+            + atlas_offset
+        )
+
+    geom_lower = rigid_info.geoms_init_AABB[i_g, 0]
+    geom_upper = rigid_info.geoms_init_AABB[i_g, 7]
+    geom_extent = geom_upper - geom_lower
+    query_lower = qd.min(vertices_atlas[:, 0], vertices_atlas[:, 1], vertices_atlas[:, 2]) - clearance
+    query_upper = qd.max(vertices_atlas[:, 0], vertices_atlas[:, 1], vertices_atlas[:, 2]) + clearance
+    previous_direction_mesh = qd.Vector.zero(gs.qd_float, 3)
+    has_previous_direction = False
+
+    node_stack = qd.Vector.zero(gs.qd_int, qd.static(STACK_SIZE))
+    node_stack[0] = 0
+    i_stack = 1
+    while i_stack > 0:
+        i_stack -= 1
+        i_node = node_stack[i_stack]
+        node = bvh_nodes[0, i_node]
+        is_node_overlapping = (query_lower <= node.bound.max).all() and (query_upper >= node.bound.min).all()
+        if is_node_overlapping:
+            if node.left == -1:
+                i_leaf = i_node - (n_surface_faces - 1)
+                i_f = qd.cast(bvh_morton_codes[0, i_leaf][1], gs.qd_int)
+                if dyn_info.faces.geom_idx[i_f] != i_g:
+                    continue
+                face = dyn_info.faces.verts_idx[i_f]
+                rigid_vertices_atlas = qd.Matrix.cols(
+                    [
+                        dyn_info.verts.init_pos[face[0]] + atlas_offset,
+                        dyn_info.verts.init_pos[face[1]] + atlas_offset,
+                        dyn_info.verts.init_pos[face[2]] + atlas_offset,
+                    ]
+                )
+                is_intersecting, hit_position_atlas = triangle_triangle_intersection(
+                    vertices_atlas, rigid_vertices_atlas, rigid_info.EPS[None]
+                )
+                if not is_intersecting:
+                    continue
+
+                has_intersection = True
+                if qd.static(is_audit):
+                    continue
+
+                # A prior separating axis preserves the contact topology with a minimum normal
+                # displacement in the current geom frame.
+                has_history_correction, history_correction_mesh = triangle_triangle_previous_separating_correction(
+                    vertices_atlas,
+                    previous_vertices_atlas,
+                    rigid_vertices_atlas,
+                    clearance,
+                    rigid_info.EPS[None],
+                )
+                if has_history_correction:
+                    history_correction_world = gu.qd_transform_by_quat(history_correction_mesh, geom_quat)
+                    for i_v_ in qd.static(range(3)):
+                        corrections[:, i_v_] += history_correction_world
+                        n_corrections[i_v_] += 1
+                    continue
+
+                if not has_previous_direction:
+                    # The previous valid configuration selects the exterior side when the current
+                    # triangle spans both sides of a collider.
+                    previous_centroid_mesh = gu.qd_inv_transform_by_trans_quat(
+                        previous_centroid_world,
+                        surface_state.previous_geoms_pos[i_b, i_g_],
+                        surface_state.previous_geoms_quat[i_b, i_g_],
+                    )
+                    _, previous_direction_mesh, _, _ = sdf_func_exact_mesh_surface_bvh_local(
+                        i_g,
+                        previous_centroid_mesh,
+                        bvh_nodes,
+                        bvh_morton_codes,
+                        dyn_info,
+                        rigid_info,
+                        surface_info,
+                    )
+                    if previous_direction_mesh.norm_sqr() > rigid_info.EPS[None] ** 2:
+                        previous_direction_mesh = previous_direction_mesh.normalized()
+                        has_previous_direction = True
+
+                rigid_normal_mesh = (rigid_vertices_atlas[:, 1] - rigid_vertices_atlas[:, 0]).cross(
+                    rigid_vertices_atlas[:, 2] - rigid_vertices_atlas[:, 0]
+                )
+                if not has_previous_direction and rigid_normal_mesh.norm_sqr() > rigid_info.EPS[None] ** 2:
+                    previous_direction_mesh = rigid_normal_mesh.normalized()
+                    previous_centroid_mesh = gu.qd_inv_transform_by_trans_quat(
+                        previous_centroid_world,
+                        surface_state.previous_geoms_pos[i_b, i_g_],
+                        surface_state.previous_geoms_quat[i_b, i_g_],
+                    )
+                    if (previous_centroid_mesh - (rigid_vertices_atlas[:, 0] - atlas_offset)).dot(
+                        previous_direction_mesh
+                    ) < 0.0:
+                        previous_direction_mesh = -previous_direction_mesh
+                    has_previous_direction = True
+
+                if not has_previous_direction:
+                    continue
+
+                hit_position_mesh = hit_position_atlas - atlas_offset
+                exit_position_mesh = hit_position_mesh
+                rigid_normal_mesh = rigid_normal_mesh.normalized()
+                if rigid_normal_mesh.dot(previous_direction_mesh) <= rigid_info.EPS[None]:
+                    ray_start_mesh = hit_position_mesh + clearance * previous_direction_mesh
+                    exit_distance, has_exit = sdf_func_surface_bvh_ray_cast_local(
+                        i_g,
+                        ray_start_mesh,
+                        previous_direction_mesh,
+                        2.0 * qd.max(1.0e-3, geom_extent.norm()),
+                        bvh_nodes,
+                        bvh_morton_codes,
+                        dyn_info,
+                        rigid_info,
+                        surface_info,
+                    )
+                    if has_exit:
+                        exit_position_mesh = ray_start_mesh + exit_distance * previous_direction_mesh
+                    else:
+                        for i_axis in qd.static(range(3)):
+                            exit_position_mesh[i_axis] = qd.select(
+                                previous_direction_mesh[i_axis] >= 0.0, geom_upper[i_axis], geom_lower[i_axis]
+                            )
+
+                # A shared exit plane moves the whole intersecting feature coherently and eliminates
+                # residual edge crossings.
+                target_projection = exit_position_mesh.dot(previous_direction_mesh) + clearance
+                for i_v_ in qd.static(range(3)):
+                    vertex_projection = (vertices_atlas[:, i_v_] - atlas_offset).dot(previous_direction_mesh)
+                    penetration = target_projection - vertex_projection
+                    if penetration > 0.0:
+                        correction_mesh = penetration * previous_direction_mesh
+                        correction_world = gu.qd_transform_by_quat(correction_mesh, geom_quat)
+                        corrections[:, i_v_] += correction_world
+                        n_corrections[i_v_] += 1
+            elif i_stack < qd.static(STACK_SIZE - 2):
+                node_stack[i_stack] = node.left
+                node_stack[i_stack + 1] = node.right
+                i_stack += 2
+    return corrections, n_corrections, has_intersection

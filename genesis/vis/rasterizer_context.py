@@ -808,7 +808,7 @@ class RasterizerContext:
     def on_pbd(self):
         if self.sim.pbd_solver.is_active:
             for pbd_entity in self.sim.pbd_solver.entities:
-                if pbd_entity.surface.vis_mode == "visual":
+                if pbd_entity.surface.vis_mode in ("visual", "collision"):
                     # Apply surface visual with UVs to the trimesh
                     pbd_entity.vmesh.trimesh.visual = mu.surface_uvs_to_trimesh_visual(
                         pbd_entity.surface, uvs=pbd_entity.vmesh.uvs, n_verts=len(pbd_entity.vmesh.trimesh.vertices)
@@ -838,7 +838,7 @@ class RasterizerContext:
                             )
                             pbd_entity._tets_mesh = mesh
                             self.add_static_node(pbd_entity, pyrender.Mesh.from_trimesh(mesh, smooth=False), i_b=idx)
-                    elif pbd_entity.surface.vis_mode == "visual":
+                    elif pbd_entity.surface.vis_mode in ("visual", "collision"):
                         self.add_static_node(
                             pbd_entity,
                             pyrender.Mesh.from_trimesh(
@@ -911,7 +911,7 @@ class RasterizerContext:
                             normal_data = self.jit.update_normal(node, update_data)
                             if normal_data is not None:
                                 self.jit.update_buffer(node, "normal", normal_data)
-                    elif pbd_entity.surface.vis_mode == "visual":
+                    elif pbd_entity.surface.vis_mode in ("visual", "collision"):
                         vverts = vverts_env[pbd_entity.vvert_start : pbd_entity.vvert_end]
                         node = self.static_nodes[(idx, pbd_entity.uid)]
                         update_data = self._scene.reorder_vertices(node, vverts.astype(np.float32))
@@ -936,9 +936,7 @@ class RasterizerContext:
             for fem_entity in self.sim.fem_solver.entities:
                 if fem_entity.surface.vis_mode == "visual":
                     for i_g, vgeom in enumerate(fem_entity.vgeoms):
-                        visual = mu.surface_uvs_to_trimesh_visual(
-                            vgeom.surface, uvs=vgeom.uvs, n_verts=vgeom.n_vverts
-                        )
+                        visual = mu.surface_uvs_to_trimesh_visual(vgeom.surface, uvs=vgeom.uvs, n_verts=vgeom.n_vverts)
                         seg_key = (fem_entity.idx, i_g) if self.segmentation_level == "geom" else fem_entity.idx
                         vverts = vverts_render[:, vgeom.vvert_start : vgeom.vvert_end]
                         for env_i, i_b in enumerate(self.rendered_envs_idx):

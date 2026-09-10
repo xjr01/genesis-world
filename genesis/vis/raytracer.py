@@ -329,7 +329,7 @@ class Raytracer:
         # PBD entities
         if self.sim.pbd_solver.is_active:
             for pbd_entity in self.sim.pbd_solver.entities:
-                if pbd_entity.surface.vis_mode == "visual":
+                if pbd_entity.surface.vis_mode in ("visual", "collision"):
                     self.add_deformable(str(pbd_entity.uid))
                 else:
                     if self.render_particle_as == "sphere":
@@ -773,7 +773,7 @@ class Raytracer:
             vverts_all = self.sim.pbd_solver.vverts_render.pos.to_numpy()[:, idx]
 
             for pbd_entity in self.sim.pbd_solver.entities:
-                if pbd_entity.surface.vis_mode == "visual":
+                if pbd_entity.surface.vis_mode in ("visual", "collision"):
                     vverts = vverts_all[pbd_entity.vvert_start : pbd_entity.vvert_end]
 
                     self.update_deformable(

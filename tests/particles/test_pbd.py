@@ -1,10 +1,14 @@
-import pytest
 import numpy as np
 import torch
 
-import genesis as gs
+import pytest
+import trimesh
 
-from ..utils import assert_allclose
+import genesis as gs
+from genesis.utils.element import create_tetrahedral_grid
+from genesis.utils.misc import qd_to_numpy, tensor_to_array
+
+from ..utils import assert_allclose, assert_equal
 
 
 # Note that "session" scope must NOT be used because the material while be altered without copy when building the scene
@@ -265,3 +269,126 @@ def test_cloth_attach_rigid_link(show_viewer):
     link_disp = link_pos2 - link_pos1
     cloth_disp = cloth_pos2 - cloth_pos1
     assert ((cloth_disp.movedim(0, -2) - link_disp).norm(dim=-1) > 0.2).all()
+
+
+@pytest.mark.required
+@pytest.mark.parametrize("n_envs", [0, 2])
+@pytest.mark.parametrize("is_regular_grid", [False, True])
+def test_one_way_rigid_surface_collision(n_envs, is_regular_grid, show_viewer):
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            gravity=(0.0, 0.0, 0.0),
+        ),
+        pbd_options=gs.options.PBDOptions(
+            particle_size=0.08,
+            lower_bound=(-0.5, -0.5, 0.0),
+            upper_bound=(0.5, 0.5, 1.0),
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(0.8, -1.0, 1.0),
+            camera_lookat=(0.0, 0.0, 0.5),
+        ),
+        show_viewer=show_viewer,
+    )
+    if is_regular_grid:
+        vertices, elements = create_tetrahedral_grid(
+            lower=(-0.2, -0.2, -0.2), upper=(0.2, 0.2, 0.2), resolution=(2, 2, 2)
+        )
+        morph = gs.morphs.TetrahedralMesh(
+            pos=(0.1, -0.05, 0.5),
+            euler=(0.0, 0.0, 90.0),
+            offset_pos=(0.05, 0.1, 0.0),
+            vertices=vertices,
+            elements=elements,
+        )
+    else:
+        morph = gs.morphs.Box(
+            pos=(0.0, 0.0, 0.5),
+            size=(0.4, 0.4, 0.4),
+        )
+    elastic = scene.add_entity(
+        morph=morph,
+        material=gs.materials.PBD.Elastic(),
+        vis_mode=None if is_regular_grid else "collision",
+    )
+    particles_initial = elastic.init_particles
+    if is_regular_grid:
+        assert_allclose(particles_initial, vertices[:, (1, 0, 2)] * (-1, 1, 1) + (0.0, 0.0, 0.5), atol=1e-7)
+    triangles_idx = elastic.surface_triangles
+    triangles_initial = particles_initial[triangles_idx]
+    vverts_rest_offset = elastic.vmesh.verts[:, None] - particles_initial[None]
+    vverts_particles_idx = np.linalg.norm(vverts_rest_offset, axis=-1).argmin(axis=1)
+    contact_triangles = []
+    contact_weights = []
+    contact_positions = []
+    rigid_entities = []
+    for direction, is_edge in ((1, False), (-1, True)):
+        side_triangles_idx = np.flatnonzero((direction * triangles_initial[..., 0] > 0.2 - 1e-6).all(axis=1))
+        if is_edge:
+            weights = np.array(
+                (
+                    (0.5, 0.5, 0.0),
+                    (0.0, 0.5, 0.5),
+                    (0.5, 0.0, 0.5),
+                )
+            )
+        else:
+            weights = np.array(((1 / 3,) * 3,))
+        candidates = np.einsum("kv,fvd->fkd", weights, triangles_initial[side_triangles_idx]).reshape((-1, 3))
+        distances = np.linalg.norm(candidates[:, None] - particles_initial[None], axis=-1).min(axis=1)
+        candidate_idx = np.argmax(distances)
+        half_size = (distances[candidate_idx] - scene.pbd_options.particle_size / 2) / 4
+        assert half_size > 0.0
+        triangle_idx = side_triangles_idx[candidate_idx // len(weights)]
+        if not is_edge:
+            triangle = triangles_initial[triangle_idx]
+            edge_normals = np.cross(triangle[(1, 2, 0), :] - triangle, (direction, 0, 0))
+            edge_distances = np.abs(np.einsum("ij,ij->i", edge_normals, candidates[candidate_idx] - triangle))
+            assert (edge_distances > half_size * np.abs(edge_normals).sum(axis=1)).all()
+        contact_triangles.append(triangles_idx[triangle_idx])
+        contact_weights.append(weights[candidate_idx % len(weights)])
+        contact_positions.append(candidates[candidate_idx])
+        initial_pos = candidates[candidate_idx].copy()
+        initial_pos[0] += direction * (half_size + scene.pbd_options.particle_size / 2 + 0.01)
+        rigid_entities.append(
+            scene.add_entity(
+                morph=gs.morphs.Box(
+                    pos=initial_pos,
+                    size=(2 * half_size,) * 3,
+                ),
+                material=gs.materials.Rigid(
+                    is_coup_reaction_enabled=False,
+                ),
+            )
+        )
+        box_dist = np.abs(particles_initial - candidates[candidate_idx]) - half_size
+        assert (np.linalg.norm(np.maximum(box_dist, 0.0), axis=-1) > scene.pbd_options.particle_size / 2).all()
+
+    scene.build(n_envs=n_envs)
+    for rigid, contact_pos in zip(rigid_entities, contact_positions):
+        rigid.set_pos(contact_pos, envs_idx=n_envs - 1 if n_envs else None)
+    scene.step()
+    particles_pos = tensor_to_array(elastic.get_particles_pos()).reshape((-1, elastic.n_particles, 3))
+    vverts_pos, _, vfaces = scene.pbd_solver.get_state_render()
+    vverts_pos = qd_to_numpy(vverts_pos, transpose=True)
+    render_mesh = trimesh.Trimesh(vertices=vverts_pos[-1], faces=qd_to_numpy(vfaces, transpose=True), process=False)
+    _, contact_distances, _ = trimesh.proximity.closest_point(render_mesh, np.stack(contact_positions))
+    assert (contact_distances > np.array([rigid.morph.size[0] / 2 for rigid in rigid_entities])).all()
+    assert_equal(vverts_pos, particles_pos[:, vverts_particles_idx])
+    for contact_idx, (direction, rigid) in enumerate(zip((1, -1), rigid_entities)):
+        contact_vertices = particles_pos[-1, contact_triangles[contact_idx]]
+        contact_pos = (contact_vertices * contact_weights[contact_idx][:, None]).sum(axis=0)
+        assert direction * (contact_pos[0] - contact_positions[contact_idx][0]) < -rigid.morph.size[0] / 2
+        assert_allclose(
+            rigid.get_pos(envs_idx=n_envs - 1 if n_envs else None), contact_positions[contact_idx], atol=1e-6
+        )
+        assert_equal(rigid.get_vel(), 0.0)
+    if n_envs:
+        assert_allclose(particles_pos[0], particles_initial, atol=1e-6)
+
+    scene.reset()
+    scene.step()
+    particles_pos = tensor_to_array(elastic.get_particles_pos()).reshape((-1, elastic.n_particles, 3))
+    assert_allclose(particles_pos, particles_initial[None], atol=1e-6)
+    vverts_pos, _, _ = scene.pbd_solver.get_state_render()
+    assert_equal(qd_to_numpy(vverts_pos, transpose=True), particles_pos[:, vverts_particles_idx])

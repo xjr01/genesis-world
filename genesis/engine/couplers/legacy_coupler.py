@@ -7,6 +7,7 @@ import quadrants as qd
 
 import genesis as gs
 from genesis.engine.bvh import AABB, LBVH, kernel_remap_leaf_faces
+from genesis.engine.entities.pbd_entity import PBDTetEntity
 from genesis.options.solvers import LegacyCouplerOptions
 from genesis.repr_base import RBC
 from genesis.utils import array_class
@@ -18,14 +19,15 @@ if TYPE_CHECKING:
     from genesis.engine.simulator import Simulator
 
 CLAMPED_INV_DT = 50.0
+PBD_RIGID_SURFACE_PROJECTION_ITERATIONS = 20
 
 
 @qd.kernel
-def kernel_init_fem_rigid_surface_aabbs(
+def kernel_init_rigid_surface_aabbs(
     faces_idx: qd.types.ndarray(ndim=1),
     surface_aabbs: qd.template(),
     dyn_info: array_class.DynInfo,
-    surface_info: array_class.FEMRigidSurfaceInfo,
+    surface_info: array_class.RigidSurfaceInfo,
 ):
     for face_slot in range(faces_idx.shape[0]):
         face_idx = faces_idx[face_slot]
@@ -40,11 +42,11 @@ def kernel_init_fem_rigid_surface_aabbs(
 
 
 @qd.kernel
-def kernel_reset_fem_rigid_surface_state(
+def kernel_reset_rigid_surface_contact(
     envs_idx: qd.types.ndarray(ndim=1),
     dyn_state: array_class.DynState,
-    surface_state: array_class.FEMRigidSurfaceState,
-    surface_info: array_class.FEMRigidSurfaceInfo,
+    surface_state: array_class.RigidSurfaceContactState,
+    surface_info: array_class.RigidSurfaceInfo,
 ):
     for env_slot, vertex_idx in qd.ndrange(envs_idx.shape[0], surface_state.corrections.shape[1]):
         env_idx = envs_idx[env_slot]
@@ -62,10 +64,10 @@ def kernel_reset_fem_rigid_surface_state(
 
 
 @qd.kernel
-def kernel_store_fem_rigid_surface_poses(
+def kernel_store_rigid_surface_poses(
     dyn_state: array_class.DynState,
-    surface_state: array_class.FEMRigidSurfaceState,
-    surface_info: array_class.FEMRigidSurfaceInfo,
+    surface_state: array_class.RigidSurfaceContactState,
+    surface_info: array_class.RigidSurfaceInfo,
 ):
     for env_idx, surface_geom_slot in qd.ndrange(
         surface_state.previous_geoms_pos.shape[0], surface_info.surface_geoms_idx.shape[0]
@@ -73,6 +75,102 @@ def kernel_store_fem_rigid_surface_poses(
         geom_idx = surface_info.surface_geoms_idx[surface_geom_slot]
         surface_state.previous_geoms_pos[env_idx, surface_geom_slot] = dyn_state.geoms.pos[geom_idx, env_idx]
         surface_state.previous_geoms_quat[env_idx, surface_geom_slot] = dyn_state.geoms.quat[geom_idx, env_idx]
+
+
+@qd.kernel
+def kernel_detect_pbd_rigid_surface_intersections(
+    i_iteration: int,
+    surface_faces: qd.Tensor,
+    particles: qd.template(),
+    particles_ng: qd.template(),
+    bvh_nodes: qd.template(),
+    bvh_morton_codes: qd.template(),
+    dyn_state: array_class.DynState,
+    surface_state: array_class.RigidSurfaceContactState,
+    dyn_info: array_class.DynInfo,
+    rigid_info: array_class.RigidInfo,
+    surface_info: array_class.RigidSurfaceInfo,
+    is_audit: qd.template(),
+    errno: qd.Tensor,
+):
+    for i_b, i_f in qd.ndrange(particles.shape[1], surface_faces.shape[0]):
+        if not qd.static(is_audit) and i_iteration > 0 and not surface_state.is_active[i_b]:
+            continue
+        vertices_idx = surface_faces[i_f]
+        vertices_world = qd.Matrix.zero(gs.qd_float, 3, 3)
+        previous_vertices_world = qd.Matrix.zero(gs.qd_float, 3, 3)
+        has_free_vertex = False
+        is_active = True
+        for i_v_ in qd.static(range(3)):
+            i_v = vertices_idx[i_v_]
+            is_active = is_active and particles_ng[i_v, i_b].active
+            i_p = particles_ng[i_v, i_b].reordered_idx
+            vertices_world[:, i_v_] = particles[i_p, i_b].pos
+            previous_vertices_world[:, i_v_] = particles[i_p, i_b].ipos
+            has_free_vertex = has_free_vertex or particles[i_p, i_b].free
+        if not is_active or not has_free_vertex:
+            continue
+        for i_g_ in range(surface_info.surface_geoms_idx.shape[0]):
+            i_g = surface_info.surface_geoms_idx[i_g_]
+            clearance = sdf.sdf_func_collision_clearance(i_g, rigid_info)
+            corrections, n_corrections, has_intersection = sdf.sdf_func_triangle_surface_corrections(
+                i_b,
+                i_g_,
+                clearance,
+                vertices_world,
+                previous_vertices_world,
+                bvh_nodes,
+                bvh_morton_codes,
+                dyn_state,
+                surface_state,
+                dyn_info,
+                rigid_info,
+                surface_info,
+                is_audit=is_audit,
+            )
+            if has_intersection:
+                qd.atomic_max(surface_state.has_intersection[i_b], 1)
+                if qd.static(is_audit):
+                    qd.atomic_or(errno[i_b], array_class.ErrorCode.INVALID_PBD_RIGID_SURFACE_INTERSECTION)
+                else:
+                    for i_v_ in qd.static(range(3)):
+                        i_v = vertices_idx[i_v_]
+                        i_p = particles_ng[i_v, i_b].reordered_idx
+                        if particles[i_p, i_b].free:
+                            for i_axis in qd.static(range(3)):
+                                qd.atomic_add(surface_state.corrections[i_b, i_v][i_axis], corrections[i_axis, i_v_])
+                            qd.atomic_add(surface_state.n_corrections[i_b, i_v], n_corrections[i_v_])
+
+
+@qd.kernel
+def kernel_apply_pbd_rigid_surface_corrections(
+    substep_dt: float,
+    particles: qd.template(),
+    particles_ng: qd.template(),
+    surface_state: array_class.RigidSurfaceContactState,
+    errno: qd.Tensor,
+):
+    for i_b in range(particles.shape[1]):
+        surface_state.is_active[i_b] = surface_state.has_intersection[i_b] != 0
+        surface_state.has_intersection[i_b] = 0
+    for i_b, i_v in qd.ndrange(particles.shape[1], particles.shape[0]):
+        n_corrections = surface_state.n_corrections[i_b, i_v]
+        if n_corrections > 0:
+            i_p = particles_ng[i_v, i_b].reordered_idx
+            corrected_pos = particles[i_p, i_b].pos + surface_state.corrections[i_b, i_v] / n_corrections
+            corrected_vel = (corrected_pos - particles[i_p, i_b].ipos) / substep_dt
+            if (
+                qd.math.isnan(corrected_pos).any()
+                or qd.math.isinf(corrected_pos).any()
+                or qd.math.isnan(corrected_vel).any()
+                or qd.math.isinf(corrected_vel).any()
+            ):
+                qd.atomic_or(errno[i_b], array_class.ErrorCode.INVALID_CONTACT_NAN)
+            else:
+                particles[i_p, i_b].pos = corrected_pos
+                particles[i_p, i_b].vel = corrected_vel
+        surface_state.corrections[i_b, i_v] = qd.Vector.zero(gs.qd_float, 3)
+        surface_state.n_corrections[i_b, i_v] = 0
 
 
 @qd.data_oriented
@@ -97,9 +195,11 @@ class LegacyCoupler(RBC):
         self.fem_solver = self.sim.fem_solver
         self.sf_solver = self.sim.sf_solver
         self.fem_projection_state = None
-        self.fem_rigid_surface_info = None
+        self.rigid_surface_info = None
         self.fem_rigid_surface_state = None
-        self.fem_rigid_surface_bvh = None
+        self.rigid_surface_bvh = None
+        self.pbd_rigid_surface_state = None
+        self.pbd_surface_faces = None
 
     def build(self) -> None:
         self._rigid_mpm = self.rigid_solver.is_active and self.mpm_solver.is_active and self.options.rigid_mpm
@@ -111,10 +211,20 @@ class LegacyCoupler(RBC):
         self._fem_mpm = self.fem_solver.is_active and self.mpm_solver.is_active and self.options.fem_mpm
         self._fem_sph = self.fem_solver.is_active and self.sph_solver.is_active and self.options.fem_sph
 
+        projection_geoms = [
+            geom
+            for entity in self.rigid_solver.entities
+            for link in entity.links
+            for geom in link.geoms
+            if geom.needs_coup and not geom.is_coup_reaction_enabled
+        ]
+        surface_geoms = [geom for geom in projection_geoms if geom.n_faces > 0]
+        pbd_surface_entities = [
+            entity for entity in self.pbd_solver.entities if self._rigid_pbd and isinstance(entity, PBDTetEntity)
+        ]
+
         self._is_implicit_fem_projection_enabled = (
-            self._rigid_fem
-            and self.fem_solver._use_implicit_solver
-            and any(geom.needs_coup and not geom.is_coup_reaction_enabled for geom in self.rigid_solver.geoms)
+            self._rigid_fem and self.fem_solver._use_implicit_solver and bool(projection_geoms)
         )
         self.fem_solver._is_implicit_rigid_projection_enabled = self._is_implicit_fem_projection_enabled
         if self._is_implicit_fem_projection_enabled:
@@ -134,13 +244,10 @@ class LegacyCoupler(RBC):
                 is_pcg_active_saved=qd.field(dtype=gs.qd_bool, shape=(self.fem_solver._B,)),
             )
 
-            projection_geoms = [
-                geom for geom in self.rigid_solver.geoms if geom.needs_coup and not geom.is_coup_reaction_enabled
-            ]
-            surface_geoms = [geom for geom in projection_geoms if geom.n_faces > 0]
-            if not surface_geoms:
-                gs.raise_exception("One-way implicit FEM coupling requires collider surface triangles.")
+        if self._is_implicit_fem_projection_enabled and not surface_geoms:
+            gs.raise_exception("One-way implicit FEM coupling requires collider surface triangles.")
 
+        if surface_geoms and (self._is_implicit_fem_projection_enabled or pbd_surface_entities):
             projection_geoms_idx = np.array([geom.idx for geom in projection_geoms], dtype=gs.np_int)
             surface_geoms_idx = np.array([geom.idx for geom in surface_geoms], dtype=gs.np_int)
             surface_geom_slots = np.full(self.rigid_solver.n_geoms, -1, dtype=gs.np_int)
@@ -169,49 +276,40 @@ class LegacyCoupler(RBC):
             surface_geoms_idx_qd.from_numpy(surface_geoms_idx)
             atlas_offsets_qd = qd.Vector.field(3, dtype=gs.qd_float, shape=(len(atlas_offsets),))
             atlas_offsets_qd.from_numpy(atlas_offsets)
-            self.fem_rigid_surface_info = array_class.FEMRigidSurfaceInfo(
+            self.rigid_surface_info = array_class.RigidSurfaceInfo(
                 projection_geoms_idx=projection_geoms_idx_qd,
                 surface_geom_slots=surface_geom_slots_qd,
                 surface_geoms_idx=surface_geoms_idx_qd,
                 atlas_offsets=atlas_offsets_qd,
             )
-            self.fem_rigid_surface_state = array_class.FEMRigidSurfaceState(
-                corrections=qd.Vector.field(
-                    3,
-                    dtype=gs.qd_float,
-                    shape=(self.fem_solver._B, self.fem_solver.n_vertices),
-                ),
-                n_corrections=qd.field(
-                    dtype=gs.qd_int,
-                    shape=(self.fem_solver._B, self.fem_solver.n_vertices),
-                ),
-                is_active=qd.field(dtype=gs.qd_bool, shape=(self.fem_solver._B,)),
-                has_intersection=qd.field(dtype=gs.qd_int, shape=(self.fem_solver._B,)),
-                previous_geoms_pos=qd.Vector.field(
-                    3,
-                    dtype=gs.qd_float,
-                    shape=(self.fem_solver._B, len(surface_geoms)),
-                ),
-                previous_geoms_quat=qd.Vector.field(
-                    4,
-                    dtype=gs.qd_float,
-                    shape=(self.fem_solver._B, len(surface_geoms)),
-                ),
-            )
+            if self._is_implicit_fem_projection_enabled:
+                self.fem_rigid_surface_state = array_class.get_rigid_surface_contact_state(
+                    self.sim._B, self.fem_solver.n_vertices, len(surface_geoms)
+                )
+            if pbd_surface_entities:
+                pbd_faces = np.concatenate(
+                    tuple(entity.surface_triangles + entity.particle_start for entity in pbd_surface_entities)
+                )
+                # Optional class-kernel buffers use fields; see get_rigid_surface_contact_state.
+                self.pbd_surface_faces = qd.Vector.field(n=3, dtype=gs.qd_int, shape=(len(pbd_faces),))
+                self.pbd_surface_faces.from_numpy(pbd_faces)
+                self.pbd_rigid_surface_state = array_class.get_rigid_surface_contact_state(
+                    self.sim._B, self.pbd_solver.n_particles, len(surface_geoms)
+                )
 
             faces_idx = np.concatenate(
                 tuple(np.arange(geom.face_start, geom.face_end, dtype=gs.np_int) for geom in surface_geoms)
             )
             surface_aabb = AABB(n_batches=1, n_aabbs=len(faces_idx))
-            self.fem_rigid_surface_bvh = LBVH(surface_aabb, max_n_query_result_per_aabb=0)
-            kernel_init_fem_rigid_surface_aabbs(
+            self.rigid_surface_bvh = LBVH(surface_aabb, max_n_query_result_per_aabb=0)
+            kernel_init_rigid_surface_aabbs(
                 faces_idx,
-                self.fem_rigid_surface_bvh.aabbs,
+                self.rigid_surface_bvh.aabbs,
                 self.rigid_solver.dyn_info,
-                self.fem_rigid_surface_info,
+                self.rigid_surface_info,
             )
-            self.fem_rigid_surface_bvh.build()
-            kernel_remap_leaf_faces(faces_idx, self.fem_rigid_surface_bvh.morton_codes)
+            self.rigid_surface_bvh.build()
+            kernel_remap_leaf_faces(faces_idx, self.rigid_surface_bvh.morton_codes)
 
         if (self._rigid_mpm or self._rigid_sph or self._rigid_pbd or self._rigid_fem) and any(
             geom.needs_coup for geom in self.rigid_solver.geoms
@@ -273,15 +371,13 @@ class LegacyCoupler(RBC):
             self.fem_projection_state.has_contact.fill(0)
             self.fem_projection_state.is_pcg_active_saved.fill(False)
 
-        if self.fem_rigid_surface_state is not None:
-            if envs_idx is None:
-                envs_idx = self.sim.scene._envs_idx
-            kernel_reset_fem_rigid_surface_state(
-                envs_idx,
-                self.rigid_solver.dyn_state,
-                self.fem_rigid_surface_state,
-                self.fem_rigid_surface_info,
-            )
+        for surface_state in (self.fem_rigid_surface_state, self.pbd_rigid_surface_state):
+            if surface_state is not None:
+                if envs_idx is None:
+                    envs_idx = self.sim.scene._envs_idx
+                kernel_reset_rigid_surface_contact(
+                    envs_idx, self.rigid_solver.dyn_state, surface_state, self.rigid_surface_info
+                )
 
         if self._rigid_mpm and self.mpm_solver.enable_CPIC:
             if envs_idx is None:
@@ -778,58 +874,58 @@ class LegacyCoupler(RBC):
         if is_initial:
             self.fem_solver.project_initial_pcg_positions(
                 f,
-                self.fem_rigid_surface_bvh.nodes,
-                self.fem_rigid_surface_bvh.morton_codes,
+                self.rigid_surface_bvh.nodes,
+                self.rigid_surface_bvh.morton_codes,
                 self.rigid_solver.dyn_state,
                 self.fem_projection_state,
                 self.rigid_solver.dyn_info,
                 self.rigid_solver.rigid_info,
                 self.rigid_solver.collider._collider_info,
-                self.fem_rigid_surface_info,
+                self.rigid_surface_info,
             )
         else:
             self.fem_solver.one_projected_pcg_iter(
                 f,
-                self.fem_rigid_surface_bvh.nodes,
-                self.fem_rigid_surface_bvh.morton_codes,
+                self.rigid_surface_bvh.nodes,
+                self.rigid_surface_bvh.morton_codes,
                 self.rigid_solver.dyn_state,
                 self.fem_projection_state,
                 self.rigid_solver.dyn_info,
                 self.rigid_solver.rigid_info,
                 self.rigid_solver.collider._collider_info,
-                self.fem_rigid_surface_info,
+                self.rigid_surface_info,
             )
 
     def project_fem_implicit_positions(self, f, is_committed):
         self.fem_solver.project_implicit_positions(
             f,
-            self.fem_rigid_surface_bvh.nodes,
-            self.fem_rigid_surface_bvh.morton_codes,
+            self.rigid_surface_bvh.nodes,
+            self.rigid_surface_bvh.morton_codes,
             self.rigid_solver.dyn_state,
             self.rigid_solver.dyn_info,
             self.rigid_solver.rigid_info,
             self.rigid_solver.collider._collider_info,
-            self.fem_rigid_surface_info,
+            self.rigid_surface_info,
             is_committed=is_committed,
         )
 
     def project_fem_implicit_surface(self, f):
         self.fem_solver.project_implicit_surface(
             f,
-            self.fem_rigid_surface_bvh.nodes,
-            self.fem_rigid_surface_bvh.morton_codes,
+            self.rigid_surface_bvh.nodes,
+            self.rigid_surface_bvh.morton_codes,
             self.rigid_solver.dyn_state,
             self.fem_rigid_surface_state,
             self.rigid_solver.dyn_info,
             self.rigid_solver.rigid_info,
             self.rigid_solver.collider._collider_info,
-            self.fem_rigid_surface_info,
+            self.rigid_surface_info,
             self.rigid_solver._errno,
         )
-        kernel_store_fem_rigid_surface_poses(
+        kernel_store_rigid_surface_poses(
             self.rigid_solver.dyn_state,
             self.fem_rigid_surface_state,
-            self.fem_rigid_surface_info,
+            self.rigid_surface_info,
         )
 
     @qd.kernel
@@ -1263,6 +1359,35 @@ class LegacyCoupler(RBC):
                 rigid_info=self.rigid_solver.rigid_info,
                 collider_static_config=self.rigid_solver.collider._collider_static_config,
             )
+
+            if self.pbd_rigid_surface_state is not None:
+                for i_iteration in range(PBD_RIGID_SURFACE_PROJECTION_ITERATIONS + 1):
+                    kernel_detect_pbd_rigid_surface_intersections(
+                        i_iteration,
+                        self.pbd_surface_faces,
+                        self.pbd_solver.particles_reordered,
+                        self.pbd_solver.particles_ng,
+                        self.rigid_surface_bvh.nodes,
+                        self.rigid_surface_bvh.morton_codes,
+                        self.rigid_solver.dyn_state,
+                        self.pbd_rigid_surface_state,
+                        self.rigid_solver.dyn_info,
+                        self.rigid_solver.rigid_info,
+                        self.rigid_surface_info,
+                        is_audit=i_iteration == PBD_RIGID_SURFACE_PROJECTION_ITERATIONS,
+                        errno=self.rigid_solver._errno,
+                    )
+                    if i_iteration < PBD_RIGID_SURFACE_PROJECTION_ITERATIONS:
+                        kernel_apply_pbd_rigid_surface_corrections(
+                            self.pbd_solver._substep_dt,
+                            self.pbd_solver.particles_reordered,
+                            self.pbd_solver.particles_ng,
+                            self.pbd_rigid_surface_state,
+                            self.rigid_solver._errno,
+                        )
+                kernel_store_rigid_surface_poses(
+                    self.rigid_solver.dyn_state, self.pbd_rigid_surface_state, self.rigid_surface_info
+                )
 
             # 1-way: animate particles by links
             full_step_inv_dt = 1.0 / self.pbd_solver._dt

@@ -94,6 +94,7 @@ class ErrorCode(IntEnum):
     INVALID_PBSTF_STATE_NAN = 0b00000000000000000000000100000000
     INVALID_PBSTF_DEFORMABLE_COLLIDER = 0b00000000000000000000001000000000
     INVALID_FEM_RIGID_SURFACE_INTERSECTION = 0b00000000000000000000010000000000
+    INVALID_PBD_RIGID_SURFACE_INTERSECTION = 0b00000000000000000000100000000000
 
 
 # =========================================== RigidInfo ===========================================
@@ -2359,7 +2360,7 @@ class FEMProjectionState:
 
 
 @dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
-class FEMRigidSurfaceInfo:
+class RigidSurfaceInfo:
     projection_geoms_idx: qd.Tensor
     surface_geom_slots: qd.Tensor
     surface_geoms_idx: qd.Tensor
@@ -2367,13 +2368,26 @@ class FEMRigidSurfaceInfo:
 
 
 @dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
-class FEMRigidSurfaceState:
+class RigidSurfaceContactState:
     corrections: qd.Tensor
     n_corrections: qd.Tensor
     is_active: qd.Tensor
     has_intersection: qd.Tensor
     previous_geoms_pos: qd.Tensor
     previous_geoms_quat: qd.Tensor
+
+
+def get_rigid_surface_contact_state(n_envs, n_vertices, n_geoms):
+    """Allocate corrections and relative-motion history for a deformable surface against rigid geoms."""
+    # Field-backed buffers support optional contact state in the legacy coupler's class kernels.
+    return RigidSurfaceContactState(
+        corrections=qd.Vector.field(n=3, dtype=gs.qd_float, shape=(n_envs, n_vertices)),
+        n_corrections=qd.field(dtype=gs.qd_int, shape=(n_envs, n_vertices)),
+        is_active=qd.field(dtype=gs.qd_bool, shape=(n_envs,)),
+        has_intersection=qd.field(dtype=gs.qd_int, shape=(n_envs,)),
+        previous_geoms_pos=qd.Vector.field(n=3, dtype=gs.qd_float, shape=(n_envs, n_geoms)),
+        previous_geoms_quat=qd.Vector.field(n=4, dtype=gs.qd_float, shape=(n_envs, n_geoms)),
+    )
 
 
 # =========================================== DynInfo and DynState ===========================================
