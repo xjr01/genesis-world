@@ -68,7 +68,7 @@ def segment_triangle_intersection(
     edge1 = v2 - v0
     cross_direction = direction.cross(edge1)
     determinant = edge0.dot(cross_direction)
-    determinant_tolerance = 16.0 * eps * qd.max(1.0, direction.norm() * edge0.norm() * edge1.norm())
+    determinant_tolerance = 16.0 * eps * direction.norm() * edge0.norm() * edge1.norm()
     is_hit = False
     parameter = gs.qd_float(0.0)
     hit_position = segment_start
@@ -105,7 +105,7 @@ def _triangle_interval(axis, origin, vertices):
 def _triangle_intervals_overlap(axis, origin, vertices0, vertices1, length_scale, eps):
     axis_length = axis.norm()
     is_overlapping = True
-    if axis_length > eps:
+    if axis_length > 0.0:
         lower0, upper0 = _triangle_interval(axis, origin, vertices0)
         lower1, upper1 = _triangle_interval(axis, origin, vertices1)
         tolerance = 32.0 * eps * axis_length * qd.max(1.0, length_scale)
@@ -127,7 +127,7 @@ def _triangle_previous_separating_axis_correction(
     has_correction,
 ):
     axis_length = axis.norm()
-    if axis_length > eps:
+    if axis_length > 0.0:
         origin = rigid_vertices[:, 0]
         current_lower, current_upper = _triangle_interval(axis, origin, current_vertices)
         previous_lower, previous_upper = _triangle_interval(axis, origin, previous_vertices)
@@ -252,6 +252,22 @@ def triangle_triangle_previous_separating_correction(
 
 
 @qd.func
+def triangle_separating_corrections(vertices, separation):
+    """Project each vertex onto the halfspace defined by the triangle's minimum separating translation."""
+    corrections = qd.Matrix.zero(gs.qd_float, 3, 3)
+    distance = separation.norm()
+    if distance > 0.0:
+        normal = separation / distance
+        projections = qd.Vector.zero(gs.qd_float, 3)
+        for i_v in qd.static(range(3)):
+            projections[i_v] = (vertices[:, i_v] - vertices[:, 0]).dot(normal)
+        target_projection = projections.min() + distance
+        for i_v in qd.static(range(3)):
+            corrections[:, i_v] = qd.max(target_projection - projections[i_v], 0.0) * normal
+    return corrections
+
+
+@qd.func
 def triangle_triangle_intersection(vertices0, vertices1, eps):
     """Return an exact discrete triangle-triangle overlap and one point on its intersection.
 
@@ -282,7 +298,11 @@ def triangle_triangle_intersection(vertices0, vertices1, eps):
         edges1[:, 1].norm(),
         edges1[:, 2].norm(),
     )
-    is_intersecting = normal0_raw.norm_sqr() > eps**2 and normal1_raw.norm_sqr() > eps**2
+    # Relative area tests retain the same classification under uniform changes of length units.
+    is_intersecting = (
+        normal0_raw.norm_sqr() > eps**2 * edges0[:, 0].norm_sqr() * edges0[:, 2].norm_sqr()
+        and normal1_raw.norm_sqr() > eps**2 * edges1[:, 0].norm_sqr() * edges1[:, 2].norm_sqr()
+    )
     if is_intersecting:
         is_intersecting = _triangle_intervals_overlap(
             normal0_raw, vertices1[:, 0], vertices0, vertices1, length_scale, eps

@@ -23,6 +23,8 @@ The command-line options are:
 | `--scale` | Sets particle radius to `1 / scale` and particle diameter to `2 / scale`. |
 | `--dt` | Overrides the simulation step duration in seconds. |
 | `--steps` | Overrides the number of simulation steps. |
+| `--sponge-render-style` | Selects `skeleton` tetrahedron edges or the `solid` sponge surface. |
+| `--sponge-grid-resolution NX NY NZ` | Sets the sponge cell counts; finer grids resolve smaller deformations at greater cost. |
 | `-v`, `--vis` | Opens the viewer. |
 | `--record` | Opens the viewer, records it, and prompts for an output path when the run ends. |
 
@@ -31,13 +33,13 @@ growing approximately cubically. The `teapot` case requires `scale >= 300` so it
 enough. The motion schedules use simulated seconds, so changing `dt` changes how many steps each motion phase takes.
 Changing `steps` changes the total simulated duration without changing the schedule itself.
 
-`--scale`, `--dt`, and `--steps` are the only command-line parameter overrides. Geometry, material, trajectory, and
+Geometry, material, trajectory, and
 absorption values are configured in `case_settings()` and `_case_liquid_material()`. Teapot geometry and manipulator
 values are configured in [`fluid_helper.py`](fluid_helper.py).
 
 ## Shared solver defaults
 
-`build_scene()` converts `scale` to `particle_size = 2 / scale` and uses a topology rebuild interval of 10 steps.
+`build_scene()` converts `scale` to `particle_size = 2 / scale` and uses a topology rebuild interval of 2 steps.
 World geometry and prescribed linear speeds use a uniform length factor `s = 1/15`, anchored by the Franka model at
 its authored scale `1`. The default particle scale increases by 15 so the particle count and relative resolution stay
 constant. At fixed time step, density compliance scales as `1/s^2`, surface-tension compliance as `s^2`, and distance
@@ -52,7 +54,7 @@ and discrete resolutions retain their configured values.
 | gravity | `(0.0, -9.8, 0.0)` | `(0.0, -9.8, 0.0)` |
 | lower bound | `(-4/3, -6.04186/15, -4/3)` | `(-0.4, -1/15, -4/15)` |
 | upper bound | `(4/3, 1.0, 4/3)` | `(0.4, 4/15, 4/15)` |
-| solver iterations | `5` | `10` |
+| solver iterations | `5` | `30` |
 | surface-neighbor capacity | `128` | `128` |
 | local-mesh-neighbor capacity | `64` | `64` |
 | principal component analysis normals | disabled | disabled |
@@ -66,13 +68,13 @@ The liquid material parameters are:
 | sampler | `regular` | `regular` |
 | rest density | `1000.0` | `1000.0` |
 | density compliance | `33750.0` | `33750.0` |
-| surface-tension compliance | `3 / 225` | `1 / 225` |
+| surface-tension compliance | `3 / 225` | `1 / 2000` |
 | surface-distance compliance | `40.0` | `40.0` |
 | interior-distance compliance | `180.0` | `180.0` |
 | surface viscosity | `0.2` | `0.5` |
 | interior viscosity | `0.05` | `0.5` |
 | collider adhesion and friction | enabled | enabled |
-| collider-adhesion compliance | `20.0` | `20.0` |
+| collider-adhesion compliance | `20.0` | `30.0` |
 | collider friction | `0.01` | `0.5` |
 
 Compliance values trade enforcement strength for softness: lower values enforce the corresponding condition more
@@ -143,8 +145,8 @@ arm and hand have collision disabled in this demo; the PBSTF mesh static collide
 `sweep` and `mop` use the same table, liquid region, rest dimensions, and wiping trajectory:
 
 - `sweep` uses an analytic `PBSTFBoxStaticColliderOptions` box that pushes the water.
-- `mop` renders a soft finite element method (FEM) sponge and binds its absorbent PBSTF collider to the deformed FEM
-  surface. The liquid sees the sponge as a one-way boundary and contributes no force to its FEM dynamics.
+- `mop` renders a position-based dynamics (PBD) sponge and binds its absorbent PBSTF collider to the deformed tetrahedral
+  surface. The liquid sees the sponge as a one-way boundary.
 
 Both cases use these `WipeSettings` values:
 
@@ -154,7 +156,7 @@ Both cases use these `WipeSettings` values:
 | `collider_entity_name` | `"sponge"` / `"sweep_collider"` | Visual entity for the moving collider. |
 | `collider_lower` | `(-0.04, 0.02/15, -0.08)` | Collider rest-space lower corner. |
 | `collider_upper` | `(0.04, 0.85/15, 0.08)` | Collider rest-space upper corner. |
-| `table_entity_name` | `"wipe_table"` | Rendered table, also used for FEM sponge collision. |
+| `table_entity_name` | `"wipe_table"` | Rendered table, also used for PBD sponge collision. |
 | `table_pos` | `(0.0, -1/60, 0.0)` | Table world position. |
 | `table_size` | `(0.8, 1/30, 8/15)` | Table dimensions. Its top surface is at world Y = 0. |
 | `liquid_lower` | `(-1/6, 1/300, -7/150)` | Initial liquid lower corner. |
@@ -182,21 +184,33 @@ the finger opening aligned to world X, keeping the gripper above the liquid regi
 | `1.0` to `6.0 s` | IK moves the hand along the wiping stroke while the sponge remains fully simulated. |
 | after `6.0 s` | The hand holds the end pose while the sponge continues its elastic and contact response. |
 
-The FEM sponge uses a regular tetrahedral grid and a linear-corotated elastic material with `E=1e4`, `nu=0.4`, and
-`rho=30`. Earth gravity remains `(0.0, -9.8, 0.0)`; the low foam density gives the sponge a light physical weight.
-No sponge vertex is attached to a rigid link. Every vertex is instead projected outside every coupled collider geom.
-The projection removes only inward normal motion, so the contacts are frictionless and transfer no reaction force to
-the kinematically driven robot or fixed table.
+The sponge uses a regular tetrahedral grid and `PBD.Elastic(rho=30, stretch_relaxation=0.1, volume_relaxation=0.15)`.
+Stretch and volume compliance are both `0`. Its `PBDUnifiedOptions` uses 30 iterations per substep and
+`constraint_acceleration=0.85`. Consecutive position iterates are extrapolated to accelerate shape recovery under
+gravity `(0.0, -9.8, 0.0)` and the gripper. Larger acceleration can improve recovery with fewer iterations, with a
+greater risk of overshoot under changing contacts. The iteration history restarts at each substep's predicted
+positions. Particle velocities retain their ordinary PBD update.
+Each iteration reads one position state, accumulates stretch and volume corrections into `dpos`, applies that sum,
+and projects vertices and surface triangles outside the rigid geoms. Cloth uses stretch and bending in the same loop.
+The prescribed rigid boundaries receive no reaction force; the sponge responds through contact and elastic dynamics.
+With zero compliance, uniform density scaling cancels in the mass-normalized elastic corrections. In this
+prescribed-boundary scene, constraint parameters and the iteration budget control the deformation under gravity.
 
-The Panda loads collision geometry from every authored link. The rendered fixed rigid table also serves FEM collision
-queries. Both use one-way rigid-to-FEM coupling. They are separate from the two PBSTF static colliders, so the liquid
-still sees only the analytic table and the absorbent sponge surface.
+Each hard-contact solve has a 100-iteration limit and exits when every environment is clear. The initial gripper
+overlap requires more work than the subsequent small motions. Triangle contact projects vertices onto a separating
+halfspace, retaining vertices that already satisfy it. Signed volume constraints can continue recovering inverted
+free tetrahedra; invalid volumes with every vertex fixed, non-finite states, and unresolved contact raise errors.
+The fluid retains its 30 iterations, `dt=0.01`, and material parameters.
+
+The Panda loads collision geometry from every authored link. The rendered fixed rigid table also serves PBD collision
+queries. The PBD solver owns these one-way collision projections. The liquid interacts with its analytic table and
+absorbent sponge surface through the two PBSTF static colliders.
 
 The sponge is authored from the refined tetrahedral boundary, so its rendered triangles are the same triangles as the
-FEM volume boundary. `update_mop_case()` synchronizes those boundary vertices and the embedded absorption voxels on
-every step. Runtime fluid queries use the current triangles directly, which keeps the collider current while the FEM
-shape continues changing. `collider_lower` and `collider_upper` define the rest-space material voxel lattice; the
-deformed tetrahedral boundary defines the contact and absorption surface.
+PBD volume boundary. The PBSTF solver subscribes to PBD geometry changes and synchronizes boundary vertices and
+embedded absorption voxels before its fluid substep. Runtime fluid queries use the current triangles directly.
+`collider_lower` and `collider_upper` define the rest-space material voxel lattice; the deformed tetrahedral boundary
+defines the contact and absorption surface.
 
 ## Configuring the absorbent box
 
@@ -210,12 +224,13 @@ wipe_collider = gs.options.PBSTFAbsorbentBoxStaticColliderOptions(
     upper=wipe.collider_upper,
     absorption_rate=2000.0,
     absorption_capacity_fraction=1.0,
-    fem_entity_name="sponge",
+    pbd_entity_name="sponge",
 )
 ```
 
 `lower` and `upper` define the rest material grid in collider-local coordinates. `pos` and `quat` place that frame in
-world space. `fem_entity_name` binds the collision surface and material targets to the named volumetric FEM entity.
+world space. `pbd_entity_name` binds the collision surface and material targets to the named volumetric PBD entity
+using `PBDUnifiedOptions`.
 Leaving `sdf_res` unset keeps exact triangle queries active for the continuously deforming shape. The two absorption
 fields control different parts of the behavior.
 
@@ -276,7 +291,7 @@ At the default `scale=300`, `particle_size=1/150` and `support_radius=0.02`. The
 `(4, 3, 8)` grid. Integer slot counts are distributed uniformly over these 96 voxels while preserving the exact total
 capacity.
 
-Each rest-grid voxel center is embedded in one FEM tetrahedron with barycentric coordinates. Synchronization evaluates
+Each rest-grid voxel center is embedded in one PBD tetrahedron with barycentric coordinates. Synchronization evaluates
 those coordinates from the current tetrahedron vertices, so targets follow the grip deformation. Capacity remains
 derived from the rest box volume and retains the same per-voxel and total slot counts throughout deformation.
 

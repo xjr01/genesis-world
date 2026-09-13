@@ -1,5 +1,6 @@
 import numpy as np
 import torch
+
 import trimesh
 
 import genesis as gs
@@ -8,7 +9,7 @@ import genesis.utils.mesh as mu
 import genesis.utils.particle as pu
 from genesis.ext import pyrender
 from genesis.ext.pyrender.jit_render import JITRenderer
-from genesis.utils.misc import tensor_to_array, qd_to_numpy
+from genesis.utils.misc import qd_to_numpy, tensor_to_array
 
 
 class SegmentationColorMap:
@@ -807,7 +808,21 @@ class RasterizerContext:
 
     def on_pbd(self):
         if self.sim.pbd_solver.is_active:
+            vertices_render = None
+            if any(entity.surface.vis_mode == "tetrahedral" for entity in self.sim.pbd_solver.entities):
+                vertices_render = (
+                    qd_to_numpy(
+                        self.sim.pbd_solver.get_tetrahedral_state_render(self.sim.cur_substep_local),
+                        self.rendered_envs_idx,
+                        transpose=True,
+                    )
+                    + self.scene.envs_offset[self.rendered_envs_idx, None, :]
+                )
             for pbd_entity in self.sim.pbd_solver.entities:
+                if pbd_entity.surface.vis_mode == "tetrahedral":
+                    vertices = vertices_render[:, pbd_entity.particle_start : pbd_entity.particle_end]
+                    self.add_tetrahedral_entity(pbd_entity, vertices)
+                    continue
                 if pbd_entity.surface.vis_mode in ("visual", "collision"):
                     # Apply surface visual with UVs to the trimesh
                     pbd_entity.vmesh.trimesh.visual = mu.surface_uvs_to_trimesh_visual(
@@ -867,16 +882,26 @@ class RasterizerContext:
 
     def update_pbd(self):
         if self.sim.pbd_solver.is_active:
-            particles_all = qd_to_numpy(self.sim.pbd_solver.particles_render.pos) + self.scene.envs_offset
-            particles_vel_all = qd_to_numpy(self.sim.pbd_solver.particles_render.vel)
-            active_all = qd_to_numpy(self.sim.pbd_solver.particles_render.active).astype(dtype=np.bool_, copy=False)
-            vverts_all = qd_to_numpy(self.sim.pbd_solver.vverts_render.pos) + self.scene.envs_offset
+            particles_pos = (
+                qd_to_numpy(self.sim.pbd_solver.particles_render.pos, self.rendered_envs_idx, transpose=True)
+                + self.scene.envs_offset[self.rendered_envs_idx, None]
+            )
+            particles_vel = qd_to_numpy(
+                self.sim.pbd_solver.particles_render.vel, self.rendered_envs_idx, transpose=True
+            )
+            is_active = (
+                qd_to_numpy(self.sim.pbd_solver.particles_render.active, self.rendered_envs_idx, transpose=True) != 0
+            )
+            vverts_pos = (
+                qd_to_numpy(self.sim.pbd_solver.vverts_render.pos, self.rendered_envs_idx, transpose=True)
+                + self.scene.envs_offset[self.rendered_envs_idx, None]
+            )
             for pbd_entity in self.sim.pbd_solver.entities:
-                for idx in self.rendered_envs_idx:
-                    particles_env = particles_all[:, idx]
-                    particles_vel_env = particles_vel_all[:, idx]
-                    active_env = active_all[:, idx]
-                    vverts_env = vverts_all[:, idx]
+                for env_slot, idx in enumerate(self.rendered_envs_idx):
+                    particles_env = particles_pos[env_slot]
+                    particles_vel_env = particles_vel[env_slot]
+                    active_env = is_active[env_slot]
+                    vverts_env = vverts_pos[env_slot]
 
                     if pbd_entity.surface.vis_mode == "recon":
                         positions = particles_env[pbd_entity.particle_start : pbd_entity.particle_end][
@@ -911,6 +936,11 @@ class RasterizerContext:
                             normal_data = self.jit.update_normal(node, update_data)
                             if normal_data is not None:
                                 self.jit.update_buffer(node, "normal", normal_data)
+                    elif pbd_entity.surface.vis_mode == "tetrahedral":
+                        vertices = particles_env[pbd_entity.particle_start : pbd_entity.particle_end]
+                        node = self.static_nodes[(idx, pbd_entity.uid)]
+                        update_data = self._scene.reorder_vertices(node, vertices.astype(np.float32))
+                        self.jit.update_buffer(node, "pos", update_data)
                     elif pbd_entity.surface.vis_mode in ("visual", "collision"):
                         vverts = vverts_env[pbd_entity.vvert_start : pbd_entity.vvert_end]
                         node = self.static_nodes[(idx, pbd_entity.uid)]
@@ -949,36 +979,40 @@ class RasterizerContext:
                             self.static_nodes[(i_b, vgeom.uid)] = static_node
                             self.create_node_seg(seg_key, static_node)
                 elif fem_entity.surface.vis_mode == "tetrahedral":
-                    element_edges = np.concatenate(
-                        (
-                            fem_entity.elems[:, (0, 1)],
-                            fem_entity.elems[:, (0, 2)],
-                            fem_entity.elems[:, (0, 3)],
-                            fem_entity.elems[:, (1, 2)],
-                            fem_entity.elems[:, (1, 3)],
-                            fem_entity.elems[:, (2, 3)],
-                        ),
-                        axis=0,
-                    )
-                    edges = np.unique(np.sort(element_edges, axis=1), axis=0)
-                    surface_texture = fem_entity.surface.get_rgba()
-                    if isinstance(surface_texture, gs.textures.ColorTexture):
-                        color = surface_texture.color
-                    else:
-                        color = surface_texture.mean_color
                     vertices = vertices_render[:, fem_entity.v_start : fem_entity.v_start + fem_entity.n_vertices]
-                    seg_key = (fem_entity.idx, 0) if self.segmentation_level == "geom" else fem_entity.idx
-                    for env_i, i_b in enumerate(self.rendered_envs_idx):
-                        primitive = pyrender.Primitive(
-                            positions=vertices[env_i],
-                            color_0=color,
-                            indices=edges,
-                            mode=pyrender.GLTF.LINES,
-                        )
-                        node = pyrender.Mesh(primitives=[primitive], name=f"fem_tetrahedral_{fem_entity.uid}")
-                        static_node = self.add_node(node)
-                        self.static_nodes[(i_b, fem_entity.uid)] = static_node
-                        self.create_node_seg(seg_key, static_node)
+                    self.add_tetrahedral_entity(fem_entity, vertices)
+
+    def add_tetrahedral_entity(self, entity, vertices):
+        """Render tetrahedron edges with the entity's surface and environment segmentation."""
+        element_edges = np.concatenate(
+            (
+                entity.elems[:, (0, 1)],
+                entity.elems[:, (0, 2)],
+                entity.elems[:, (0, 3)],
+                entity.elems[:, (1, 2)],
+                entity.elems[:, (1, 3)],
+                entity.elems[:, (2, 3)],
+            ),
+            axis=0,
+        )
+        edges = np.unique(np.sort(element_edges, axis=1), axis=0)
+        surface_texture = entity.surface.get_rgba()
+        if isinstance(surface_texture, gs.textures.ColorTexture):
+            color = surface_texture.color
+        else:
+            color = surface_texture.mean_color
+        seg_key = (entity.idx, 0) if self.segmentation_level == "geom" else entity.idx
+        for env_i, i_b in enumerate(self.rendered_envs_idx):
+            primitive = pyrender.Primitive(
+                positions=vertices[env_i],
+                color_0=color,
+                indices=edges,
+                mode=pyrender.GLTF.LINES,
+            )
+            node = pyrender.Mesh(primitives=[primitive], name=f"tetrahedral_{entity.uid}")
+            static_node = self.add_node(node)
+            self.static_nodes[(i_b, entity.uid)] = static_node
+            self.create_node_seg(seg_key, static_node)
 
     def update_fem(self):
         if self.sim.fem_solver.is_active:

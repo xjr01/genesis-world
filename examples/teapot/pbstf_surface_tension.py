@@ -365,7 +365,7 @@ def case_settings(case):
                 upper=wipe.collider_upper,
                 absorption_rate=2000.0,
                 absorption_capacity_fraction=1.0,
-                fem_entity_name=wipe.collider_entity_name,
+                pbd_entity_name=wipe.collider_entity_name,
             )
         else:
             wipe_collider = gs.options.PBSTFBoxStaticColliderOptions(
@@ -590,15 +590,14 @@ def add_case_entities(
             )
             scene.add_entity(
                 morph=gs.morphs.TetrahedralMesh(
+                    pos=sponge_pos,
                     vertices=sponge_vertices,
                     elements=sponge_elements,
-                    pos=sponge_pos,
                 ),
-                material=gs.materials.FEM.Elastic(
-                    E=1.0e4,
-                    nu=0.4,
+                material=gs.materials.PBD.Elastic(
                     rho=manipulator.sponge_density,
-                    model="linear_corotated",
+                    stretch_relaxation=0.1,
+                    volume_relaxation=0.15,
                 ),
                 surface=gs.surfaces.Default(
                     color=(0.95, 0.68, 0.12),
@@ -744,7 +743,6 @@ def initialize_mop_manipulator(scene, settings):
         settings,
         manipulator_entity.get_qpos(),
     )
-    scene.pbstf_solver.update_static_collider_deformation(settings.collider_idx, is_sdf_enabled=False)
     return qpos
 
 
@@ -766,7 +764,6 @@ def update_mop_case(scene, time, settings, init_qpos):
         quat=settings.quat,
         colliders_idx=settings.collider_idx,
     )
-    scene.pbstf_solver.update_static_collider_deformation(settings.collider_idx, is_sdf_enabled=False)
     return MopUpdate(qpos=qpos, wipe_pos=wipe_pos)
 
 
@@ -823,10 +820,14 @@ def build_scene(
             if case in (CASE_MOP, CASE_TEAPOT)
             else None
         ),
-        fem_options=(
-            gs.options.FEMOptions(
-                gravity=settings.gravity,
-                use_implicit_solver=True,
+        pbd_options=(
+            gs.options.PBDUnifiedOptions(
+                particle_size=0.005,
+                lower_bound=settings.lower_bound,
+                upper_bound=settings.upper_bound,
+                max_solver_iterations=30,
+                max_collision_iterations=100,
+                constraint_acceleration=0.85,
             )
             if case == CASE_MOP
             else None

@@ -1,7 +1,7 @@
-from abc import ABC, abstractmethod
-from dataclasses import dataclass
 import os
 import pickle as pkl
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
 
 import numpy as np
 
@@ -11,9 +11,9 @@ import trimesh
 import quadrants as qd
 
 import genesis as gs
-from genesis.engine.bvh import AABB, LBVH, STACK_SIZE, point_aabb_distance_sqr
 import genesis.utils.geom as gu
 import genesis.utils.mesh as mesh_utils
+from genesis.engine.bvh import AABB, LBVH, STACK_SIZE, point_aabb_distance_sqr
 from genesis.utils.misc import get_assets_dir, get_gsd_cache_dir
 from genesis.utils.triangle_qd import (
     closest_point_on_triangle,
@@ -117,7 +117,7 @@ class AbsorbentBoxStaticCollider(BoxStaticCollider, AbsorbentStaticCollider):
         upper,
         absorption_rate,
         absorption_capacity_fraction,
-        fem_entity_name=None,
+        pbd_entity_name=None,
         sdf_res=None,
         pos=(0.0, 0.0, 0.0),
         quat=(1.0, 0.0, 0.0, 0.0),
@@ -128,11 +128,11 @@ class AbsorbentBoxStaticCollider(BoxStaticCollider, AbsorbentStaticCollider):
             absorption_rate=absorption_rate,
             absorption_capacity_fraction=absorption_capacity_fraction,
         )
-        self.fem_entity_name = fem_entity_name
+        self.pbd_entity_name = pbd_entity_name
         self.sdf_res = sdf_res
-        self.is_deformable = fem_entity_name is not None
+        self.is_deformable = pbd_entity_name is not None
         self.has_sdf = sdf_res is not None
-        self.fem_entity = None
+        self.pbd_entity = None
         self.embedding_elements_idx = None
         self.embedding_barycentric = None
         self.n_surface_vertices = 0
@@ -161,7 +161,7 @@ class AbsorbentBoxStaticCollider(BoxStaticCollider, AbsorbentStaticCollider):
             upper=options.upper,
             absorption_rate=options.absorption_rate,
             absorption_capacity_fraction=options.absorption_capacity_fraction,
-            fem_entity_name=options.fem_entity_name,
+            pbd_entity_name=options.pbd_entity_name,
             sdf_res=options.sdf_res,
             pos=options.pos,
             quat=options.quat,

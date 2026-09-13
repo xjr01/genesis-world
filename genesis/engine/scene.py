@@ -9,9 +9,10 @@ from typing import TYPE_CHECKING, Callable, Iterable, Literal, overload
 import numpy as np
 import torch
 
+import trimesh
+
 import quadrants as qd
 from quadrants.lang import impl
-import trimesh
 
 import genesis as gs
 import genesis.utils.geom as gu
@@ -27,6 +28,7 @@ from genesis.options import (
     LegacyCouplerOptions,
     MPMOptions,
     PBDOptions,
+    PBDUnifiedOptions,
     PBSTFOptions,
     ProfilingOptions,
     RigidOptions,
@@ -109,7 +111,7 @@ class Scene(RBC):
         sph_options: SPHOptions | None = None,
         fem_options: FEMOptions | None = None,
         sf_options: SFOptions | None = None,
-        pbd_options: PBDOptions | None = None,
+        pbd_options: PBDOptions | PBDUnifiedOptions | None = None,
         ipbstf_options: IPBSTFOptions | None = None,
         pbstf_options: PBSTFOptions | None = None,
         vis_options: VisOptions | None = None,
@@ -238,7 +240,7 @@ class Scene(RBC):
         sph_options: SPHOptions,
         fem_options: FEMOptions,
         sf_options: SFOptions,
-        pbd_options: PBDOptions,
+        pbd_options: PBDOptions | PBDUnifiedOptions,
         ipbstf_options: IPBSTFOptions,
         pbstf_options: PBSTFOptions,
         vis_options: VisOptions,
@@ -273,8 +275,8 @@ class Scene(RBC):
         if not isinstance(sf_options, SFOptions):
             gs.raise_exception("`sf_options` should be an instance of `SFOptions`.")
 
-        if not isinstance(pbd_options, PBDOptions):
-            gs.raise_exception("`pbd_options` should be an instance of `PBDOptions`.")
+        if not isinstance(pbd_options, (PBDOptions, PBDUnifiedOptions)):
+            gs.raise_exception("`pbd_options` requires `PBDOptions` or `PBDUnifiedOptions`.")
 
         if not isinstance(ipbstf_options, IPBSTFOptions):
             gs.raise_exception("`ipbstf_options` should be an instance of `IPBSTFOptions`.")
@@ -502,6 +504,8 @@ class Scene(RBC):
             vis_modes = ("visual", "particle", "recon")
             if isinstance(material, gs.materials.PBD.Base):
                 vis_modes += ("collision",)
+            if isinstance(material, gs.materials.PBD.Elastic) and isinstance(self.pbd_options, PBDUnifiedOptions):
+                vis_modes += ("tetrahedral",)
             if surface.vis_mode not in vis_modes:
                 gs.raise_exception(
                     f"Unsupported `surface.vis_mode` for material {material}: '{surface.vis_mode}'. "

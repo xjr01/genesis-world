@@ -2,24 +2,28 @@ import math
 from functools import partial
 from unittest.mock import patch
 
+import numpy as np
+import torch
+
 import igl
 import pytest
-import torch
 import trimesh
-import numpy as np
 from scipy.linalg import polar as scipy_polar
-from scipy.spatial.transform import Rotation as R, Slerp
+from scipy.spatial.transform import Rotation as R
+from scipy.spatial.transform import Slerp
+
+import quadrants as qd
 
 import genesis as gs
 import genesis.utils.geom as gu
-from genesis.utils.tools import FPSTracker
-from genesis.utils.misc import tensor_to_array
+from genesis.utils import triangle_qd
 from genesis.utils import warnings as warnings_mod
-from genesis.utils.warnings import warn_once
+from genesis.utils.misc import qd_to_numpy, tensor_to_array
+from genesis.utils.tools import FPSTracker
 from genesis.utils.urdf import compose_inertial_properties
+from genesis.utils.warnings import warn_once
 
-from ..utils import assert_allclose, display_collision_pairs, get_genuine_interpenetration, get_hf_dataset
-
+from ..utils import assert_allclose, assert_equal, display_collision_pairs, get_genuine_interpenetration, get_hf_dataset
 
 TOL = 1e-7
 
@@ -32,8 +36,6 @@ def clear_seen_fixture():
 
 
 def _qd_kernel_wrapper(qd_func, num_inputs, num_outputs, *args):
-    import quadrants as qd
-
     if num_inputs == 1 and num_outputs == 1:
 
         @qd.kernel
@@ -57,6 +59,26 @@ def _qd_kernel_wrapper(qd_func, num_inputs, num_outputs, *args):
             qd.loop_config(serialize=False)
             for I in qd.grouped(qd.ndrange(*qd_in_1.shape)):
                 qd_out[I] = qd_func(qd_in_1[I], qd_in_2[I], qd_in_3[I], *args)
+
+    elif num_inputs == 2 and num_outputs == 2:
+
+        @qd.kernel
+        def kernel(qd_in_1: qd.template(), qd_in_2: qd.template(), qd_out_1: qd.template(), qd_out_2: qd.template()):
+            for I in qd.grouped(qd.ndrange(*qd_in_1.shape)):
+                qd_out_1[I], qd_out_2[I] = qd_func(qd_in_1[I], qd_in_2[I], *args)
+
+    elif num_inputs == 3 and num_outputs == 2:
+
+        @qd.kernel
+        def kernel(
+            qd_in_1: qd.template(),
+            qd_in_2: qd.template(),
+            qd_in_3: qd.template(),
+            qd_out_1: qd.template(),
+            qd_out_2: qd.template(),
+        ):
+            for I in qd.grouped(qd.ndrange(*qd_in_1.shape)):
+                qd_out_1[I], qd_out_2[I] = qd_func(qd_in_1[I], qd_in_2[I], qd_in_3[I], *args)
 
     elif num_inputs == 4 and num_outputs == 2:
 
@@ -110,8 +132,6 @@ def polar(A, pure_rotation: bool, side, tol):
 @pytest.mark.required
 @pytest.mark.parametrize("batch_shape", [(10, 40, 25), ()])
 def test_geom_quadrants_vs_tensor_consistency(batch_shape):
-    import quadrants as qd
-
     for qd_func, py_func, shapes_in, shapes_out, *args in (
         (gu.qd_xyz_to_quat, gu.xyz_to_quat, [[3]], [[4]]),
         (gu.qd_quat_to_R, gu.quat_to_R, [[4]], [[3, 3]], gs.EPS),
@@ -202,8 +222,6 @@ def test_geom_numpy_vs_torch_consistency(batch_shape, tol):
 @pytest.mark.required
 @pytest.mark.parametrize("batch_shape", [(10, 40, 25), ()])
 def test_geom_quadrants_inverse(batch_shape):
-    import quadrants as qd
-
     for qd_func, qd_func_inv, shapes_value_args, shapes_transform_args in (
         (gu.qd_transform_by_T, gu.qd_inv_transform_by_T, [[3]], [[4, 4]]),
         (gu.qd_transform_by_trans_quat, gu.qd_inv_transform_by_trans_quat, [[3]], [[3], [4]]),
@@ -248,8 +266,6 @@ def test_geom_quadrants_inverse(batch_shape):
 @pytest.mark.required
 @pytest.mark.parametrize("batch_shape", [(10, 40, 25), ()])
 def test_geom_quadrants_identity(batch_shape):
-    import quadrants as qd
-
     for qd_funcs, shape_args, funcs_args in (
         ((gu.qd_xyz_to_quat, gu.qd_quat_to_xyz), ([3], [4]), ((), (gs.EPS,))),
         ((gu.qd_xyz_to_quat, gu.qd_quat_to_R, gu.qd_R_to_xyz), ([3], [4], [3, 3]), ((), (gs.EPS,), (gs.EPS,))),
@@ -971,3 +987,35 @@ def test_warn_once_with_empty_message(clear_seen_fixture):
             warn_once("")
             warn_once("")
             mock_warning.assert_called_once_with("")
+
+
+@pytest.mark.required
+def test_triangle_queries():
+    scales = np.array((1.0, 0.01, 0.001, 0.0001), dtype=gs.np_float)
+    previous = np.array(((0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)), dtype=gs.np_float)
+    rigid = previous + np.array((0.6, 0.6, 0.0), dtype=gs.np_float)
+    current = previous + np.array((0.3, 0.3, 0.0), dtype=gs.np_float)
+    vertices = [qd.Matrix.field(3, 3, dtype=gs.qd_float, shape=len(scales)) for _ in range(3)]
+    for field, points in zip(vertices, (current, previous, rigid)):
+        field.from_numpy(scales[:, None, None] * points.T)
+    is_hit = qd.field(gs.qd_bool, shape=len(scales))
+    displacement = qd.Vector.field(3, dtype=gs.qd_float, shape=len(scales))
+    intersect = _qd_kernel_wrapper(triangle_qd.triangle_triangle_intersection, 2, 2, gs.EPS)
+    intersect(vertices[1], vertices[2], is_hit, displacement)
+    assert_equal(qd_to_numpy(is_hit, transpose=True), False)
+    intersect(vertices[0], vertices[2], is_hit, displacement)
+    assert_equal(qd_to_numpy(is_hit, transpose=True), True)
+    correct = _qd_kernel_wrapper(triangle_qd.triangle_triangle_previous_separating_correction, 3, 2, 0.0, gs.EPS)
+    correct(*vertices, is_hit, displacement)
+    assert_equal(qd_to_numpy(is_hit, transpose=True), True)
+    assert_allclose(qd_to_numpy(displacement, transpose=True) / scales[:, None], (-0.2, -0.2, 0.0), atol=2e-6)
+    corrections = qd.Matrix.field(3, 3, dtype=gs.qd_float, shape=len(scales))
+    project = _qd_kernel_wrapper(triangle_qd.triangle_separating_corrections, 2, 1)
+    project(vertices[0], displacement, corrections)
+    expected = np.array(((0.0, -0.2, -0.2), (0.0, -0.2, -0.2), (0.0, 0.0, 0.0)))
+    assert_allclose(qd_to_numpy(corrections, transpose=True) / scales[:, None, None], expected, atol=2e-6)
+    current[:, 2] = (0.3, 0.3, -0.3)
+    vertices[0].from_numpy(scales[:, None, None] * current.T)
+    intersect(vertices[0], vertices[2], is_hit, displacement)
+    assert_equal(qd_to_numpy(is_hit, transpose=True), True)
+    assert_allclose(qd_to_numpy(displacement, transpose=True)[:, 2] / scales, 0.0, atol=2e-6)

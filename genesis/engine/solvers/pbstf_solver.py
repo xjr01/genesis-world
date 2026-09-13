@@ -1,5 +1,5 @@
-from dataclasses import dataclass
 import math
+from dataclasses import dataclass
 
 import numpy as np
 import torch
@@ -7,6 +7,7 @@ import torch
 import quadrants as qd
 
 import genesis as gs
+import genesis.utils.geom as gu
 from genesis.engine.boundaries import (
     AbsorbentStaticCollider,
     CubeBoundary,
@@ -20,11 +21,11 @@ from genesis.engine.boundaries import (
     refit_deformable_surface_bvh,
     static_collider_separates,
 )
-from genesis.engine.entities import FEMEntity, PBSTFEntity
+from genesis.engine.entities import PBD3DEntity, PBSTFEntity
 from genesis.engine.states.solvers import PBSTFSolverState
+from genesis.options.solvers import PBDUnifiedOptions
 from genesis.utils import particle
 from genesis.utils.array_class import ErrorCode
-import genesis.utils.geom as gu
 from genesis.utils.misc import (
     assign_indexed_tensor,
     broadcast_tensor,
@@ -36,7 +37,7 @@ from genesis.utils.misc import (
 )
 
 from . import pbstf_absorption
-from .base_solver import Solver
+from .base_solver import Solver, StateChange, Subscriber
 
 
 @dataclass(frozen=True)
@@ -153,6 +154,7 @@ class PBSTFSolver(Solver):
         self._absorption_capture_budget = None
         self._deformable_collider_particle_cache = None
         self._errno = None
+        self._deformation_subscriber = None
 
     @property
     def is_active(self):
@@ -242,6 +244,9 @@ class PBSTFSolver(Solver):
             if self._n_absorbent_static_colliders > 0:
                 self._init_absorption_fields()
             self._init_surface_fields()
+            if self._n_deformable_static_colliders:
+                self._deformation_subscriber = Subscriber(to=frozenset((StateChange.GEOMETRY,)))
+                self.scene.pbd_solver.subscribe(self._deformation_subscriber)
 
             for entity in self.entities:
                 entity._add_to_solver()
@@ -351,7 +356,7 @@ class PBSTFSolver(Solver):
         ).contiguous()
         if not collider.has_sdf:
             if is_sdf_active.any():
-                gs.raise_exception("PBSTF FEM-bound collider SDF activation requires a configured `sdf_res`.")
+                gs.raise_exception("PBSTF PBD-bound collider SDF activation requires a configured `sdf_res`.")
             return
 
         if gs.use_zerocopy:
@@ -402,10 +407,10 @@ class PBSTFSolver(Solver):
 
     @gs.assert_built
     def update_static_collider_deformation(self, collider_idx, envs_idx=None, is_sdf_enabled=False):
-        """Synchronize a FEM-bound absorbent collider with its current deformed material points.
+        """Synchronize a PBD-bound absorbent collider with its current deformed material points.
 
-        The finite element method (FEM) entity supplies geometry only: position-based surface tension flow (PBSTF)
-        forces remain one-way. Call this after each FEM step whose deformation should affect later fluid steps.
+        The position-based dynamics (PBD) entity supplies geometry only: position-based surface tension flow (PBSTF)
+        forces remain one-way. Geometry changes are synchronized before each fluid substep.
         Enabling the signed distance field (SDF) builds a cached field from the synchronized surface. It makes later
         queries independent of triangle count at cubic preprocessing and memory cost, and suits a shape whose local
         deformation has stopped. A later synchronization with ``is_sdf_enabled=False`` resumes exact triangle queries.
@@ -416,12 +421,12 @@ class PBSTFSolver(Solver):
             gs.raise_exception(f"PBSTF static collider index {collider_idx} is out of range.")
         collider = self._static_colliders[collider_idx]
         if not isinstance(collider, AbsorbentStaticCollider) or not collider.is_deformable:
-            gs.raise_exception(f"PBSTF static collider {collider_idx} has no FEM deformation binding.")
+            gs.raise_exception(f"PBSTF static collider {collider_idx} has no PBD deformation binding.")
         if is_sdf_enabled and not collider.has_sdf:
             gs.raise_exception(f"PBSTF static collider {collider_idx} has no configured SDF resolution.")
 
         envs_idx = self._scene._sanitize_envs_idx(envs_idx)
-        embedded_positions = collider.fem_entity.get_embedded_positions(
+        embedded_positions = collider.pbd_entity.get_embedded_positions(
             collider.embedding_elements_idx,
             collider.embedding_barycentric,
             envs_idx if self._scene.n_envs > 0 else None,
@@ -434,14 +439,14 @@ class PBSTFSolver(Solver):
         surface_positions = local_positions[:, : collider.n_surface_vertices]
         voxel_positions = local_positions[:, collider.n_surface_vertices :]
         if not torch.isfinite(local_positions).all():
-            gs.raise_exception("PBSTF FEM-bound collider positions must be finite.")
+            gs.raise_exception("PBSTF PBD-bound collider positions must be finite.")
 
         face_v0 = surface_positions[:, collider.surface_faces_tensor[:, 0]]
         face_v1 = surface_positions[:, collider.surface_faces_tensor[:, 1]]
         face_v2 = surface_positions[:, collider.surface_faces_tensor[:, 2]]
         face_area_twice = torch.linalg.vector_norm(torch.linalg.cross(face_v1 - face_v0, face_v2 - face_v0), dim=-1)
         if (face_area_twice <= gs.EPS).any():
-            gs.raise_exception("PBSTF FEM-bound collider surface triangles must remain non-degenerate.")
+            gs.raise_exception("PBSTF PBD-bound collider surface triangles must remain non-degenerate.")
 
         voxel_delta = voxel_positions[:, :, None, :] - voxel_positions[:, None, :, :]
         physical_distance_sqr = torch.sum(voxel_delta * voxel_delta, dim=-1)
@@ -593,18 +598,18 @@ class PBSTFSolver(Solver):
             voxel_start += collider.n_voxels
 
             if collider.is_deformable:
-                fem_entity = self.scene.get_entity(name=collider.fem_entity_name)
-                if not isinstance(fem_entity, FEMEntity) or fem_entity.elems.shape[1] != 4:
+                pbd_entity = self.scene.get_entity(name=collider.pbd_entity_name)
+                if not isinstance(pbd_entity, PBD3DEntity) or not isinstance(self.scene.pbd_options, PBDUnifiedOptions):
                     gs.raise_exception(
-                        f"PBSTF absorbent collider FEM binding {collider.fem_entity_name!r} requires a volumetric "
-                        "FEM entity."
+                        f"PBSTF absorbent collider PBD binding {collider.pbd_entity_name!r} requires a volumetric "
+                        "PBD entity."
                     )
 
-                surface_vertices_idx = np.unique(fem_entity.surface_triangles)
-                surface_vertex_mapping = np.full(fem_entity.n_vertices, -1, dtype=gs.np_int)
+                surface_vertices_idx = np.unique(pbd_entity.surface_triangles)
+                surface_vertex_mapping = np.full(pbd_entity.n_particles, -1, dtype=gs.np_int)
                 surface_vertex_mapping[surface_vertices_idx] = np.arange(len(surface_vertices_idx))
-                surface_faces = surface_vertex_mapping[fem_entity.surface_triangles]
-                fem_init_positions = tensor_to_array(fem_entity.init_positions)
+                surface_faces = surface_vertex_mapping[pbd_entity.surface_triangles]
+                pbd_init_positions = pbd_entity.init_particles
 
                 grid_coordinates = np.stack(
                     np.meshgrid(*(np.arange(resolution) + 0.5 for resolution in collider.grid_res), indexing="ij"),
@@ -614,11 +619,11 @@ class PBSTFSolver(Solver):
                 voxel_positions_world = gu.transform_by_trans_quat(voxel_positions, collider.pos, collider.quat)
                 query_positions = np.concatenate(
                     (
-                        fem_init_positions[surface_vertices_idx],
+                        pbd_init_positions[surface_vertices_idx],
                         voxel_positions_world,
                     )
                 )
-                element_vertices = fem_init_positions[fem_entity.elems]
+                element_vertices = pbd_init_positions[pbd_entity.elems]
                 element_edges = np.swapaxes(element_vertices[:, 1:] - element_vertices[:, :1], 1, 2)
                 element_edges_inv = np.linalg.inv(element_edges)
                 query_offsets = query_positions[:, None, :] - element_vertices[None, :, 0, :]
@@ -635,12 +640,12 @@ class PBSTFSolver(Solver):
                 embedding_barycentric = barycentric[np.arange(len(query_positions)), embedding_elements_idx]
                 if (embedding_barycentric < -1.0e-5).any():
                     gs.raise_exception(
-                        f"PBSTF absorbent collider bounds for {collider.fem_entity_name!r} must lie inside its FEM "
+                        f"PBSTF absorbent collider bounds for {collider.pbd_entity_name!r} must lie inside its PBD "
                         "tetrahedral mesh."
                     )
 
                 surface_positions = gu.inv_transform_by_trans_quat(
-                    fem_init_positions[surface_vertices_idx], collider.pos, collider.quat
+                    pbd_init_positions[surface_vertices_idx], collider.pos, collider.quat
                 )
                 material_coordinates = np.stack(
                     np.meshgrid(*(np.arange(resolution) for resolution in collider.grid_res), indexing="ij"), axis=-1
@@ -656,7 +661,7 @@ class PBSTFSolver(Solver):
                 graph_order = np.argsort(graph_distance_ordered, axis=-1, kind="stable")
                 voxel_search_order = np.take_along_axis(physical_order, graph_order, axis=-1)
 
-                collider.fem_entity = fem_entity
+                collider.pbd_entity = pbd_entity
                 collider.embedding_elements_idx = torch.as_tensor(
                     embedding_elements_idx, dtype=gs.tc_int, device=gs.device
                 )
@@ -1785,6 +1790,11 @@ class PBSTFSolver(Solver):
         if not self.is_active:
             return
 
+        if self._deformation_subscriber is not None and self._deformation_subscriber.pending:
+            for collider_idx in self._deformable_static_colliders_idx:
+                self.update_static_collider_deformation(collider_idx, is_sdf_enabled=False)
+            self._deformation_subscriber.clear()
+
         self._kernel_reorder_particles(f)
         if self._n_absorbent_static_colliders > 0:
             absorption_capture_budget = None
@@ -1890,7 +1900,7 @@ class PBSTFSolver(Solver):
         if errno & ErrorCode.INVALID_PBSTF_DEFORMABLE_COLLIDER:
             gs.raise_exception(
                 "PBSTF deformable collider state contains non-finite points, degenerate surface triangles, or invalid "
-                "voxel search indices. Synchronize the collider from a valid FEM entity or restore a valid state."
+                "voxel search indices. Synchronize the collider from a valid PBD entity or restore a valid state."
             )
         if errno & ErrorCode.INVALID_PBSTF_STATE_NAN:
             gs.raise_exception(

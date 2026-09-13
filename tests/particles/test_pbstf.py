@@ -2,13 +2,17 @@ import math
 import os
 
 import numpy as np
-import pytest
 
 import igl
+import pytest
 import trimesh
 
 import quadrants as qd
 
+import genesis as gs
+import genesis.utils.geom as geom_utils
+import genesis.utils.mesh as mesh_utils
+import genesis.utils.particle as particle_utils
 from examples.teapot.pbstf_surface_tension import (
     CASE_BOUNCE,
     CASE_CONE,
@@ -27,7 +31,6 @@ from examples.teapot.pbstf_surface_tension import (
     update_wipe_case,
     wipe_pose,
 )
-import genesis as gs
 from genesis.engine.boundaries import (
     AbsorbentBoxStaticCollider,
     BoxStaticCollider,
@@ -40,10 +43,8 @@ from genesis.engine.boundaries import (
     refit_deformable_surface_bvh,
     static_collider_separates,
 )
-import genesis.utils.geom as geom_utils
-import genesis.utils.mesh as mesh_utils
+from genesis.utils.element import create_tetrahedral_grid
 from genesis.utils.misc import qd_to_numpy, tensor_to_array
-import genesis.utils.particle as particle_utils
 from tests.utils import assert_allclose, assert_equal
 
 
@@ -183,7 +184,7 @@ def test_analytic_static_collider_geometry():
         upper=(1.0, 2.0, 3.0),
         absorption_rate=8.0,
         absorption_capacity_fraction=0.25,
-        fem_entity_name="sponge",
+        pbd_entity_name="sponge",
     )
     deformable_mesh = trimesh.creation.box(extents=(2.0, 4.0, 6.0))
     deformable_vertices = np.array(deformable_mesh.vertices, dtype=gs.np_float)
@@ -258,7 +259,7 @@ def test_analytic_static_collider_geometry():
         upper=(1.0, 2.0, 3.0),
         absorption_rate=8.0,
         absorption_capacity_fraction=0.25,
-        fem_entity_name="sponge",
+        pbd_entity_name="sponge",
         sdf_res=32,
     )
     dented_mesh = trimesh.creation.box(extents=(2.0, 4.0, 6.0)).subdivide()
@@ -345,7 +346,7 @@ def test_analytic_static_collider_geometry():
             upper=(1.0, -1.0, 1.0),
         )
 
-    with pytest.raises(gs.GenesisException, match="requires `fem_entity_name`"):
+    with pytest.raises(gs.GenesisException, match="requires `pbd_entity_name`"):
         gs.options.PBSTFAbsorbentBoxStaticColliderOptions(
             lower=(-1.0, -1.0, -1.0),
             upper=(1.0, 1.0, 1.0),
@@ -361,7 +362,8 @@ def test_analytic_static_collider_geometry():
 @pytest.mark.required
 @pytest.mark.parametrize("backend", [gs.cuda])
 @pytest.mark.parametrize("n_envs", [0, 2])
-def test_static_collider_pose_and_absorption(asset_tmp_path, n_envs, show_viewer):
+@pytest.mark.parametrize("is_deformable", [False, True])
+def test_static_collider_pose_and_absorption(asset_tmp_path, n_envs, is_deformable, show_viewer):
     mesh_path = asset_tmp_path / f"pbstf_static_collider_box_{n_envs}.obj"
     trimesh.creation.box().export(mesh_path)
     target_pos = (1.0, 2.0, 3.0)
@@ -387,12 +389,18 @@ def test_static_collider_pose_and_absorption(asset_tmp_path, n_envs, show_viewer
             upper=(0.3, 0.3, 0.3),
             absorption_rate=100.0,
             absorption_capacity_fraction=0.4,
+            pbd_entity_name="absorbent" if is_deformable else None,
         ),
     ]
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
             dt=1e-3,
             gravity=(0.0, 0.0, 0.0),
+        ),
+        pbd_options=gs.options.PBDUnifiedOptions(
+            lower_bound=(-4.0, -4.0, -4.0),
+            upper_bound=(4.0, 4.0, 4.0),
+            max_solver_iterations=1,
         ),
         pbstf_options=gs.options.PBSTFOptions(
             particle_size=0.1,
@@ -428,7 +436,23 @@ def test_static_collider_pose_and_absorption(asset_tmp_path, n_envs, show_viewer
             sampler="regular",
         ),
     )
+    absorbent = None
+    if is_deformable:
+        vertices, elements = create_tetrahedral_grid(
+            lower=collider_options[3].lower, upper=collider_options[3].upper, resolution=(1, 1, 1)
+        )
+        absorbent = scene.add_entity(
+            morph=gs.morphs.TetrahedralMesh(
+                pos=absorbent_pos,
+                vertices=vertices,
+                elements=elements,
+            ),
+            material=gs.materials.PBD.Elastic(),
+            name="absorbent",
+        )
     scene.build(n_envs=n_envs)
+    if absorbent is not None:
+        absorbent.fix_particles()
 
     scene.pbstf_solver.set_static_colliders_pose(
         pos=target_pos,
@@ -533,6 +557,10 @@ def test_static_collider_pose_and_absorption(asset_tmp_path, n_envs, show_viewer
         quat=moved_quat,
         colliders_idx=3,
     )
+    if absorbent is not None:
+        absorbent.set_particles_pos(
+            geom_utils.transform_by_trans_quat(vertices, np.array(moved_pos), np.array(moved_quat))
+        )
     scene.step()
     particles_moved = tensor_to_array(liquid.get_particles_pos())
     if n_envs == 0:
@@ -560,6 +588,8 @@ def test_static_collider_pose_and_absorption(asset_tmp_path, n_envs, show_viewer
         quat=(1.0, 0.0, 0.0, 0.0),
         colliders_idx=3,
     )
+    if absorbent is not None:
+        absorbent.set_particles_pos(vertices + (-2.5, -0.3, -0.2))
     scene.step()
     scene.reset(saved_state)
     positions_restored = tensor_to_array(liquid.get_particles_pos())
@@ -593,6 +623,21 @@ def test_static_collider_pose_and_absorption(asset_tmp_path, n_envs, show_viewer
             wetness_sum_unbound = wetness_sum_unbound[None]
         wetness_sum_unbound = wetness_sum_unbound.sum(axis=(1, 2, 3))
         assert (wetness_sum_unbound < wetness_sum).all()
+
+    if absorbent is not None:
+        scene.reset(saved_state)
+        deformed_vertices = vertices.copy()
+        deformed_vertices[:, 1] += 0.2 * deformed_vertices[:, 0]
+        absorbent.set_particles_pos(
+            geom_utils.transform_by_trans_quat(deformed_vertices, np.array(moved_pos), np.array(moved_quat))
+        )
+        scene.step()
+        deformed_state = solver.get_state(0)
+        assert_allclose(
+            deformed_state.deformable_static_colliders_surface_vertices,
+            deformed_vertices[np.unique(absorbent.surface_triangles)],
+            atol=1e-6,
+        )
 
     saved_solver_state = saved_state.solvers_state[scene.solvers.index(solver)]
     saved_solver_state.absorption_capture_budget[:] = math.nan
@@ -828,7 +873,7 @@ def test_case_settings():
     assert_equal(mop_settings.static_colliders[1].quat, sweep_settings.static_colliders[1].quat)
     assert_equal(mop_settings.static_colliders[1].absorption_rate, 2000.0)
     assert_equal(mop_settings.static_colliders[1].absorption_capacity_fraction, 1.0)
-    assert mop_settings.static_colliders[1].fem_entity_name == mop.collider_entity_name
+    assert mop_settings.static_colliders[1].pbd_entity_name == mop.collider_entity_name
     assert mop_settings.static_colliders[1].sdf_res is None
     assert mop.mop_manipulator.asset == "urdf/panda_bullet/panda.urdf"
     assert mop.mop_manipulator.is_visible
@@ -969,7 +1014,7 @@ def test_mop_sponge_full_simulation_and_collision(n_envs, show_viewer):
         case=CASE_MOP,
         scale=75,
         show_viewer=show_viewer,
-        dt=0.05,
+        dt=0.01,
         n_envs=n_envs,
     )
     settings = case_settings(CASE_MOP).mop
@@ -981,9 +1026,9 @@ def test_mop_sponge_full_simulation_and_collision(n_envs, show_viewer):
     assert sponge_entity.surface.vis_mode == "tetrahedral"
     assert sponge_entity.surface.opacity is None
     assert isinstance(sponge_entity.morph, gs.morphs.TetrahedralMesh)
-    assert sponge_entity.n_vertices == math.prod(resolution + 1 for resolution in sponge_grid_resolution)
-    assert sponge_entity.n_elements == 6 * math.prod(sponge_grid_resolution)
-    sponge_init_positions = tensor_to_array(sponge_entity.init_positions)
+    assert sponge_entity.n_particles == math.prod(resolution + 1 for resolution in sponge_grid_resolution)
+    assert sponge_entity.n_elems == 6 * math.prod(sponge_grid_resolution)
+    sponge_init_positions = sponge_entity.init_particles
     for axis, resolution in enumerate(sponge_grid_resolution):
         coordinates = np.unique(sponge_init_positions[:, axis])
         assert len(coordinates) == resolution + 1
@@ -992,8 +1037,10 @@ def test_mop_sponge_full_simulation_and_collision(n_envs, show_viewer):
             (settings.collider_upper[axis] - settings.collider_lower[axis]) / resolution,
             atol=1e-6,
         )
-    (sponge_vgeom,) = sponge_entity.vgeoms
-    render_surface_triangles = np.sort(sponge_vgeom.sim_verts_idx[sponge_vgeom.vmesh.faces], axis=-1)
+    render_vertices_idx = np.linalg.norm(
+        sponge_entity.vmesh.verts[:, None, :] - sponge_init_positions[None, :, :], axis=-1
+    ).argmin(axis=-1)
+    render_surface_triangles = np.sort(render_vertices_idx[sponge_entity.vmesh.faces], axis=-1)
     simulation_surface_triangles = np.sort(sponge_entity.surface_triangles, axis=-1)
     sponge_surface_vertices_idx = np.unique(sponge_entity.surface_triangles)
     render_faces_order = np.lexsort(render_surface_triangles.T[::-1])
@@ -1022,14 +1069,15 @@ def test_mop_sponge_full_simulation_and_collision(n_envs, show_viewer):
     assert all(geom.get_trimesh().is_watertight for link in collider_links for geom in link.geoms)
     assert any(link.vgeoms for link in manipulator_entity.links) == manipulator.is_visible
     assert any(link.vgeoms for link in table_entity.links)
-    assert_allclose(scene.fem_options.gravity, (0.0, -9.8, 0.0), atol=1e-12)
-    assert_equal(sponge_entity.material.E, 1.0e4)
+    assert_allclose(scene.pbd_options.gravity, (0.0, -9.8, 0.0), atol=1e-12)
+    assert isinstance(scene.pbd_options, gs.options.PBDUnifiedOptions)
+    assert isinstance(sponge_entity.material, gs.materials.PBD.Elastic)
     assert_equal(sponge_entity.material.rho, manipulator.sponge_density)
     assert_equal(liquid_entity.material.density_compliance, 33750.0)
-    assert_equal(liquid_entity.material.surface_tension_compliance, 1.0 / 225.0)
+    assert_equal(liquid_entity.material.surface_tension_compliance, 1.0 / 2000.0)
     assert_equal(liquid_entity.material.surface_distance_compliance, 40.0)
     assert_equal(liquid_entity.material.interior_distance_compliance, 180.0)
-    assert_equal(liquid_entity.material.collider_adhesion_compliance, 20.0)
+    assert_equal(liquid_entity.material.collider_adhesion_compliance, 30.0)
     sponge_x = sponge_init_positions[:, 0]
     sponge_y = sponge_init_positions[:, 1]
     finger_contact_mask = np.isclose(sponge_y, sponge_y.max())
@@ -1067,7 +1115,8 @@ def test_mop_sponge_full_simulation_and_collision(n_envs, show_viewer):
     update = update_mop_case(scene, scene.cur_t, settings, qpos)
     qpos = update.qpos
 
-    settled_positions = tensor_to_array(sponge_entity.get_state().pos)
+    settled_positions = tensor_to_array(sponge_entity.get_particles_pos()).reshape((-1, sponge_entity.n_particles, 3))
+    assert (scene.pbd_solver.get_constraint_residuals().volume > -1.0).all()
     settled_extents = np.ptp(settled_positions, axis=1)
     finger_sdf_cell_sizes = []
     for link in finger_links:
@@ -1115,11 +1164,11 @@ def test_mop_sponge_full_simulation_and_collision(n_envs, show_viewer):
 
     scene.step()
     update = update_mop_case(scene, scene.cur_t, settings, qpos)
-    pre_move_positions = tensor_to_array(sponge_entity.get_state().pos)
+    pre_move_positions = tensor_to_array(sponge_entity.get_particles_pos()).reshape((-1, sponge_entity.n_particles, 3))
     pre_move_hand_pos = np.atleast_2d(tensor_to_array(hand_link.get_pos()))
     pre_move_hand_quat = np.atleast_2d(tensor_to_array(hand_link.get_quat()))
     scene.step()
-    moved_positions = tensor_to_array(sponge_entity.get_state().pos)
+    moved_positions = tensor_to_array(sponge_entity.get_particles_pos()).reshape((-1, sponge_entity.n_particles, 3))
     hand_pos = np.atleast_2d(tensor_to_array(hand_link.get_pos()))
     hand_quat = np.atleast_2d(tensor_to_array(hand_link.get_quat()))
     sponge_hand_pos = geom_utils.transform_by_quat(
@@ -1167,7 +1216,7 @@ def test_mop_sponge_full_simulation_and_collision(n_envs, show_viewer):
     assert (orientation_error <= 5e-3).all()
 
     scene.reset(settled_state)
-    assert_allclose(sponge_entity.get_state().pos, settled_positions, atol=1e-6)
+    assert_allclose(sponge_entity.get_particles_pos(), settled_positions, atol=1e-6)
     assert not tensor_to_array(scene.pbstf_solver.get_state(0).is_deformable_static_colliders_sdf_active).any()
 
 

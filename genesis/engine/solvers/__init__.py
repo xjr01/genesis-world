@@ -3,6 +3,7 @@ from .ipbstf import IPBSTFSolver
 from .kinematic_solver import KinematicSolver
 from .mpm_solver import MPMSolver
 from .pbd_solver import PBDSolver
+from .pbd_unified_solver import PBDUnifiedSolver
 from .pbstf_solver import PBSTFSolver
 from .rigid.rigid_solver import RigidSolver
 from .sf_solver import SFSolver

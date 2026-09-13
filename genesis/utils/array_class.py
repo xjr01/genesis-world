@@ -1,6 +1,6 @@
 import dataclasses
-from enum import IntEnum
 import math
+from enum import IntEnum
 
 import numpy as np
 import torch
@@ -10,6 +10,8 @@ from typing_extensions import dataclass_transform  # Made it into standard lib f
 import quadrants as qd
 
 import genesis as gs
+
+V_ANNOTATION = qd.template()
 
 
 def _tensor_backend():
@@ -95,6 +97,8 @@ class ErrorCode(IntEnum):
     INVALID_PBSTF_DEFORMABLE_COLLIDER = 0b00000000000000000000001000000000
     INVALID_FEM_RIGID_SURFACE_INTERSECTION = 0b00000000000000000000010000000000
     INVALID_PBD_RIGID_SURFACE_INTERSECTION = 0b00000000000000000000100000000000
+    INVALID_PBD_STATE = 0b00000000000000000001000000000000
+    INVALID_PBD_VOLUME = 0b00000000000000000010000000000000
 
 
 # =========================================== RigidInfo ===========================================

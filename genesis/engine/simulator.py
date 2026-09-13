@@ -13,6 +13,7 @@ from genesis.options.solvers import (
     LegacyCouplerOptions,
     MPMOptions,
     PBDOptions,
+    PBDUnifiedOptions,
     PBSTFOptions,
     RigidOptions,
     SAPCouplerOptions,
@@ -32,6 +33,7 @@ from .solvers import (
     KinematicSolver,
     MPMSolver,
     PBDSolver,
+    PBDUnifiedSolver,
     PBSTFSolver,
     RigidSolver,
     SFSolver,
@@ -75,8 +77,8 @@ class Simulator(RBC):
         An FEMOptions object that contains all the options for the FEMSolver.
     sf_options : gs.SFOptions
         An SFOptions object that contains all the options for the SFSolver.
-    pbd_options : gs.PBDOptions
-        A PBDOptions object that contains all the options for the PBDSolver.
+    pbd_options : gs.PBDOptions | gs.PBDUnifiedOptions
+        Selects the PBD solver and its simulation settings.
     ipbstf_options : gs.IPBSTFOptions
         Options for the implicit position-based surface-tension fluid (IPBSTF) solver.
     pbstf_options : gs.PBSTFOptions
@@ -95,7 +97,7 @@ class Simulator(RBC):
         sph_options: SPHOptions,
         fem_options: FEMOptions,
         sf_options: SFOptions,
-        pbd_options: PBDOptions,
+        pbd_options: PBDOptions | PBDUnifiedOptions,
         ipbstf_options: IPBSTFOptions,
         pbstf_options: PBSTFOptions,
     ):
@@ -131,7 +133,11 @@ class Simulator(RBC):
         self.kinematic_solver = KinematicSolver(self.scene, self, self.kinematic_options)
         self.mpm_solver = MPMSolver(self.scene, self, self.mpm_options)
         self.sph_solver = SPHSolver(self.scene, self, self.sph_options)
-        self.pbd_solver = PBDSolver(self.scene, self, self.pbd_options)
+        self.pbd_solver = (
+            PBDUnifiedSolver(self.scene, self, self.pbd_options)
+            if isinstance(self.pbd_options, PBDUnifiedOptions)
+            else PBDSolver(self.scene, self, self.pbd_options)
+        )
         self.ipbstf_solver = IPBSTFSolver(self.scene, self, self.ipbstf_options)
         self.pbstf_solver = PBSTFSolver(self.scene, self, self.pbstf_options)
         self.fem_solver = FEMSolver(self.scene, self, self.fem_options)

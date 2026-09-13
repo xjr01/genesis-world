@@ -1,6 +1,7 @@
 from typing import Annotated, Any, Literal
 
 import numpy as np
+
 from pydantic import Field, PrivateAttr, StrictBool, StrictInt, model_validator
 
 import genesis as gs
@@ -815,22 +816,22 @@ class PBSTFAbsorbentStaticColliderOptionsMixin(Options):
 class PBSTFAbsorbentBoxStaticColliderOptions(PBSTFAbsorbentStaticColliderOptionsMixin, PBSTFBoxStaticColliderOptions):
     """Finite position-based surface tension flow (PBSTF) box with rate-limited nearby-voxel capture.
 
-    ``fem_entity_name`` optionally binds the collider geometry to a volumetric finite element method (FEM) entity.
+    ``pbd_entity_name`` binds geometry to a volumetric position-based dynamics (PBD) entity using PBDUnifiedOptions.
     Binding lets the collider and its material-space absorption targets follow deformation, at the cost of updating a
-    triangle surface and voxel search order whenever the FEM shape changes. ``sdf_res`` enables a signed distance field
+    triangle surface and voxel search order whenever the PBD shape changes. ``sdf_res`` enables a signed distance field
     (SDF) that can be built after deformation stops. Higher resolutions preserve smaller surface features at cubic
-    preprocessing and memory cost, while ``None`` keeps exact triangle queries. ``fem_entity_name=None`` uses
+    preprocessing and memory cost, while ``None`` keeps exact triangle queries. ``pbd_entity_name=None`` uses
     inexpensive analytic box geometry.
     """
 
     type: Literal["absorbent_box"] = "absorbent_box"
-    fem_entity_name: str | None = None
+    pbd_entity_name: str | None = None
     sdf_res: StrictInt | None = Field(default=None, ge=16)
 
     @model_validator(mode="after")
     def _validate_sdf(self):
-        if self.sdf_res is not None and self.fem_entity_name is None:
-            gs.raise_exception("PBSTF absorbent box collider `sdf_res` requires `fem_entity_name`.")
+        if self.sdf_res is not None and self.pbd_entity_name is None:
+            gs.raise_exception("PBSTF absorbent box collider `sdf_res` requires `pbd_entity_name`.")
         return self
 
 
@@ -1003,6 +1004,35 @@ class PBSTFOptions(Options):
             self._hash_grid_res = np.minimum(max_hash_grid_res, np.array([150, 150, 150], dtype=gs.np_int))
         else:
             self._hash_grid_res = np.ceil(np.array(self.hash_grid_res) / self.hash_grid_cell_size).astype(gs.np_int)
+
+
+class PBDUnifiedOptions(Options):
+    """Options for unified position-based dynamics (PBD) of cloth and elastic solids.
+
+    Each iteration combines elastic corrections and enforces one-way rigid contact. More iterations improve
+    shape preservation under load at increased runtime cost. Collision iterations bound the work needed to
+    resolve simultaneous contacts; exhausting this budget with intersections remaining raises an error.
+    Constraint acceleration extrapolates consecutive elastic iterates within each time step. Larger values can
+    improve shape recovery with fewer iterations, with a greater risk of overshoot under changing contacts.
+    Zero uses the current correction alone.
+    Particle size controls mesh sampling. Explicit tetrahedral meshes retain their supplied vertices.
+    Recording constraint history retains three position samples per iteration for convergence diagnostics,
+    using memory proportional to the particle count, environment count, and iteration count.
+    """
+
+    dt: PositiveFloat | None = None
+    gravity: Vec3FType | None = None
+    particle_size: PositiveFloat = 1e-2
+    lower_bound: Vec3FType = (-100.0, -100.0, 0.0)
+    upper_bound: Vec3FType = (100.0, 100.0, 100.0)
+    max_solver_iterations: PositiveInt = 30
+    max_collision_iterations: PositiveInt = 20
+    constraint_acceleration: Annotated[float, Field(ge=0.0, lt=1.0)] = 0.0
+    is_recording_constraint_history: StrictBool = False
+
+    def model_post_init(self, context: Any) -> None:
+        if not np.all(np.array(self.upper_bound) > np.array(self.lower_bound)):
+            gs.raise_exception("Invalid pair of upper_bound and lower_bound.")
 
 
 class PBDOptions(Options):

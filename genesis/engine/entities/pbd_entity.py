@@ -1,4 +1,5 @@
 import numpy as np
+import torch
 
 import igl
 import trimesh
@@ -6,9 +7,11 @@ import trimesh
 import quadrants as qd
 
 import genesis as gs
-from genesis.engine.entities.particle_entity import ParticleEntity
 import genesis.utils.geom as gu
 import genesis.utils.mesh as mu
+from genesis.engine.entities.particle_entity import ParticleEntity
+from genesis.options.solvers import PBDOptions, PBDUnifiedOptions
+from genesis.utils.misc import broadcast_tensor
 
 
 @qd.kernel
@@ -112,6 +115,8 @@ class PBDBaseEntity(ParticleEntity):
 
     @gs.assert_built
     def fix_particles_to_link(self, link_idx, particles_idx_local=None, envs_idx=None):
+        if isinstance(self._scene.pbd_options, PBDUnifiedOptions):
+            gs.raise_exception("PBDUnifiedSolver supports fixed particles and one-way rigid contact.")
         envs_idx = self._scene._sanitize_envs_idx(envs_idx)
         particles_idx_local = self._sanitize_particles_idx_local(particles_idx_local, envs_idx)
         particles_idx = particles_idx_local + self._particle_start
@@ -156,7 +161,8 @@ class PBDBaseEntity(ParticleEntity):
         particles_idx_local = self._sanitize_particles_idx_local(particles_idx_local, envs_idx)
         particles_idx = particles_idx_local + self._particle_start
         self.solver._kernel_release_particle(particles_idx, envs_idx)
-        self.solver._sim._coupler.kernel_pbd_rigid_clear_animate_particles_by_link(particles_idx, envs_idx)
+        if isinstance(self._scene.pbd_options, PBDOptions):
+            self.solver._sim._coupler.kernel_pbd_rigid_clear_animate_particles_by_link(particles_idx, envs_idx)
 
     # ------------------------------------------------------------------------------------
     # --------------------------------- naming methods -----------------------------------
@@ -449,11 +455,12 @@ class PBD2DEntity(PBDTetEntity):
 
         self._kernel_add_particles_air_resistance_to_solver(f=self._scene.sim.cur_substep_local)
 
-        self._kernel_add_inner_edges_to_solver(
-            f=self._scene.sim.cur_substep_local,
-            inner_edges=self._inner_edges,
-            inner_edges_len_rest=self._inner_edges_len_rest,
-        )
+        if self.n_inner_edges:
+            self._kernel_add_inner_edges_to_solver(
+                f=self._scene.sim.cur_substep_local,
+                inner_edges=self._inner_edges,
+                inner_edges_len_rest=self._inner_edges_len_rest,
+            )
 
     @qd.kernel
     def _kernel_add_particles_air_resistance_to_solver(self, f: qd.i32):
@@ -479,6 +486,11 @@ class PBD2DEntity(PBDTetEntity):
     def n_inner_edges(self):
         """The number of inner edges in the 2D mesh."""
         return len(self._inner_edges)
+
+    @property
+    def inner_edges(self):
+        """Adjacent triangle vertex indices with shape [n_inner_edges, 4]."""
+        return self._inner_edges
 
 
 @qd.data_oriented
@@ -607,6 +619,30 @@ class PBD3DEntity(PBDTetEntity):
     def n_elems(self):
         """The number of tetrahedral elements in the mesh."""
         return len(self._elems)
+
+    @property
+    def elems(self):
+        """Tetrahedron vertex indices with shape [n_elems, 4]."""
+        return self._elems
+
+    @gs.assert_built
+    def get_embedded_positions(self, elements_idx_local, barycentric, envs_idx=None):
+        """Evaluate tetrahedral material points as [B, n_points, 3] using the unified solver."""
+        if not isinstance(self._scene.pbd_options, PBDUnifiedOptions):
+            gs.raise_exception("Embedded PBD positions require PBDUnifiedOptions.")
+        elements_idx_local = broadcast_tensor(elements_idx_local, gs.tc_int, (-1,), ("points_idx",)).contiguous()
+        barycentric = broadcast_tensor(
+            barycentric, gs.tc_float, (len(elements_idx_local), 4), ("points_idx", "tetrahedron_vertices_idx")
+        ).contiguous()
+        if (elements_idx_local < 0).any() or (elements_idx_local >= self.n_elems).any():
+            gs.raise_exception("Embedded PBD element indices are out of range.")
+        if (
+            not torch.isfinite(barycentric).all()
+            or (barycentric < -1.0e-5).any()
+            or ((barycentric.sum(dim=-1) - 1.0).abs() > 1.0e-5).any()
+        ):
+            gs.raise_exception("Embedded PBD barycentric weights must describe finite points inside tetrahedra.")
+        return self.solver.get_embedded_positions(elements_idx_local + self._elem_start, barycentric, envs_idx)
 
     @property
     def elem_start(self):

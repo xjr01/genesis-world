@@ -18,6 +18,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("-v", "--vis", action="store_true", help="Show the interactive viewer")
     parser.add_argument("-g", "--gpu", action="store_true", help="Run on GPU instead of CPU")
+    parser.add_argument("--solver", choices=("original", "unified"), default="original", help="Select the PBD solver")
     parser.add_argument("--dt", type=float, default=0.01, help="Simulation step duration in seconds")
     parser.add_argument(
         "--substeps", type=int, default=1, help="More substeps resolve contact at increased runtime cost"
@@ -41,12 +42,20 @@ def main():
             substeps=args.substeps,
             gravity=(0.0, 0.0, 0.0),
         ),
-        pbd_options=gs.options.PBDOptions(
-            particle_size=0.005,
-            lower_bound=(-0.2, -0.2, 0.3),
-            upper_bound=(0.2, 0.2, 0.7),
-            max_stretch_solver_iterations=10,
-            max_volume_solver_iterations=10,
+        pbd_options=(
+            gs.options.PBDUnifiedOptions(
+                particle_size=0.005,
+                lower_bound=(-0.2, -0.2, 0.3),
+                upper_bound=(0.2, 0.2, 0.7),
+            )
+            if args.solver == "unified"
+            else gs.options.PBDOptions(
+                particle_size=0.005,
+                lower_bound=(-0.2, -0.2, 0.3),
+                upper_bound=(0.2, 0.2, 0.7),
+                max_stretch_solver_iterations=10,
+                max_volume_solver_iterations=10,
+            )
         ),
         vis_options=gs.options.VisOptions(
             ambient_light=(0.5, 0.5, 0.5),
@@ -68,7 +77,15 @@ def main():
             vertices=vertices,
             elements=elements,
         ),
-        material=gs.materials.PBD.Elastic(),
+        material=(
+            gs.materials.PBD.Elastic(
+                volume_compliance=1e-11,
+                stretch_relaxation=0.005,
+                volume_relaxation=0.14,
+            )
+            if args.solver == "unified"
+            else gs.materials.PBD.Elastic()
+        ),
         surface=gs.surfaces.Default(
             color=(0.95, 0.65, 0.15),
             smooth=False,
@@ -101,10 +118,11 @@ def main():
             )
         )
 
-    # Convert exponential velocity decay to the explicit force update so drag stays dissipative across substep sizes.
-    substep_dt = scene.pbd_solver.substep_dt
-    drag_coefficient = -math.expm1(-500.0 * substep_dt) / substep_dt
-    scene.add_force_field(gs.force_fields.Drag(linear=drag_coefficient)).activate()
+    if args.solver == "original":
+        # Match exponential decay with the explicit velocity update across substep sizes.
+        substep_dt = scene.pbd_solver.substep_dt
+        drag_coefficient = -math.expm1(-500.0 * substep_dt) / substep_dt
+        scene.add_force_field(gs.force_fields.Drag(linear=drag_coefficient)).activate()
     scene.build()
     position_gain = 1e5
     # The position term is explicit; damping must also stabilize its discrete update at the chosen step size.

@@ -3,15 +3,16 @@ import numpy as np
 import quadrants as qd
 
 import genesis as gs
-from genesis.engine.bvh import STACK_SIZE, point_aabb_distance_sqr
 import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
+from genesis.engine.bvh import STACK_SIZE, point_aabb_distance_sqr
 from genesis.utils.triangle_qd import (
     closest_point_on_triangle,
     ray_aabb_intersection,
     ray_projection,
     ray_triangle_intersection,
     triangle_face_normal,
+    triangle_separating_corrections,
     triangle_triangle_intersection,
     triangle_triangle_previous_separating_correction,
 )
@@ -984,10 +985,11 @@ def sdf_func_triangle_surface_corrections(
                     rigid_info.EPS[None],
                 )
                 if has_history_correction:
-                    history_correction_world = gu.qd_transform_by_quat(history_correction_mesh, geom_quat)
+                    history_corrections = triangle_separating_corrections(vertices_atlas, history_correction_mesh)
                     for i_v_ in qd.static(range(3)):
-                        corrections[:, i_v_] += history_correction_world
-                        n_corrections[i_v_] += 1
+                        if history_corrections[:, i_v_].norm_sqr() > 0.0:
+                            corrections[:, i_v_] += gu.qd_transform_by_quat(history_corrections[:, i_v_], geom_quat)
+                            n_corrections[i_v_] += 1
                     continue
 
                 if not has_previous_direction:

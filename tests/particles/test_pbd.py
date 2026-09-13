@@ -11,6 +11,191 @@ from genesis.utils.misc import qd_to_numpy, tensor_to_array
 from ..utils import assert_allclose, assert_equal
 
 
+@pytest.mark.required
+@pytest.mark.parametrize("n_envs", [0, 2])
+def test_unified_elastic_projection(n_envs, show_viewer, asset_tmp_path):
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=0.01,
+            gravity=(0.0, 0.0, 0.0),
+        ),
+        pbd_options=gs.options.PBDUnifiedOptions(
+            particle_size=0.2,
+            max_solver_iterations=1,
+            constraint_acceleration=0.9,
+            is_recording_constraint_history=True,
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(1.5, -2.0, 2.0),
+            camera_lookat=(0.6, 0.0, 0.5),
+        ),
+        show_viewer=show_viewer,
+    )
+    entities = []
+    for i_entity, (size, stretch_relaxation, volume_relaxation, volume_compliance) in enumerate(
+        ((0.03, 0.0, 0.5, 0.0), (0.1, 0.0, 1.0, 0.0), (0.3, 0.15, 0.25, 0.0), (0.1, 0.0, 0.5, 1e-8))
+    ):
+        entities.append(
+            scene.add_entity(
+                morph=gs.morphs.TetrahedralMesh(
+                    pos=(0.4 * i_entity, 0.0, 0.5),
+                    vertices=np.array(((0.0, 0.0, 0.0), (size, 0.0, 0.0), (0.0, size, 0.0), (0.0, 0.0, size))),
+                    elements=((0, 1, 2, 3),),
+                ),
+                material=gs.materials.PBD.Elastic(
+                    volume_compliance=volume_compliance,
+                    stretch_relaxation=stretch_relaxation,
+                    volume_relaxation=volume_relaxation,
+                ),
+            )
+        )
+    cloth_path = asset_tmp_path / "unified_hinge.obj"
+    trimesh.Trimesh(
+        vertices=((-0.1, 0.0, 0.0), (0.1, 0.0, 0.0), (0.0, np.sqrt(0.03), 0.0), (0.0, -np.sqrt(0.03), 0.0)),
+        faces=((0, 1, 2), (1, 0, 3)),
+        process=False,
+    ).export(cloth_path)
+    cloth = scene.add_entity(
+        morph=gs.morphs.Mesh(
+            pos=(1.6, 0.0, 0.5),
+            file=cloth_path,
+        ),
+        material=gs.materials.PBD.Cloth(
+            stretch_compliance=0.0,
+            bending_compliance=0.0,
+            stretch_relaxation=0.1,
+            bending_relaxation=0.2,
+            air_resistance=0.0,
+        ),
+    )
+    scene.build(n_envs=n_envs)
+    initial_state = scene.get_state()
+    expected_positions = []
+    for entity in entities:
+        rest = entity.init_particles
+        positions = rest.copy()
+        positions[3, 2] = rest[0, 2] + 0.8 * (rest[3, 2] - rest[0, 2])
+        entity.set_particles_pos(positions)
+        entity.fix_particles([0, 1, 2])
+        inverse_mass = entity.n_particles / tensor_to_array(entity.get_mass()).mean()
+        material = entity.material
+        edge = positions[3] - positions[:3]
+        lengths = np.linalg.norm(edge, axis=-1)
+        lengths_rest = np.linalg.norm(rest[3] - rest[:3], axis=-1)
+        stretch_delta = (
+            -material.stretch_relaxation
+            * (lengths - lengths_rest)[:, None]
+            * edge
+            / lengths[:, None]
+            * inverse_mass
+            / (inverse_mass + material.stretch_compliance / scene.dt**2)
+        ).sum(axis=0)
+        base_area_gradient = np.cross(rest[1] - rest[0], rest[2] - rest[0]) / 6.0
+        volume_residual = np.dot(positions[3] - rest[3], base_area_gradient)
+        volume_delta = (
+            -material.volume_relaxation
+            * volume_residual
+            * inverse_mass
+            * base_area_gradient
+            / (inverse_mass * np.dot(base_area_gradient, base_area_gradient) + material.volume_compliance / scene.dt**2)
+        )
+        positions[3] += stretch_delta + volume_delta
+        expected_positions.append(positions)
+    assert cloth.n_particles == 4
+    cloth_positions = cloth.init_particles.copy()
+    free_idx = np.argmin(cloth_positions[:, 1])
+    fixed_idx = np.flatnonzero(np.arange(cloth.n_particles) != free_idx)
+    cloth_positions[free_idx, 2] += 0.05
+    cloth.set_particles_pos(cloth_positions)
+    cloth.fix_particles(fixed_idx)
+    hinge_idx = np.flatnonzero(np.isclose(cloth_positions[:, 1], 0.0))
+    edges = cloth_positions[free_idx] - cloth_positions[hinge_idx]
+    lengths = np.linalg.norm(edges, axis=-1)
+    rest_lengths = np.linalg.norm(cloth.init_particles[free_idx] - cloth.init_particles[hinge_idx], axis=-1)
+    stretch_delta = (
+        -cloth.material.stretch_relaxation * (lengths - rest_lengths)[:, None] * edges / lengths[:, None]
+    ).sum(axis=0)
+    y = cloth_positions[free_idx, 1]
+    z = cloth_positions[free_idx, 2] - cloth.init_particles[free_idx, 2]
+    angle = np.arctan2(z, -y)
+    bending_delta = cloth.material.bending_relaxation * angle * np.array((0.0, -z, y))
+    cloth_positions[free_idx] += stretch_delta + bending_delta
+    scene.step()
+    assert_allclose(cloth.get_particles_pos(), cloth_positions, atol=2e-7)
+    for entity, expected in zip(entities, expected_positions):
+        positions = tensor_to_array(entity.get_particles_pos()).reshape((-1, entity.n_particles, 3))
+        assert_allclose(positions, expected[None], atol=2e-7)
+    history = scene.pbd_solver.get_constraint_history()
+    assert (history.volume[0, 1].abs() <= history.volume[0, 0].abs()).all()
+    assert (history.bending[0, 1].abs() < history.bending[0, 0].abs()).all()
+    entities.append(cloth)
+    scene.reset(initial_state)
+    for entity in entities:
+        entity.fix_particles()
+    scene.step()
+    for entity in entities:
+        assert_allclose(entity.get_particles_pos(), entity.init_particles, atol=2e-7)
+        entity.release_particle()
+        entity.set_particles_vel((0.02, -0.03, 0.04))
+    scene.step()
+    for entity in entities:
+        assert_allclose(
+            entity.get_particles_pos(), entity.init_particles + scene.dt * np.array((0.02, -0.03, 0.04)), atol=2e-7
+        )
+        assert_allclose(entity.get_particles_vel(), (0.02, -0.03, 0.04), atol=2e-5)
+
+    positions_before_reset = [entity.get_particles_pos().clone() for entity in entities]
+    scene.reset(initial_state, envs_idx=0 if n_envs else None)
+    for entity, previous in zip(entities, positions_before_reset):
+        positions = entity.get_particles_pos().reshape((-1, entity.n_particles, 3))
+        assert_allclose(positions[0], entity.init_particles, atol=2e-7)
+        if n_envs:
+            assert_allclose(positions[1:], previous[1:], atol=2e-7)
+
+    scene.reset(initial_state)
+    entity = next(
+        entity
+        for entity in entities
+        if isinstance(entity.material, gs.materials.PBD.Elastic) and entity.material.volume_compliance > 0.0
+    )
+    positions = entity.init_particles.copy()
+    height = positions[3, 2] - positions[0, 2]
+    positions[3, 2] -= 0.2 * height
+    entity.set_particles_pos(positions)
+    entity.fix_particles([0, 1, 2])
+    scene.step()
+    for _ in range(2):
+        scene.pbd_solver.project_elastic_constraints()
+    recovered_height = entity.get_particles_pos()[..., 3, 2] - positions[0, 2]
+    assert (recovered_height >= 0.97 * height).all()
+    assert (recovered_height <= height).all()
+
+    entity = entities[0]
+    scene.reset(initial_state)
+    recovering_positions = entity.init_particles.copy()
+    height = recovering_positions[3, 2] - recovering_positions[0, 2]
+    recovering_positions[3, 2] = recovering_positions[0, 2] - 2.0 * height
+    entity.set_particles_pos(recovering_positions)
+    entity.fix_particles([0, 1, 2])
+    scene.step()
+    assert_allclose(scene.pbd_solver.get_constraint_residuals().volume[..., 0], -1.5, atol=2e-5)
+    scene.step()
+    assert_allclose(entity.get_particles_pos(), entity.init_particles, atol=2e-7)
+    scene.reset(initial_state)
+    inverted_positions = entity.init_particles.copy()
+    inverted_positions[3, 2] = 2.0 * inverted_positions[0, 2] - inverted_positions[3, 2]
+    entity.set_particles_pos(inverted_positions)
+    entity.fix_particles()
+    with pytest.raises(gs.GenesisException, match="inverted tetrahedron"):
+        scene.step()
+    scene.reset(initial_state)
+    invalid_state = scene.pbd_solver.get_state(0)
+    invalid_state.vel[:] = np.nan
+    scene.pbd_solver.set_state(0, invalid_state)
+    with pytest.raises(gs.GenesisException, match="non-finite"):
+        scene.step()
+
+
 # Note that "session" scope must NOT be used because the material while be altered without copy when building the scene
 @pytest.fixture(scope="function")
 def pbd_material():
@@ -274,12 +459,13 @@ def test_cloth_attach_rigid_link(show_viewer):
 @pytest.mark.required
 @pytest.mark.parametrize("n_envs", [0, 2])
 @pytest.mark.parametrize("is_regular_grid", [False, True])
-def test_one_way_rigid_surface_collision(n_envs, is_regular_grid, show_viewer):
+@pytest.mark.parametrize("options_type", [gs.options.PBDOptions, gs.options.PBDUnifiedOptions])
+def test_one_way_rigid_surface_collision(n_envs, is_regular_grid, options_type, show_viewer):
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
             gravity=(0.0, 0.0, 0.0),
         ),
-        pbd_options=gs.options.PBDOptions(
+        pbd_options=options_type(
             particle_size=0.08,
             lower_bound=(-0.5, -0.5, 0.0),
             upper_bound=(0.5, 0.5, 1.0),

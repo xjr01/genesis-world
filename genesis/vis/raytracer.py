@@ -2,6 +2,7 @@ import os
 import sys
 
 import numpy as np
+
 import trimesh
 
 import genesis as gs
@@ -329,6 +330,8 @@ class Raytracer:
         # PBD entities
         if self.sim.pbd_solver.is_active:
             for pbd_entity in self.sim.pbd_solver.entities:
+                if pbd_entity.surface.vis_mode == "tetrahedral":
+                    gs.raise_exception("Tetrahedral PBD visualization requires Rasterizer.")
                 if pbd_entity.surface.vis_mode in ("visual", "collision"):
                     self.add_deformable(str(pbd_entity.uid))
                 else:
