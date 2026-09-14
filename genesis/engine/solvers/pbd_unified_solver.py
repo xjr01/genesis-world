@@ -17,7 +17,7 @@ from genesis.engine.boundaries.rigid_surface import (
 from genesis.engine.entities.pbd_entity import PBD2DEntity, PBD3DEntity
 from genesis.engine.states.solvers import PBDSolverState
 from genesis.utils import array_class, geom, sdf
-from genesis.utils.array_class import V_ANNOTATION, ErrorCode
+from genesis.utils.array_class import ErrorCode, V_ANNOTATION
 from genesis.utils.misc import indices_to_mask, qd_to_numpy, qd_to_torch
 
 from .base_solver import Solver, StateChange, mutates
@@ -30,6 +30,28 @@ class PBDConstraintResiduals:
     stretch: torch.Tensor
     bending: torch.Tensor
     volume: torch.Tensor
+
+
+@dataclass(frozen=True)
+class PBDMomentum:
+    """Total mass, center of mass, and linear/angular momenta for each particle batch."""
+
+    mass: torch.Tensor
+    center: torch.Tensor
+    linear: torch.Tensor
+    angular: torch.Tensor
+
+
+def compute_particle_momentum(positions, velocities, masses):
+    """Compute batch momenta about the center of mass, with zero masses marking inactive particles."""
+    mass = masses.sum(dim=-1, keepdim=True)
+    denominator = torch.where(mass > 0.0, mass, 1.0)
+    center = (masses[..., None] * positions).sum(dim=-2) / denominator
+    linear = (masses[..., None] * velocities).sum(dim=-2)
+    # Centering velocities suppresses angular roundoff from uniform translation.
+    relative_velocities = velocities - (linear / denominator)[:, None, :]
+    angular = (masses[..., None] * torch.linalg.cross(positions - center[:, None, :], relative_velocities)).sum(dim=-2)
+    return PBDMomentum(mass, center, linear, angular)
 
 
 class PBDUnifiedSolverState(PBDSolverState):
@@ -291,10 +313,12 @@ def kernel_project_boundary(boundary: V_ANNOTATION, particles: V_ANNOTATION, par
 
 
 @qd.kernel
-def kernel_update_velocity(dt: float, particles: V_ANNOTATION, particles_ng: V_ANNOTATION, errno: qd.Tensor):
+def kernel_update_velocity(
+    velocities: qd.types.ndarray(), particles: V_ANNOTATION, particles_ng: V_ANNOTATION, errno: qd.Tensor
+):
     for i_p, i_b in qd.ndrange(particles.shape[0], particles.shape[1]):
         if particles_ng[i_p, i_b].active:
-            velocity = (particles[i_p, i_b].pos - particles[i_p, i_b].ipos) / dt
+            velocity = gs.qd_vec3([velocities[i_b, i_p, i_axis] for i_axis in qd.static(range(3))])
             if qd.math.isnan(velocity).any() or qd.math.isinf(velocity).any():
                 qd.atomic_or(errno[i_b], ErrorCode.INVALID_PBD_STATE)
             else:
@@ -363,7 +387,7 @@ def kernel_set_field(
         if qd.static(is_batch_first):
             i_row, i_col = i_col, i_row
         if qd.static(len(values.shape) == 3):
-            for i_axis in qd.static(range(values.shape[-1])):
+            for i_axis in range(values.shape[-1]):
                 data[i_row, i_col][i_axis] = values[i_b, i_p, i_axis]
         else:
             data[i_row, i_col] = values[i_b, i_p]
@@ -385,6 +409,8 @@ class PBDUnifiedSolver(Solver):
     combined update onto the contact constraints. Material compliance regularizes each projection denominator;
     the effective stiffness also depends on the iteration count and time step. Extrapolating consecutive iterates
     accelerates shape recovery, with the iteration history initialized after each substep's motion prediction.
+    Fully free entities receive a final velocity correction preserving linear and angular momentum after external
+    forces and contact impulses, independently in each environment.
     """
 
     class MATERIAL(gs.IntEnum):
@@ -622,18 +648,92 @@ class PBDUnifiedSolver(Solver):
             self,
             self._errno,
         )
+        is_active = qd_to_torch(self.particles_ng.active, transpose=True)
+        is_free = qd_to_torch(self.particles.free, transpose=True)
+        masses = qd_to_torch(self.particles_info.mass, transpose=True)[None] * is_active
+        positions = qd_to_torch(self.particles.ipos, transpose=True)
+        velocities = qd_to_torch(self.particles.vel, transpose=True)
+        momenta = [
+            compute_particle_momentum(
+                positions[:, entity.particle_start : entity.particle_end],
+                velocities[:, entity.particle_start : entity.particle_end],
+                masses[:, entity.particle_start : entity.particle_end],
+            )
+            for entity in self.entities
+        ]
+        acceleration = self._options.constraint_acceleration
         for i_iteration in range(self._options.max_solver_iterations):
             if self._iteration_positions is not None:
                 self._iteration_positions[i_iteration, 0].copy_(qd_to_torch(self.particles.pos, transpose=True))
             self.project_elastic_constraints()
             if self._iteration_positions is not None:
                 self._iteration_positions[i_iteration, 1].copy_(qd_to_torch(self.particles.pos, transpose=True))
+            contact_positions = qd_to_torch(self.particles.pos, transpose=True, copy=True)
             self.project_collision(i_iteration)
+            contact_velocities = (qd_to_torch(self.particles.pos, transpose=True) - contact_positions) / self.substep_dt
+            # Extrapolation repeats earlier corrections with geometrically decreasing weights.
+            contact_weight = (1.0 - acceleration ** (self._options.max_solver_iterations - i_iteration)) / (
+                1.0 - acceleration
+            )
+            contact_velocities *= contact_weight
+            for entity, momentum in zip(self.entities, momenta):
+                particles_idx = slice(entity.particle_start, entity.particle_end)
+                contact_momentum = compute_particle_momentum(
+                    contact_positions[:, particles_idx], contact_velocities[:, particles_idx], masses[:, particles_idx]
+                )
+                momentum.linear.add_(contact_momentum.linear)
+                momentum.angular.add_(contact_momentum.angular)
             if self._iteration_positions is not None:
                 self._iteration_positions[i_iteration, 2].copy_(qd_to_torch(self.particles.pos, transpose=True))
-        kernel_update_velocity(self.substep_dt, self.particles, self.particles_ng, self._errno)
         if self.n_elems:
             kernel_check_volume(self.particles, self.particles_ng, self.elems_info, self._errno)
+        self.check_errno()
+
+        positions = qd_to_torch(self.particles.pos, transpose=True)
+        velocities = (positions - qd_to_torch(self.particles.ipos, transpose=True)) / self.substep_dt
+        for entity, momentum in zip(self.entities, momenta):
+            particles_idx = slice(entity.particle_start, entity.particle_end)
+            current = compute_particle_momentum(
+                positions[:, particles_idx], velocities[:, particles_idx], masses[:, particles_idx]
+            )
+            relative = positions[:, particles_idx] - current.center[:, None, :]
+            covariance = relative.transpose(-1, -2) @ (masses[:, particles_idx, None] * relative)
+            inertia = (
+                covariance.diagonal(dim1=-2, dim2=-1).sum(dim=-1)[:, None, None]
+                * torch.eye(3, dtype=gs.tc_float, device=gs.device)
+                - covariance
+            )
+            # Algorithm 2 of Dahl and Bargteil's Global Momentum Preservation for Position-based Dynamics.
+            linear_correction = (momentum.linear - current.linear) / torch.where(current.mass > 0.0, current.mass, 1.0)
+            inertia_scale = covariance.diagonal(dim1=-2, dim2=-1).sum(dim=-1)
+            inertia_scale = torch.where(inertia_scale > 0.0, inertia_scale, 1.0)
+            inertia /= inertia_scale[:, None, None]
+            cofactors = torch.linalg.cross(inertia[:, (1, 2, 0), :], inertia[:, (2, 0, 1), :])
+            determinant = (inertia[:, 0, :] * cofactors[:, 0, :]).sum(dim=-1)
+            is_invertible = determinant > gs.EPS
+            angular_error = (momentum.angular - current.angular) / inertia_scale[:, None]
+            angular_correction = (cofactors.transpose(-1, -2) @ angular_error[..., None])[..., 0]
+            angular_correction /= torch.where(is_invertible, determinant, 1.0)[:, None]
+            # A line's normalized inertia is an orthogonal projection and equals its pseudoinverse.
+            angular_correction = torch.where(
+                is_invertible[:, None], angular_correction, (inertia @ angular_error[..., None])[..., 0]
+            )
+            velocity_correction = linear_correction[:, None, :] + torch.linalg.cross(
+                angular_correction[:, None, :], relative
+            )
+            # Prescribed particles exchange momentum with their anchors.
+            is_free_entity = (is_free[:, particles_idx] | ~is_active[:, particles_idx]).all(dim=-1)
+            velocities[:, particles_idx] += torch.where(is_free_entity[:, None, None], velocity_correction, 0.0)
+        if gs.use_zerocopy:
+            particles_vel = qd_to_torch(self.particles.vel, transpose=True, copy=False)
+            particles_vel.copy_(torch.where(is_active[..., None], velocities, particles_vel))
+            errno = qd_to_torch(self._errno, transpose=True, copy=False)
+            is_invalid = (is_active & ~torch.isfinite(velocities).all(dim=-1)).any(dim=-1)
+            errno.bitwise_or_(is_invalid * ErrorCode.INVALID_PBD_STATE)
+            if gs.backend == gs.metal:
+                torch.mps.synchronize()
+        else:
+            kernel_update_velocity(velocities.contiguous(), self.particles, self.particles_ng, self._errno)
         self.check_errno()
 
     def project_elastic_constraints(self):
@@ -749,7 +849,7 @@ class PBDUnifiedSolver(Solver):
         if not self.is_active:
             return
         envs_idx = self.scene._sanitize_envs_idx(envs_idx)
-        particles_idx = torch.arange(self.n_particles, device=gs.device).expand(len(envs_idx), -1)
+        particles_idx = torch.arange(self.n_particles, device=gs.device).repeat(len(envs_idx), 1)
         for field, value in (
             (self.particles.pos, state.pos),
             (self.particles.ipos, state.pos),
@@ -781,7 +881,7 @@ class PBDUnifiedSolver(Solver):
                     view = qd_to_torch(field, transpose=True, copy=False).transpose(0, 1)
                     view[envs_idx] = value[envs_idx]
                 else:
-                    geoms_idx = torch.arange(value.shape[1], device=gs.device).expand(len(envs_idx), -1)
+                    geoms_idx = torch.arange(value.shape[1], device=gs.device).repeat(len(envs_idx), 1)
                     kernel_set_field(geoms_idx, envs_idx, value[envs_idx].contiguous(), field, is_batch_first=True)
             if gs.backend == gs.metal:
                 torch.mps.synchronize()
