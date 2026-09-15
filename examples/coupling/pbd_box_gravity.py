@@ -1,16 +1,22 @@
-"""Simulate a position-based dynamics (PBD) elastic box resting on rigid ground under gravity."""
+"""Simulate a position-based dynamics (PBD) elastic box with keyboard playback.
+
+With --vis, Space toggles playback and Left/Right move one frame while paused. The viewer starts paused and keeps
+each visited scene state in memory for backward playback; --seconds bounds the history length.
+"""
 
 import argparse
 import math
 import os
 import sys
 from pathlib import Path
+from queue import SimpleQueue
 
 # Select this checkout when the editable installation points elsewhere.
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import genesis as gs
 from genesis.utils.element import create_tetrahedral_grid
+from genesis.vis.keybindings import Key, Keybind
 
 SPONGE_RENDER_SKELETON = "skeleton"
 SPONGE_RENDER_STYLES = (SPONGE_RENDER_SKELETON, "solid")
@@ -39,8 +45,8 @@ def build_scene(show_viewer=False, sponge_render_style=SPONGE_RENDER_SKELETON):
             particle_size=0.005,
             lower_bound=(-0.4, -1.0 / 15.0, -4.0 / 15.0),
             upper_bound=(0.4, 4.0 / 15.0, 4.0 / 15.0),
-            max_solver_iterations=30,
-            constraint_acceleration=0.85,
+            max_solver_iterations=100,
+            constraint_acceleration=0.0,
         ),
         viewer_options=gs.options.ViewerOptions(
             refresh_rate=round(1.0 / dt),
@@ -56,7 +62,7 @@ def build_scene(show_viewer=False, sponge_render_style=SPONGE_RENDER_SKELETON):
         upper=tuple(0.5 * size for size in box_size),
         resolution=(15, 10, 30),
     )
-    scene.add_entity(
+    sponge = scene.add_entity(
         morph=gs.morphs.TetrahedralMesh(
             pos=center,
             vertices=vertices,
@@ -64,8 +70,10 @@ def build_scene(show_viewer=False, sponge_render_style=SPONGE_RENDER_SKELETON):
         ),
         material=gs.materials.PBD.Elastic(
             rho=30.0,
-            stretch_relaxation=0.1,
+            stretch_relaxation=0.25,
             volume_relaxation=0.15,
+            # stretch_compliance=5.0,
+            # volume_compliance=1.0,
         ),
         surface=gs.surfaces.Default(
             color=(0.95, 0.68, 0.12),
@@ -95,7 +103,9 @@ def build_scene(show_viewer=False, sponge_render_style=SPONGE_RENDER_SKELETON):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("-v", "--vis", action="store_true", help="Show the interactive viewer")
+    parser.add_argument(
+        "-v", "--vis", action="store_true", help="Show viewer: Space plays/pauses, Left/Right step frames"
+    )
     parser.add_argument("-g", "--gpu", action="store_true", help="Run on GPU instead of CPU")
     parser.add_argument("-t", "--seconds", type=float, default=10.0, help="Simulation duration in seconds")
     parser.add_argument(
@@ -112,8 +122,39 @@ def main():
 
     gs.init(backend=gs.gpu if args.gpu else gs.cpu, seed=0)
     scene = build_scene(show_viewer=args.vis, sponge_render_style=args.sponge_render_style)
-    for _ in range(math.ceil(args.seconds / scene.dt)):
-        scene.step()
+    n_steps = math.ceil(args.seconds / scene.dt)
+    if not args.vis or "PYTEST_VERSION" in os.environ:
+        for _ in range(n_steps):
+            scene.step()
+        return
+
+    # Queue viewer callbacks so state restoration and simulation stay on the stepping thread.
+    frame_requests = SimpleQueue()
+    scene.viewer.register_keybinds(
+        Keybind(name="play_pause", key=Key.SPACE, callback=frame_requests.put, args=(0,)),
+        Keybind(name="previous_frame", key=Key.LEFT, callback=frame_requests.put, args=(-1,)),
+        Keybind(name="next_frame", key=Key.RIGHT, callback=frame_requests.put, args=(1,)),
+    )
+    states = [scene.get_state()]
+    frame = 0
+    is_paused = True
+    gs.logger.info("Space: play/pause. Left/Right: previous/next frame. Close the viewer to exit.")
+    while scene.viewer.is_alive():
+        frame_step = 0 if is_paused else 1
+        if not frame_requests.empty():
+            frame_step = frame_requests.get()
+            is_paused = not is_paused if frame_step == 0 else True
+        next_frame = min(max(frame + frame_step, 0), n_steps)
+        if next_frame == len(states):
+            scene.step()
+            states.append(scene.get_state())
+        elif next_frame != frame:
+            scene.reset(states[next_frame])
+        else:
+            scene.viewer.update()
+        frame = next_frame
+        if frame == n_steps:
+            is_paused = True
 
 
 if __name__ == "__main__":
