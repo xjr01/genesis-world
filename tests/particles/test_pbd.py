@@ -461,15 +461,18 @@ def test_cloth_attach_rigid_link(show_viewer):
 @pytest.mark.parametrize("is_regular_grid", [False, True])
 @pytest.mark.parametrize("options_type", [gs.options.PBDOptions, gs.options.PBDUnifiedOptions])
 def test_one_way_rigid_surface_collision(n_envs, is_regular_grid, options_type, show_viewer):
+    pbd_options = options_type(
+        particle_size=0.08,
+        lower_bound=(-0.5, -0.5, 0.0),
+        upper_bound=(0.5, 0.5, 1.0),
+    )
+    if isinstance(pbd_options, gs.options.PBDUnifiedOptions):
+        pbd_options.max_solver_iterations = 1
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
             gravity=(0.0, 0.0, 0.0),
         ),
-        pbd_options=options_type(
-            particle_size=0.08,
-            lower_bound=(-0.5, -0.5, 0.0),
-            upper_bound=(0.5, 0.5, 1.0),
-        ),
+        pbd_options=pbd_options,
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(0.8, -1.0, 1.0),
             camera_lookat=(0.0, 0.0, 0.5),
@@ -557,14 +560,18 @@ def test_one_way_rigid_surface_collision(n_envs, is_regular_grid, options_type, 
     particles_pos = tensor_to_array(elastic.get_particles_pos()).reshape((-1, elastic.n_particles, 3))
     vverts_pos, _, vfaces = scene.pbd_solver.get_state_render()
     vverts_pos = qd_to_numpy(vverts_pos, transpose=True)
-    render_mesh = trimesh.Trimesh(vertices=vverts_pos[-1], faces=qd_to_numpy(vfaces, transpose=True), process=False)
-    _, contact_distances, _ = trimesh.proximity.closest_point(render_mesh, np.stack(contact_positions))
-    assert (contact_distances > np.array([rigid.morph.size[0] / 2 for rigid in rigid_entities])).all()
+    if isinstance(pbd_options, gs.options.PBDUnifiedOptions):
+        assert_allclose(particles_pos, particles_initial[None], atol=1e-6)
+    else:
+        render_mesh = trimesh.Trimesh(vertices=vverts_pos[-1], faces=qd_to_numpy(vfaces, transpose=True), process=False)
+        _, contact_distances, _ = trimesh.proximity.closest_point(render_mesh, np.stack(contact_positions))
+        assert (contact_distances > np.array([rigid.morph.size[0] / 2 for rigid in rigid_entities])).all()
     assert_equal(vverts_pos, particles_pos[:, vverts_particles_idx])
     for contact_idx, (direction, rigid) in enumerate(zip((1, -1), rigid_entities)):
-        contact_vertices = particles_pos[-1, contact_triangles[contact_idx]]
-        contact_pos = (contact_vertices * contact_weights[contact_idx][:, None]).sum(axis=0)
-        assert direction * (contact_pos[0] - contact_positions[contact_idx][0]) < -rigid.morph.size[0] / 2
+        if isinstance(pbd_options, gs.options.PBDOptions):
+            contact_vertices = particles_pos[-1, contact_triangles[contact_idx]]
+            contact_pos = (contact_vertices * contact_weights[contact_idx][:, None]).sum(axis=0)
+            assert direction * (contact_pos[0] - contact_positions[contact_idx][0]) < -rigid.morph.size[0] / 2
         assert_allclose(
             rigid.get_pos(envs_idx=n_envs - 1 if n_envs else None), contact_positions[contact_idx], atol=1e-6
         )
@@ -578,3 +585,26 @@ def test_one_way_rigid_surface_collision(n_envs, is_regular_grid, options_type, 
     assert_allclose(particles_pos, particles_initial[None], atol=1e-6)
     vverts_pos, _, _ = scene.pbd_solver.get_state_render()
     assert_equal(qd_to_numpy(vverts_pos, transpose=True), particles_pos[:, vverts_particles_idx])
+
+    scene.reset()
+    contact_vertices_idx = []
+    contact_positions.clear()
+    for direction, rigid in zip((1, -1), rigid_entities):
+        i_v = np.argmax(direction * particles_initial[:, 0])
+        contact_vertices_idx.append(i_v)
+        contact_pos = particles_initial[i_v].copy()
+        contact_pos[0] += direction * 0.75 * rigid.morph.size[0] / 2
+        contact_positions.append(contact_pos)
+        rigid.set_pos(contact_pos, envs_idx=n_envs - 1 if n_envs else None)
+    scene.step()
+    particles_pos = tensor_to_array(elastic.get_particles_pos()).reshape((-1, elastic.n_particles, 3))
+    for direction, rigid, i_v, contact_pos in zip((1, -1), rigid_entities, contact_vertices_idx, contact_positions):
+        assert direction * (particles_pos[-1, i_v, 0] - contact_pos[0]) <= -rigid.morph.size[0] / 2
+        box_dist = np.abs(particles_pos[-1] - contact_pos) - rigid.morph.size[0] / 2
+        assert (box_dist.max(axis=-1) >= 0.0).all()
+        assert_allclose(rigid.get_pos(envs_idx=n_envs - 1 if n_envs else None), contact_pos, atol=1e-6)
+        assert_equal(rigid.get_vel(), 0.0)
+    if isinstance(pbd_options, gs.options.PBDUnifiedOptions):
+        assert_allclose(particles_pos[..., 1:], particles_initial[None, :, 1:], atol=1e-6)
+    if n_envs:
+        assert_allclose(particles_pos[0], particles_initial, atol=1e-6)

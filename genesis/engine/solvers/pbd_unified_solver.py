@@ -7,13 +7,7 @@ import quadrants as qd
 
 import genesis as gs
 from genesis.engine.boundaries import CubeBoundary
-from genesis.engine.boundaries.rigid_surface import (
-    build_rigid_surface,
-    kernel_apply_pbd_rigid_surface_corrections,
-    kernel_detect_pbd_rigid_surface_intersections,
-    kernel_reset_rigid_surface_contact,
-    kernel_store_rigid_surface_poses,
-)
+from genesis.engine.boundaries.rigid_surface import build_rigid_surface
 from genesis.engine.entities.pbd_entity import PBD2DEntity, PBD3DEntity
 from genesis.engine.states.solvers import PBDSolverState
 from genesis.utils import array_class, geom, sdf
@@ -58,8 +52,6 @@ class PBDUnifiedSolverState(PBDSolverState):
     def __init__(self, scene):
         super().__init__(scene)
         self.active = None
-        self.previous_geoms_pos = None
-        self.previous_geoms_quat = None
 
 
 @qd.func
@@ -255,32 +247,25 @@ def kernel_apply_delta(acceleration: float, particles: V_ANNOTATION, particles_n
 
 @qd.kernel
 def kernel_project_vertices(
-    i_iteration: int,
-    boundary: V_ANNOTATION,
     particles: V_ANNOTATION,
     particles_ng: V_ANNOTATION,
     bvh_nodes: V_ANNOTATION,
     bvh_morton_codes: V_ANNOTATION,
-    collision_iterations: V_ANNOTATION,
     dyn_state: array_class.DynState,
-    surface_state: array_class.RigidSurfaceContactState,
     dyn_info: array_class.DynInfo,
     rigid_info: array_class.RigidInfo,
     collider_info: array_class.ColliderInfo,
     surface_info: array_class.RigidSurfaceInfo,
-    is_audit: V_ANNOTATION,
+    boundary: V_ANNOTATION,
     errno: qd.Tensor,
 ):
     for i_p, i_b in qd.ndrange(particles.shape[0], particles.shape[1]):
-        if not qd.static(is_audit) and not surface_state.is_active[i_b]:
-            continue
-        if particles_ng[i_p, i_b].active:
-            pos = particles[i_p, i_b].pos
-            projected = boundary.impose_pos(pos)
-            for i_g in range(surface_info.projection_geoms_idx.shape[0]):
-                geom_idx = surface_info.projection_geoms_idx[i_g]
+        if particles_ng[i_p, i_b].active and particles[i_p, i_b].free:
+            projected = boundary.impose_pos(particles[i_p, i_b].pos)
+            for i_g_ in range(surface_info.projection_geoms_idx.shape[0]):
+                i_g = surface_info.projection_geoms_idx[i_g_]
                 projected, _, _ = sdf.sdf_func_project_vertex_outside_geom(
-                    geom_idx,
+                    i_g,
                     i_b,
                     projected,
                     bvh_nodes,
@@ -291,18 +276,10 @@ def kernel_project_vertices(
                     collider_info,
                     surface_info,
                 )
-            if (projected - pos).norm_sqr() > gs.EPS**2:
-                if qd.static(is_audit):
-                    qd.atomic_or(errno[i_b], ErrorCode.INVALID_PBD_RIGID_SURFACE_INTERSECTION)
-                elif particles[i_p, i_b].free:
-                    particles[i_p, i_b].pos = projected
-                    qd.atomic_max(surface_state.has_intersection[i_b], 1)
-                else:
-                    qd.atomic_or(errno[i_b], ErrorCode.INVALID_PBD_RIGID_SURFACE_INTERSECTION)
-    if not qd.static(is_audit):
-        for i_b in range(particles.shape[1]):
-            if surface_state.is_active[i_b]:
-                collision_iterations[i_b, i_iteration] += 1
+            if qd.math.isnan(projected).any() or qd.math.isinf(projected).any():
+                qd.atomic_or(errno[i_b], ErrorCode.INVALID_CONTACT_NAN)
+            else:
+                particles[i_p, i_b].pos = projected
 
 
 @qd.kernel
@@ -376,39 +353,32 @@ def kernel_update_render(
 
 @qd.kernel
 def kernel_set_field(
-    particles_idx: qd.types.ndarray(),
-    envs_idx: qd.types.ndarray(),
-    values: qd.types.ndarray(),
-    data: V_ANNOTATION,
-    is_batch_first: V_ANNOTATION,
+    particles_idx: qd.types.ndarray(), envs_idx: qd.types.ndarray(), values: qd.types.ndarray(), data: V_ANNOTATION
 ):
-    for i_b, i_p in qd.ndrange(envs_idx.shape[0], particles_idx.shape[1]):
-        i_row, i_col = particles_idx[i_b, i_p], envs_idx[i_b]
-        if qd.static(is_batch_first):
-            i_row, i_col = i_col, i_row
+    for i_b_, i_p_ in qd.ndrange(envs_idx.shape[0], particles_idx.shape[1]):
+        i_p, i_b = particles_idx[i_b_, i_p_], envs_idx[i_b_]
         if qd.static(len(values.shape) == 3):
             for i_axis in range(values.shape[-1]):
-                data[i_row, i_col][i_axis] = values[i_b, i_p, i_axis]
+                data[i_p, i_b][i_axis] = values[i_b_, i_p_, i_axis]
         else:
-            data[i_row, i_col] = values[i_b, i_p]
+            data[i_p, i_b] = values[i_b_, i_p_]
 
 
 @qd.kernel
-def kernel_reset_diagnostics(envs_idx: qd.types.ndarray(), collision_iterations: V_ANNOTATION, errno: qd.Tensor):
-    for i_b, i_iteration in qd.ndrange(envs_idx.shape[0], collision_iterations.shape[1]):
-        collision_iterations[envs_idx[i_b], i_iteration] = 0
+def kernel_reset_errno(envs_idx: qd.types.ndarray(), errno: qd.Tensor):
     for i_b in range(envs_idx.shape[0]):
         errno[envs_idx[i_b]] = 0
 
 
 class PBDUnifiedSolver(Solver):
-    """Position-based dynamics (PBD) with simultaneous elastic corrections and per-iteration hard rigid contact.
+    """Position-based dynamics (PBD) with simultaneous elastic corrections and per-iteration rigid vertex contact.
 
     Supports cloth and tetrahedral elastic entities. Rigid geoms with ``needs_coup=True`` supply prescribed
-    boundaries. Each iteration reads a common position state for every elastic constraint, then projects the
-    combined update onto the contact constraints. Material compliance regularizes each projection denominator;
-    the effective stiffness also depends on the iteration count and time step. Extrapolating consecutive iterates
-    accelerates shape recovery, with the iteration history initialized after each substep's motion prediction.
+    boundaries. Each iteration reads a common position state for every elastic constraint, then projects vertices
+    through the domain boundary and each rigid geom once. Separated contact regions keep successive projections
+    compatible. Material compliance regularizes each projection denominator; the effective stiffness also depends on
+    the iteration count and time step. Extrapolating consecutive iterates accelerates shape recovery, with the iteration
+    history initialized after each substep's motion prediction.
     Fully free entities receive a final velocity correction preserving linear and angular momentum after external
     forces and contact impulses, independently in each environment.
     """
@@ -435,9 +405,6 @@ class PBDUnifiedSolver(Solver):
         self.vverts_uvs = None
         self.vfaces_indices = None
         self._rigid_surface = None
-        self._surface_state = None
-        self._surface_faces = None
-        self._collision_iterations = None
         self._errno = None
         self._iteration_positions = None
         self._edges = None
@@ -500,7 +467,7 @@ class PBDUnifiedSolver(Solver):
             dpos=gs.qd_vec3,
             vel=gs.qd_vec3,
         ).field(shape=(self.n_particles, self._B), layout=qd.Layout.SOA)
-        self.particles_ng = qd.types.struct(active=gs.qd_bool, reordered_idx=gs.qd_int).field(
+        self.particles_ng = qd.types.struct(active=gs.qd_bool).field(
             shape=(self.n_particles, self._B), layout=qd.Layout.SOA
         )
         self.particles_info = qd.types.struct(
@@ -553,12 +520,8 @@ class PBDUnifiedSolver(Solver):
         self.vverts_uvs = qd.field(gs.qd_vec2, shape=(self.n_vverts,))
         self.vfaces_indices = qd.field(gs.qd_ivec3, shape=(self.n_vfaces,))
         self._errno = array_class.V(dtype=gs.qd_int, shape=(self._B,))
-        self._collision_iterations = qd.field(gs.qd_int, shape=(self._B, self._options.max_solver_iterations))
         for entity in self.entities:
             entity._add_to_solver()
-        self.particles_ng.reordered_idx.from_numpy(
-            np.broadcast_to(np.arange(self.n_particles, dtype=gs.np_int)[:, None], (self.n_particles, self._B)).copy()
-        )
         if self.n_inner_edges:
             kernel_init_bending(self.particles_info, self.inner_edges_info, self._errno)
         self._edges = torch.as_tensor(
@@ -612,15 +575,6 @@ class PBDUnifiedSolver(Solver):
                 gs.raise_exception("PBD rigid collision requires surface triangles.")
             rigid.collider._sdf.activate()
             self._rigid_surface = build_rigid_surface(rigid, projection_geoms)
-            self._surface_state = array_class.get_rigid_surface_contact_state(
-                self._B, self.n_particles, sum(geom.n_faces > 0 for geom in projection_geoms)
-            )
-            faces = np.concatenate(tuple(entity.surface_triangles + entity.particle_start for entity in self.entities))
-            self._surface_faces = qd.field(gs.qd_ivec3, shape=(len(faces),))
-            self._surface_faces.from_numpy(faces)
-            kernel_reset_rigid_surface_contact(
-                self.scene._envs_idx, rigid.dyn_state, self._surface_state, self._rigid_surface.info
-            )
         if self._options.is_recording_constraint_history:
             self._iteration_positions = torch.empty(
                 (self._options.max_solver_iterations, 3, self._B, self.n_particles, 3),
@@ -637,7 +591,6 @@ class PBDUnifiedSolver(Solver):
     def substep_pre_coupling(self, f):
         if not self.is_active:
             return
-        self._collision_iterations.fill(0)
         kernel_predict(
             self.sim.cur_t,
             self.substep_dt,
@@ -669,7 +622,7 @@ class PBDUnifiedSolver(Solver):
             if self._iteration_positions is not None:
                 self._iteration_positions[i_iteration, 1].copy_(qd_to_torch(self.particles.pos, transpose=True))
             contact_positions = qd_to_torch(self.particles.pos, transpose=True, copy=True)
-            self.project_collision(i_iteration)
+            self.project_collision()
             contact_velocities = (qd_to_torch(self.particles.pos, transpose=True) - contact_positions) / self.substep_dt
             # Extrapolation repeats earlier corrections with geometrically decreasing weights.
             contact_weight = (1.0 - acceleration ** (self._options.max_solver_iterations - i_iteration)) / (
@@ -758,61 +711,29 @@ class PBDUnifiedSolver(Solver):
             )
         kernel_apply_delta(self._options.constraint_acceleration, self.particles, self.particles_ng, self._errno)
 
-    def project_collision(self, i_iteration):
-        """Enforce hard rigid and domain contacts for one elastic iteration."""
+    def project_collision(self):
+        """Project free vertices through the domain boundary and each rigid geom once."""
         if self._rigid_surface is None:
             kernel_project_boundary(self.boundary, self.particles, self.particles_ng)
             return
         rigid = self.scene.rigid_solver
         surface = self._rigid_surface
-        self._surface_state.is_active.fill(True)
-        self._surface_state.has_intersection.fill(0)
-        for i_contact in range(self._options.max_collision_iterations + 1):
-            is_audit = i_contact == self._options.max_collision_iterations
-            kernel_project_vertices(
-                i_iteration,
-                self.boundary,
-                self.particles,
-                self.particles_ng,
-                surface.bvh.nodes,
-                surface.bvh.morton_codes,
-                self._collision_iterations,
-                rigid.dyn_state,
-                self._surface_state,
-                rigid.dyn_info,
-                rigid.rigid_info,
-                rigid.collider._collider_info,
-                surface.info,
-                is_audit=is_audit,
-                errno=self._errno,
-            )
-            kernel_detect_pbd_rigid_surface_intersections(
-                i_contact,
-                self._surface_faces,
-                self.particles,
-                self.particles_ng,
-                surface.bvh.nodes,
-                surface.bvh.morton_codes,
-                rigid.dyn_state,
-                self._surface_state,
-                rigid.dyn_info,
-                rigid.rigid_info,
-                surface.info,
-                is_audit=is_audit,
-                errno=self._errno,
-            )
-            if not is_audit:
-                kernel_apply_pbd_rigid_surface_corrections(
-                    self.substep_dt, self.particles, self.particles_ng, self._surface_state, self._errno
-                )
-                if not qd_to_torch(self._surface_state.is_active, transpose=True).any():
-                    break
+        kernel_project_vertices(
+            self.particles,
+            self.particles_ng,
+            surface.bvh.nodes,
+            surface.bvh.morton_codes,
+            rigid.dyn_state,
+            rigid.dyn_info,
+            rigid.rigid_info,
+            rigid.collider._collider_info,
+            surface.info,
+            self.boundary,
+            self._errno,
+        )
 
     def substep_post_coupling(self, f):
-        if self._rigid_surface is not None:
-            kernel_store_rigid_surface_poses(
-                self.scene.rigid_solver.dyn_state, self._surface_state, self._rigid_surface.info
-            )
+        pass
 
     def check_errno(self):
         if self._errno is None:
@@ -822,10 +743,6 @@ class PBDUnifiedSolver(Solver):
             gs.raise_exception("PBDUnifiedSolver encountered a non-finite state or a degenerate bending constraint.")
         if errno & ErrorCode.INVALID_PBD_VOLUME:
             gs.raise_exception("PBDUnifiedSolver has a collapsed or inverted tetrahedron with every vertex fixed.")
-        if errno & ErrorCode.INVALID_PBD_RIGID_SURFACE_INTERSECTION:
-            gs.raise_exception(
-                "PBDUnifiedSolver hard collision projection left a rigid intersection or a fixed particle in contact."
-            )
 
     def get_state(self, f):
         if not self.is_active:
@@ -835,13 +752,6 @@ class PBDUnifiedSolver(Solver):
         state.vel.copy_(qd_to_torch(self.particles.vel, transpose=True))
         state.free.copy_(qd_to_torch(self.particles.free, transpose=True))
         state.active = qd_to_torch(self.particles_ng.active, transpose=True, copy=True)
-        if self._surface_state is not None:
-            state.previous_geoms_pos = qd_to_torch(
-                self._surface_state.previous_geoms_pos, transpose=True, copy=True
-            ).transpose(0, 1)
-            state.previous_geoms_quat = qd_to_torch(
-                self._surface_state.previous_geoms_quat, transpose=True, copy=True
-            ).transpose(0, 1)
         return state
 
     @mutates(StateChange.GEOMETRY, StateChange.DYNAMICS)
@@ -862,29 +772,11 @@ class PBDUnifiedSolver(Solver):
         self.set_particle_field(self.particles.dpos, torch.zeros_like(state.pos[envs_idx]), particles_idx, envs_idx)
         if gs.use_zerocopy:
             errno = qd_to_torch(self._errno, transpose=True, copy=False)
-            collision_iterations = qd_to_torch(self._collision_iterations, transpose=True, copy=False)
             errno[envs_idx] = 0
-            collision_iterations[:, envs_idx] = 0
             if gs.backend == gs.metal:
                 torch.mps.synchronize()
         else:
-            kernel_reset_diagnostics(envs_idx, self._collision_iterations, self._errno)
-        if self._surface_state is not None:
-            kernel_reset_rigid_surface_contact(
-                envs_idx, self.scene.rigid_solver.dyn_state, self._surface_state, self._rigid_surface.info
-            )
-            for field, value in (
-                (self._surface_state.previous_geoms_pos, state.previous_geoms_pos),
-                (self._surface_state.previous_geoms_quat, state.previous_geoms_quat),
-            ):
-                if gs.use_zerocopy:
-                    view = qd_to_torch(field, transpose=True, copy=False).transpose(0, 1)
-                    view[envs_idx] = value[envs_idx]
-                else:
-                    geoms_idx = torch.arange(value.shape[1], device=gs.device).repeat(len(envs_idx), 1)
-                    kernel_set_field(geoms_idx, envs_idx, value[envs_idx].contiguous(), field, is_batch_first=True)
-            if gs.backend == gs.metal:
-                torch.mps.synchronize()
+            kernel_reset_errno(envs_idx, self._errno)
 
     def set_particle_field(self, field, values, particles_idx, envs_idx):
         """Write a scalar or three-component particle field using environment-local indices."""
@@ -892,7 +784,7 @@ class PBDUnifiedSolver(Solver):
             view = qd_to_torch(field, transpose=True, copy=False)
             view[envs_idx[:, None], particles_idx] = values
         else:
-            kernel_set_field(particles_idx, envs_idx, values, field, is_batch_first=False)
+            kernel_set_field(particles_idx, envs_idx, values, field)
 
     @mutates(StateChange.GEOMETRY, StateChange.DYNAMICS)
     def _kernel_set_particles_pos(self, particles_idx, envs_idx, poss):
@@ -987,10 +879,6 @@ class PBDUnifiedSolver(Solver):
         if self._iteration_positions is None:
             gs.raise_exception("Constraint history requires is_recording_constraint_history=True.")
         return self.get_constraint_residuals(self._iteration_positions)
-
-    def get_collision_iterations(self):
-        """Return the collision sweep count with shape [B, elastic_iteration] for the last substep."""
-        return qd_to_torch(self._collision_iterations, transpose=True, copy=True).T
 
     def update_render_fields(self):
         if self.is_active:

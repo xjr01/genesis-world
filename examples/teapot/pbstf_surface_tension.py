@@ -826,7 +826,6 @@ def build_scene(
                 lower_bound=settings.lower_bound,
                 upper_bound=settings.upper_bound,
                 max_solver_iterations=30,
-                max_collision_iterations=100,
                 constraint_acceleration=0.85,
             )
             if case == CASE_MOP

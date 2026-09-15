@@ -40,7 +40,6 @@ def build_scene(show_viewer=False, sponge_render_style=SPONGE_RENDER_SKELETON):
             lower_bound=(-0.4, -1.0 / 15.0, -4.0 / 15.0),
             upper_bound=(0.4, 4.0 / 15.0, 4.0 / 15.0),
             max_solver_iterations=30,
-            max_collision_iterations=100,
             constraint_acceleration=0.85,
         ),
         viewer_options=gs.options.ViewerOptions(

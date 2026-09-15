@@ -1010,8 +1010,9 @@ class PBDUnifiedOptions(Options):
     """Options for unified position-based dynamics (PBD) of cloth and elastic solids.
 
     Each iteration combines elastic corrections and enforces one-way rigid contact. More iterations improve
-    shape preservation under load at increased runtime cost. Collision iterations bound the work needed to
-    resolve simultaneous contacts; exhausting this budget with intersections remaining raises an error.
+    shape preservation under load at increased runtime cost. Rigid contact acts at particle positions and assumes
+    separated rigid geoms with clearance from domain boundaries. Finer particle sampling resolves smaller rigid
+    features at increased memory and runtime cost.
     Constraint acceleration extrapolates consecutive elastic iterates within each time step. Larger values can
     improve shape recovery with fewer iterations, with a greater risk of overshoot under changing contacts.
     Zero uses the current correction alone.
@@ -1026,7 +1027,6 @@ class PBDUnifiedOptions(Options):
     lower_bound: Vec3FType = (-100.0, -100.0, 0.0)
     upper_bound: Vec3FType = (100.0, 100.0, 100.0)
     max_solver_iterations: PositiveInt = 30
-    max_collision_iterations: PositiveInt = 20
     constraint_acceleration: Annotated[float, Field(ge=0.0, lt=1.0)] = 0.0
     is_recording_constraint_history: StrictBool = False
 
