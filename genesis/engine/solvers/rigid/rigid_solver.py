@@ -131,6 +131,7 @@ from .abd.forward_dynamics import (
     update_qvel,
 )
 from .abd.accessor import (
+    ConstraintType,
     kernel_get_state,
     kernel_set_state,
     kernel_set_links_pos,
@@ -156,7 +157,6 @@ from .abd.accessor import (
     kernel_set_dofs_damping,
     kernel_set_dofs_frictionloss,
     kernel_set_dofs_limit,
-    kernel_set_fixed_links_velocity,
     kernel_set_dofs_velocity,
     kernel_set_dofs_velocity_grad,
     kernel_set_dofs_zero_velocity,
@@ -214,11 +214,11 @@ IMP_MAX = 0.9999
 TIME_CONSTANT_SAFETY_FACTOR = 2.0
 
 
-def _sanitize_sol_params(sol_params, min_timeconst: float, default_timeconst: float | None = None):
+def _sanitize_sol_params(
+    sol_params, min_timeconst: float, default_timeconst: float | None = None, *, floor_timeconst: bool = True
+):
     timeconst, dampratio, dmin, dmax, width, mid, power = sol_params.reshape((-1, 7)).T
-    if default_timeconst is None:
-        default_timeconst = min_timeconst
-    if (timeconst < gs.EPS).any():
+    if (timeconst < gs.EPS).any() and default_timeconst is not None:
         gs.logger.debug(
             f"Constraint solver time constant not specified. Using default value (`{default_timeconst:0.6g}`)."
         )
@@ -229,8 +229,13 @@ def _sanitize_sol_params(sol_params, min_timeconst: float, default_timeconst: fl
             f"`{min(timeconst[invalid_mask]):0.6g}` to `{min_timeconst:0.6g}`). Decrease simulation timestep or "
             "increase timeconst to avoid altering the original value."
         )
-    timeconst[timeconst < gs.EPS] = default_timeconst
-    timeconst[:] = timeconst.clip(min_timeconst)
+    # An unspecified time constant takes the default, when there is one; a caller that passes none leaves it bare for
+    # the floor to handle. The floor itself may be deferred, which contact assembly does so that it applies to the
+    # mixed value of the two geoms rather than to each of them.
+    if default_timeconst is not None:
+        timeconst[timeconst < gs.EPS] = default_timeconst
+    if floor_timeconst:
+        timeconst[:] = timeconst.clip(min_timeconst)
     if (dampratio < gs.EPS).any():
         gs.raise_exception(
             "Constraint solver `dampratio` must be strictly positive. Despite its name, it controls spring stiffness, "
@@ -740,6 +745,13 @@ class RigidSolver(KinematicSolver):
                     # arm has nothing to exploit, so the scalar one-thread-per-env monolith is the clear winner.
                     rigid_config["prefer_decomposed_solver"] = 0
 
+                # The autotuner picks between two numerically distinct arms by timing them as the simulation runs, so
+                # which one runs at a given step follows the machine rather than the scene. Pinning the arm is what
+                # makes a trajectory reproducible; the decomposed one takes whatever the static scene description
+                # leaves open, every case that description settles in the monolith's favor being pinned above already.
+                if gs.use_deterministic_algorithms and rigid_config.get("prefer_decomposed_solver", -1) == -1:
+                    rigid_config["prefer_decomposed_solver"] = 1
+
             # Add terms for static inner loops, use -1 if not requires_grad to avoid re-compilation
             if self.sim.options.requires_grad:
                 rigid_config.update(
@@ -791,6 +803,7 @@ class RigidSolver(KinematicSolver):
         self._rigid_adjoint_cache = self.data_manager.rigid_adjoint_cache
         self.dyn_info = self.data_manager.dyn_info
         self.dyn_state = self.data_manager.dyn_state
+        self.kinematics_scratch = self.data_manager.kinematics_scratch
         if self._use_hibernation:
             self.n_awake_dofs = self.rigid_info.n_awake_dofs
             self.awake_dofs = self.rigid_info.awake_dofs
@@ -802,9 +815,6 @@ class RigidSolver(KinematicSolver):
             self.dyn_state_adjoint_cache = self.data_manager.dyn_state_adjoint_cache
 
     def _sanitize_joint_sol_params(self, sol_params):
-        return _sanitize_sol_params(sol_params, self._sol_min_timeconst, self._sol_default_timeconst)
-
-    def _sanitize_geom_sol_params(self, sol_params):
         return _sanitize_sol_params(sol_params, self._sol_min_timeconst, self._sol_default_timeconst)
 
     def _jacobi_mass_spread_bound(self):
@@ -1030,6 +1040,34 @@ class RigidSolver(KinematicSolver):
         # Compute meaninertia from mass matrix
         kernel_init_meaninertia(envs_idx, self.dyn_info, self.rigid_info, self.rigid_config)
 
+        # The solve's exit tests are quoted on scene aggregates, and every DOF of a link contributes a cost of the
+        # order of the link's mass, so a link whose mass is a tolerance-fraction of the scene's is invisible to
+        # them: the solve stops while that link still carries residual. The absolute floor is the working
+        # precision's resolution limit, calibrated on the isotropy sweep boundary in kilograms, following the
+        # tolerance linearly. A joint carries the composite inertia of its whole subtree, so each link weighs in
+        # with its subtree's mass; the scene total is read before the accumulation folds children into parents.
+        links_subtree_mass = np.atleast_2d(qd_to_numpy(self.dyn_info.links.inertial_mass, transpose=True, copy=True))
+        movable_links_idx = np.flatnonzero([link.n_dofs > 0 for link in self.links])
+        if movable_links_idx.size:
+            total_mass = links_subtree_mass[:, movable_links_idx].sum(axis=1)
+            for i_l in reversed(range(self._n_links)):
+                if self.links[i_l].parent_idx >= 0:
+                    links_subtree_mass[:, self.links[i_l].parent_idx] += links_subtree_mass[:, i_l]
+            movable_links_mass = links_subtree_mass[:, movable_links_idx]
+            mass_floor = np.maximum(self._options.tolerance * total_mass, 0.2 * self._options.tolerance)[:, None]
+            i_b_min, i_l_min = np.unravel_index((movable_links_mass / mass_floor).argmin(), movable_links_mass.shape)
+            mass_min = movable_links_mass[i_b_min, i_l_min]
+            if mass_min < mass_floor[i_b_min, 0]:
+                link = self.links[movable_links_idx[i_l_min]]
+                if gs.qd_float == qd.f32:
+                    remedy = "Use 64-bit simulation precision or tighten the solver tolerance."
+                else:
+                    remedy = "Tighten the solver tolerance."
+                gs.logger.warning(
+                    f"Link '{link.name}' has mass {mass_min:.1e}, too small for the constraint solver to be "
+                    f"numerically stable. {remedy} Note that increasing the solver iterations would not help."
+                )
+
     def _init_mass_mat(self):
         self.mass_mat = self.rigid_info.mass_mat
         self.mass_mat_L = self.rigid_info.mass_mat_L
@@ -1210,7 +1248,13 @@ class RigidSolver(KinematicSolver):
         if self.n_geoms > 0:
             geoms = self.geoms
             geoms_sol_params = np.array([geom.sol_params for geom in geoms], dtype=gs.np_float)
-            _sanitize_sol_params(geoms_sol_params, self._sol_min_timeconst, self._sol_default_timeconst)
+            # A geom keeps the time constant the model states; the floor lands on the value a contact mixes out of its
+            # two geoms (see func_set_contact_data), the value the solver actually consumes. Flooring per geom would
+            # raise the mix of a pair that is already above the floor, distorting the stated stiffness with no
+            # stability benefit.
+            _sanitize_sol_params(
+                geoms_sol_params, self._sol_min_timeconst, self._sol_default_timeconst, floor_timeconst=False
+            )
 
             # Accurately compute the center of mass of each geometry if possible.
             # Note that the mean vertex position is a bad approximation, which is impeding the ability of MPR to
@@ -1841,6 +1885,12 @@ class RigidSolver(KinematicSolver):
 
             state = RigidSolverState(self._scene, s_global)
 
+            # A captured state must be self-consistent: links_pos / links_quat have to be the Cartesian pose implied by
+            # the qpos captured alongside them, otherwise restoring it does not reproduce the configuration it was taken
+            # from. The step loop leaves that pose one integration behind qpos whenever it defers the post-integrate
+            # refresh, so catch up here - a no-op when the pose is already current, which is the common case.
+            self.update_forward_pos()
+
             kernel_get_state(
                 state.i_pos_shift,
                 state.qpos,
@@ -2090,46 +2140,6 @@ class RigidSolver(KinematicSolver):
 
     def set_links_pos(self, pos, links_idx=None, envs_idx=None):
         raise DeprecationError("This method has been removed. Please use 'set_base_links_pos' instead.")
-
-    @mutates(StateChange.DYNAMICS, links="links_idx")
-    def set_fixed_links_velocity(self, vel, ang, links_idx=None, envs_idx=None):
-        """Set the world-frame velocity of fixed base links at their origins.
-
-        The prescribed linear and angular velocities drive velocity boundary conditions while each link's pose
-        remains controlled explicitly through the base-pose setters.
-        """
-        if links_idx is None:
-            links_idx = self._base_links_idx
-        if isinstance(links_idx, int) and not self.links[links_idx].is_fixed:
-            gs.raise_exception("Prescribed base velocity is only supported for fixed links.")
-
-        ang, _, _ = self._sanitize_io_variables(
-            ang, links_idx, self.n_links, "links_idx", envs_idx, (3,), skip_allocation=True
-        )
-        vel, links_idx, envs_idx = self._sanitize_io_variables(
-            vel, links_idx, self.n_links, "links_idx", envs_idx, (3,), skip_allocation=True
-        )
-        if self.n_envs == 0:
-            vel = vel[None]
-            ang = ang[None]
-
-        if gs.use_zerocopy:
-            mask = indices_to_mask(envs_idx, links_idx)
-            kinematic_vel = qd_to_torch(self.dyn_state.links.kinematic_vel, transpose=True, copy=False)
-            assign_indexed_tensor(kinematic_vel, mask, vel)
-            kinematic_ang = qd_to_torch(self.dyn_state.links.kinematic_ang, transpose=True, copy=False)
-            assign_indexed_tensor(kinematic_ang, mask, ang)
-            if gs.backend == gs.metal:
-                torch.mps.synchronize()
-        else:
-            kernel_set_fixed_links_velocity(links_idx, envs_idx, vel, ang, self.dyn_state, self.rigid_config)
-
-        if envs_idx.dtype == torch.bool:
-            fn = kernel_masked_forward_velocity
-        else:
-            fn = kernel_forward_velocity
-        fn(envs_idx, self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config, is_backward=False)
-        self._is_forward_vel_updated = True
 
     @mutates(StateChange.GEOMETRY, links="links_idx")
     def set_base_links_pos(self, pos, links_idx=None, envs_idx=None, *, relative=False, skip_forward=False):
@@ -2560,19 +2570,19 @@ class RigidSolver(KinematicSolver):
 
         # Select the right input type
         if eqs_idx is not None:
-            constraint_type = 2
+            constraint_type = ConstraintType.EQUALITY
             idx_name = "eqs_idx"
             inputs_idx = eqs_idx
             inputs_length = self.n_equalities
             batched = True
         elif joints_idx is not None:
-            constraint_type = 1
+            constraint_type = ConstraintType.JOINT
             idx_name = "joints_idx"
             inputs_idx = joints_idx
             inputs_length = self.n_joints
             batched = self._options.batch_joints_info
         else:
-            constraint_type = 0
+            constraint_type = ConstraintType.GEOM
             idx_name = "geoms_idx"
             inputs_idx = geoms_idx
             inputs_length = self.n_geoms
@@ -2582,11 +2592,19 @@ class RigidSolver(KinematicSolver):
         sol_params_, inputs_idx, envs_idx = self._sanitize_io_variables(
             sol_params, inputs_idx, inputs_length, idx_name, envs_idx, (7,), batched=batched, skip_allocation=True
         )
-        sol_params_ = _sanitize_sol_params(sol_params_.clone(), self._sol_min_timeconst)
+        # Geom values resolve an unspecified time constant to the default, then defer the floor to contact
+        # assembly, which floors the mixed pair value (see func_set_contact_data), mirroring the build-time
+        # sanitization; joint and equality values are consumed unmixed, so they are floored here.
+        sol_params_ = _sanitize_sol_params(
+            sol_params_.clone(),
+            self._sol_min_timeconst,
+            self._sol_default_timeconst if constraint_type == ConstraintType.GEOM else None,
+            floor_timeconst=constraint_type != ConstraintType.GEOM,
+        )
         if self.n_envs == 0 and batched:
             sol_params_ = sol_params_[None]
 
-        kernel_set_sol_params(inputs_idx, envs_idx, sol_params_, self.dyn_info, self.rigid_config, constraint_type)
+        kernel_set_sol_params(inputs_idx, envs_idx, sol_params_, self.dyn_info, self.rigid_config, int(constraint_type))
 
     def _set_dofs_info(self, tensor_list, dofs_idx, name, envs_idx=None):
         if gs.use_zerocopy and name in {
@@ -3468,12 +3486,6 @@ def kernel_step_2(
 
     func_integrate(dyn_state, dyn_info, rigid_info, rigid_config, is_backward)
 
-    if qd.static(rigid_config.use_hibernation):
-        func_hibernate__for_all_awake_islands_either_hiberanate_or_update_aabb_sort_buffer(
-            dyn_state, collider_state, constraint_state, dyn_info, rigid_info, rigid_config, errno
-        )
-        func_aggregate_awake_entities(dyn_state, dyn_info, rigid_info, rigid_config)
-
     if qd.static(not is_backward):
         func_copy_next_to_curr(dyn_state, rigid_info, rigid_config, errno)
 
@@ -3482,3 +3494,12 @@ def kernel_step_2(
                 dyn_state, dyn_info, rigid_info, rigid_config, force_update_fixed_geoms=False, is_backward=is_backward
             )
             func_forward_velocity(dyn_state, dyn_info, rigid_info, rigid_config, is_backward)
+
+    # Hibernating comes last, after the post-integrate refresh above: both only visit awake entities, so deciding to
+    # sleep first would drop the newly-hibernated island from that refresh and freeze its Cartesian pose one
+    # integration behind the qpos this step just advanced, for as long as it sleeps.
+    if qd.static(rigid_config.use_hibernation):
+        func_hibernate__for_all_awake_islands_either_hiberanate_or_update_aabb_sort_buffer(
+            dyn_state, collider_state, constraint_state, dyn_info, rigid_info, rigid_config, errno
+        )
+        func_aggregate_awake_entities(dyn_state, dyn_info, rigid_info, rigid_config)

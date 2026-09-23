@@ -1,5 +1,56 @@
 # Genesis Release Note
 
+## 1.3.3
+
+This minor release fixes rigid solver convergence regressions and introduces a new torch-like option 'use_deterministic_algorithms' to ensure bit-exact reproducibility on a given machine. Besides, Mujoco compatibility mode has been improved to now cover native contact patch-based multi-contact (as opposed to the old perturbation-based approach). This experimental feature is now exposed to the user via 'RigidOptions.enable_contact_patch'.
+
+### New Features
+
+* Add bit-exact deterministic simulation mode on a given machine. (@duburcqa) (#3222)
+
+### Bug Fixes
+
+* Keep the contact manifold and the constraint solve consistent across orientations and scales. (@duburcqa) (#3158)
+* Fix physics discrepancy between generic and GPU-only constraint solver implementations. (@duburcqa) (#3218)
+* Fix dropped and backend-dependent contacts under MuJoCo compatibility. (@duburcqa) (#3223)
+
+### Miscellaneous
+
+* Add analytical sphere-sphere collision detection. (@Kashu7100) (#2963)
+* Stricter Mujoco parity under compatibility mode. (@duburcqa) (#3154)
+* Skip already-converged warm-started constraint solves. (@duburcqa) (#3154)
+* Support PyTorch prerelease builds. (@PhysicistJohn) (#3203)
+* Add documentation issue template. (@Milotrince) (#3189)
+* Remove deprecated 'compile_kernels' build arg. (@Milotrince) (#3220)
+* Skip Quadrants memory allocation for inactive solvers. (@Kashu7100) (#3155)
+* Upgrade Quadrants to 1.3.0. (@hughperkins) (#3219)
+
+## 1.3.2
+
+This minor release improves compliance of rigid body simulation wrt the orientation- and scale-based physics invariants, while improving numerical robustness to ill-conditioning for the mass matrix. Besides, the simulation is now fully deterministic on a given machine for both CPU and GPU.
+
+### New Features
+
+* Add method for querying terrain height. (@jeetrex17) (#3128)
+
+### Bug Fixes
+
+* Fix delete weld constraint when not last added dynamic equality. (@jimwang418) (#3123)
+* Fix viewer picking and raycast sensors missing hits. (@duburcqa) (#3147)
+* Fix sensor read delay crash and jitter returning undelayed data. (@Milotrince) (#3188)
+* Preserve authored inertia matrix when center of mass is unspecified. (@eason4kim-rocket) (#3184)
+* Keep rigid body simulation consistent across scene orientations and scales. (@duburcqa) (#3152, #3156, #3194, #3196)
+
+### Miscellaneous
+
+* Cleanup examples for consistency. (@Milotrince) (#3104)
+* Report a clear error when EGL is unavailable for offscreen rendering. (@himanshu748) (#3145)
+* Speed up simulation with IMU sensors. (@duburcqa) (#3149)
+* Share mesh cache between re-exports of the same asset. (@duburcqa) (#3151)
+* Simplify per-step update of temperature sensor. (@duburcqa) (#3153)
+* Speedup scene build by skipping the hollow-geom SDF probe for convex geoms. (@YilingQiao) (#3180)
+* Make GPU-based rigid body simulation deterministic. (@hughperkins) (#3187)
+
 ## 1.3.1
 
 This small release fixes support of the Nyx rendering plugin. Besides, contact normal forces no longer depend on the friction coefficient nor the sliding speed, thanks to the new rigid solver option 'contact_resolution' that bounds friction against the normal force actually developed by the contact.

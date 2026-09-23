@@ -9,6 +9,18 @@ from genesis.repr_base import RBC
 STACK_SIZE = 64
 
 
+@qd.func
+def point_aabb_distance_sqr(point: qd.types.vector(3), lower: qd.types.vector(3), upper: qd.types.vector(3)):
+    """Return the squared distance from a point to an axis-aligned bounding box (AABB)."""
+    delta = qd.Vector.zero(gs.qd_float, 3)
+    for axis in qd.static(range(3)):
+        if point[axis] < lower[axis]:
+            delta[axis] = lower[axis] - point[axis]
+        elif point[axis] > upper[axis]:
+            delta[axis] = point[axis] - upper[axis]
+    return delta.norm_sqr()
+
+
 @qd.data_oriented
 class AABB(RBC):
     """

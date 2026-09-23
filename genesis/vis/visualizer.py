@@ -255,8 +255,8 @@ class Visualizer(RBC):
         if self._scene.pbstf_solver.is_active:
             self._scene.pbstf_solver.update_render_fields()
 
-        if self._scene.ipbstf_solver.is_active:
-            self._scene.ipbstf_solver.update_render_fields()
+        if self._scene.ipbf_solver.is_active:
+            self._scene.ipbf_solver.update_render_fields()
 
         if self._scene.pbd_solver.is_active:
             self._scene.pbd_solver.update_render_fields()

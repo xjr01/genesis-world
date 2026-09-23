@@ -164,6 +164,7 @@ class RasterizerContext:
         self.on_mpm()
         self.on_sph()
         self.on_pbstf()
+        self.on_ipbf()
         self.on_pbd()
         self.on_fem()
 
@@ -766,80 +767,191 @@ class RasterizerContext:
                         self.jit.update_buffer(node, "model", tfs.transpose((0, 2, 1)))
 
     def on_pbstf(self):
-        for solver in (self.sim.pbstf_solver, self.sim.ipbstf_solver):
+        for solver in (self.sim.pbstf_solver,):
             if not solver.is_active:
                 continue
+            # Multiflow: every recon-mode liquid entity shares the single merged iso-surface built
+            # per frame in `update_pbstf`, so only the first one carries the dynamic node.
+            recon_fluid_entity = next(
+                (e for e in solver.entities if e.surface.vis_mode == "recon"), None
+            )
             for entity in solver.entities:
                 if entity.surface.vis_mode == "recon":
-                    self.add_dynamic_node(entity, None)
+                    if entity is recon_fluid_entity:
+                        self.add_dynamic_node(entity, None)
                 elif entity.surface.vis_mode == "particle":
                     for idx in self.rendered_envs_idx:
-                        mesh = mu.create_sphere(solver.particle_radius * self.particle_size_scale, subdivisions=1)
-                        mesh.visual = mu.surface_uvs_to_trimesh_visual(entity.surface, n_verts=len(mesh.vertices))
-                        tfs = np.tile(np.eye(4), (entity.n_particles, 1, 1))
-                        tfs[:, :3, 3] = entity.init_particles
-                        self.add_static_node(entity, pyrender.Mesh.from_trimesh(mesh, smooth=True, poses=tfs), i_b=idx)
-                elif entity.surface.vis_mode == "visual" and isinstance(
-                    entity.material, gs.materials.PBSTF.PorousElastic
-                ):
-                    entity.vmesh.trimesh.visual = mu.surface_uvs_to_trimesh_visual(
-                        entity.surface,
-                        uvs=entity.vmesh.uvs,
-                        n_verts=len(entity.vmesh.trimesh.vertices),
-                    )
-                    for idx in self.rendered_envs_idx:
-                        self.add_static_node(
-                            entity,
-                            pyrender.Mesh.from_trimesh(
-                                entity.vmesh.trimesh,
-                                smooth=entity.surface.smooth,
-                                double_sided=entity.surface.double_sided,
-                            ),
-                            i_b=idx,
-                        )
+                        if self.render_particle_as == "points":
+                            # Multiflow: point cloud with per-particle colors driven by the concentration
+                            # field c (0 = water white, 1 = coffee brown). Positions live in the "pos"
+                            # buffer and colors in the interleaved "vertex" buffer; both are updated
+                            # per frame in `update_pbstf`.
+                            c_all = qd_to_numpy(solver.particles.c, transpose=True)
+                            c = c_all[idx, entity.particle_start : entity.particle_end]
+                            self.add_static_node(
+                                entity,
+                                pyrender.Mesh.from_points(
+                                    entity.init_particles.astype(np.float32),
+                                    colors=self._concentration_colors(c),
+                                ),
+                                i_b=idx,
+                            )
+                        else:
+                            mesh = mu.create_sphere(solver.particle_radius * self.particle_size_scale, subdivisions=1)
+                            mesh.visual = mu.surface_uvs_to_trimesh_visual(entity.surface, n_verts=len(mesh.vertices))
+                            tfs = np.tile(np.eye(4), (entity.n_particles, 1, 1))
+                            tfs[:, :3, 3] = entity.init_particles
+                            self.add_static_node(entity, pyrender.Mesh.from_trimesh(mesh, smooth=True, poses=tfs), i_b=idx)
 
     def update_pbstf(self):
-        for solver in (self.sim.pbstf_solver, self.sim.ipbstf_solver):
+        for solver in (self.sim.pbstf_solver,):
             if not solver.is_active:
                 continue
             particles_all = qd_to_numpy(solver.particles_render.pos, transpose=True)
             particles_all = particles_all + self.scene.envs_offset[:, None, :]
             active_all = qd_to_numpy(solver.particles_render.active, transpose=True)
-            if solver is self.sim.pbstf_solver and solver.n_vverts > 0:
-                vverts_all = qd_to_numpy(solver.vverts_render.pos, transpose=True)
-                vverts_all = vverts_all + self.scene.envs_offset[:, None, :]
-            else:
-                vverts_all = None
+            recon_entities = [e for e in solver.entities if e.surface.vis_mode == "recon"]
+            if self.render_particle_as == "points" or recon_entities:
+                c_render_all = qd_to_numpy(solver.particles_render.c, transpose=True)
+            # Multiflow: one merged iso-surface over every recon-mode liquid entity, colored
+            # per vertex by the concentration field SPH-interpolated at the same smoothing
+            # scale as the surface. Separate per-entity surfaces would interpenetrate wherever
+            # the liquids intermingle (milk poured into coffee); mirrors update_pbd.
+            for idx in self.rendered_envs_idx:
+                if not recon_entities:
+                    continue
+                spans = [(e.particle_start, e.particle_end) for e in recon_entities]
+                positions = np.concatenate([particles_all[idx, s:e][active_all[idx, s:e]] for s, e in spans])
+                c = np.concatenate([c_render_all[idx, s:e][active_all[idx, s:e]] for s, e in spans])
+                recon = pu.particles_to_mesh_with_attributes(
+                    positions,
+                    radius=solver.particle_radius,
+                    backend=recon_entities[0].surface.recon_backend,
+                    attributes={"c": c},
+                )
+                recon.mesh.visual = trimesh.visual.ColorVisuals(
+                    vertex_colors=self._concentration_colors(recon.vertex_attributes["c"])
+                )
+                self.add_dynamic_node(recon_entities[0], pyrender.Mesh.from_trimesh(recon.mesh, smooth=True))
             for entity in solver.entities:
                 for idx in self.rendered_envs_idx:
                     if entity.surface.vis_mode == "recon":
-                        mesh = pu.particles_to_mesh(
-                            positions=particles_all[idx, entity.particle_start : entity.particle_end][
-                                active_all[idx, entity.particle_start : entity.particle_end]
-                            ],
-                            radius=solver.particle_radius,
-                            backend=entity.surface.recon_backend,
-                        )
-                        mesh.visual = mu.surface_uvs_to_trimesh_visual(entity.surface, n_verts=len(mesh.vertices))
-                        self.add_dynamic_node(entity, pyrender.Mesh.from_trimesh(mesh, smooth=True))
+                        # merged fluid surface handled above for the whole recon set
+                        continue
                     elif entity.surface.vis_mode == "particle":
-                        tfs = np.tile(np.eye(4), (entity.n_particles, 1, 1))
-                        tfs[:, :3, 3] = particles_all[idx, entity.particle_start : entity.particle_end]
-                        node = self.static_nodes[(idx, entity.uid)]
-                        self.jit.update_buffer(node, "model", tfs.transpose((0, 2, 1)))
-                    elif entity.surface.vis_mode == "visual" and isinstance(
-                        entity.material, gs.materials.PBSTF.PorousElastic
-                    ):
-                        vverts = vverts_all[idx, entity.vvert_start : entity.vvert_end]
-                        node = self.static_nodes[(idx, entity.uid)]
-                        update_data = self._scene.reorder_vertices(node, vverts.astype(np.float32))
-                        self.jit.update_buffer(node, "pos", update_data)
-                        normal_data = self.jit.update_normal(node, update_data)
-                        if normal_data is not None:
-                            self.jit.update_buffer(node, "normal", normal_data)
+                        if self.render_particle_as == "points":
+                            node = self.static_nodes[(idx, entity.uid)]
+                            pos = particles_all[idx, entity.particle_start : entity.particle_end]
+                            c = c_render_all[idx, entity.particle_start : entity.particle_end]
+                            # Inactive particles are left at qd_nowhere by `_kernel_update_render_fields`,
+                            # i.e. far outside the frustum, so they never show up as ghost points.
+                            self.jit.update_buffer(node, "pos", pos.astype(np.float32))
+                            self.jit.update_buffer(node, "vertex", self._concentration_colors(c))
+                        else:
+                            tfs = np.tile(np.eye(4), (entity.n_particles, 1, 1))
+                            tfs[:, :3, 3] = particles_all[idx, entity.particle_start : entity.particle_end]
+                            node = self.static_nodes[(idx, entity.uid)]
+                            self.jit.update_buffer(node, "model", tfs.transpose((0, 2, 1)))
+
+    def on_ipbf(self):
+        if self.sim.ipbf_solver.is_active:
+            for ipbf_entity in self.sim.ipbf_solver.entities:
+                if ipbf_entity.surface.vis_mode == "recon":
+                    self.add_dynamic_node(ipbf_entity, None)
+                elif ipbf_entity.surface.vis_mode == "particle":
+                    for idx in self.rendered_envs_idx:
+                        if self.render_particle_as == "points":
+                            # Multiflow: point cloud with per-particle colors driven by the concentration
+                            # field c (0 = water blue, 1 = coffee brown). Positions live in the "pos"
+                            # buffer and colors in the interleaved "vertex" buffer; both are updated
+                            # per frame in `update_ipbf`.
+                            c_all = qd_to_numpy(self.sim.ipbf_solver.particles.c)
+                            c = c_all[ipbf_entity.particle_start : ipbf_entity.particle_end, idx]
+                            self.add_static_node(
+                                ipbf_entity,
+                                pyrender.Mesh.from_points(
+                                    ipbf_entity.init_particles.astype(np.float32),
+                                    colors=self._concentration_colors(c),
+                                ),
+                                i_b=idx,
+                            )
+                        else:
+                            mesh = mu.create_sphere(
+                                self.sim.ipbf_solver.particle_radius * self.particle_size_scale, subdivisions=1
+                            )
+                            mesh.visual = mu.surface_uvs_to_trimesh_visual(
+                                ipbf_entity.surface, n_verts=len(mesh.vertices)
+                            )
+
+                            tfs = np.tile(np.eye(4), (ipbf_entity.n_particles, 1, 1))
+                            tfs[:, :3, 3] = ipbf_entity.init_particles
+                            self.add_static_node(
+                                ipbf_entity, pyrender.Mesh.from_trimesh(mesh, smooth=True, poses=tfs), i_b=idx
+                            )
+
+    def update_ipbf(self):
+        if self.sim.ipbf_solver.is_active:
+            particles_all = qd_to_numpy(self.sim.ipbf_solver.particles_render.pos) + self.scene.envs_offset
+            active_all = qd_to_numpy(self.sim.ipbf_solver.particles_render.active).astype(dtype=np.bool_, copy=False)
+            if self.render_particle_as == "points":
+                c_render_all = qd_to_numpy(self.sim.ipbf_solver.particles_render.c)
+
+            for ipbf_entity in self.sim.ipbf_solver.entities:
+                for idx in self.rendered_envs_idx:
+                    if ipbf_entity.surface.vis_mode == "recon":
+                        mesh = pu.particles_to_mesh(
+                            positions=particles_all[ipbf_entity.particle_start : ipbf_entity.particle_end, idx][
+                                active_all[ipbf_entity.particle_start : ipbf_entity.particle_end, idx]
+                            ],
+                            radius=self.sim.ipbf_solver.particle_radius,
+                            backend=ipbf_entity.surface.recon_backend,
+                        )
+                        mesh.visual = mu.surface_uvs_to_trimesh_visual(
+                            ipbf_entity.surface, n_verts=len(mesh.vertices)
+                        )
+                        self.add_dynamic_node(ipbf_entity, pyrender.Mesh.from_trimesh(mesh, smooth=True))
+                    elif ipbf_entity.surface.vis_mode == "particle":
+                        if self.render_particle_as == "points":
+                            node = self.static_nodes[(idx, ipbf_entity.uid)]
+                            pos = particles_all[ipbf_entity.particle_start : ipbf_entity.particle_end, idx]
+                            c = c_render_all[ipbf_entity.particle_start : ipbf_entity.particle_end, idx]
+                            # Static boundary particles live outside every entity's
+                            # [particle_start, particle_end) range, so they are never drawn.
+                            # Inactive fluid particles are left at qd_nowhere by
+                            # `_kernel_update_render_fields`, far outside the frustum, so they
+                            # never show up as ghost points.
+                            self.jit.update_buffer(node, "pos", pos.astype(np.float32))
+                            self.jit.update_buffer(node, "vertex", self._concentration_colors(c))
+                        else:
+                            tfs = np.tile(np.eye(4), (ipbf_entity.n_particles, 1, 1))
+                            tfs[:, :3, 3] = particles_all[ipbf_entity.particle_start : ipbf_entity.particle_end, idx]
+
+                            node = self.static_nodes[(idx, ipbf_entity.uid)]
+                            self.jit.update_buffer(node, "model", tfs.transpose((0, 2, 1)))
+
+    @staticmethod
+    def _concentration_colors(c):
+        # Multiflow: three-stop gradient on concentration c, alpha fixed at 1:
+        #   c=0.0 (water)  -> white      (1.00, 1.00, 1.00)
+        #   c=0.5 (mix)    -> yellow     (0.95, 0.78, 0.30)  ("latte/caramel", kept warm, not green)
+        #   c=1.0 (coffee) -> dark brown (0.30, 0.14, 0.05)
+        # c<=0.5 lerps white->yellow, c>0.5 lerps yellow->brown.
+        # Shared by the PBD, IPBF and PBSTF point-cloud / recon rendering branches.
+        c = np.clip(np.asarray(c, dtype=np.float32), 0.0, 1.0)[:, None]
+        water = np.array([1.00, 1.00, 1.00, 1.0], dtype=np.float32)
+        mix = np.array([0.95, 0.78, 0.30, 1.0], dtype=np.float32)
+        coffee = np.array([0.30, 0.14, 0.05, 1.0], dtype=np.float32)
+        lo = water * (1.0 - c * 2.0) + mix * (c * 2.0)  # valid for c in [0, 0.5]
+        hi = mix * (2.0 - c * 2.0) + coffee * (c * 2.0 - 1.0)  # valid for c in [0.5, 1]
+        return np.ascontiguousarray(np.where(c <= 0.5, lo, hi).astype(np.float32))
 
     def on_pbd(self):
         if self.sim.pbd_solver.is_active:
+            # Multiflow: every recon-mode liquid entity shares the single merged iso-surface built
+            # per frame in update_pbd, so only the first one carries the dynamic node.
+            recon_fluid_entity = next(
+                (e for e in self.sim.pbd_solver.entities if e.surface.vis_mode == "recon"), None
+            )
             for pbd_entity in self.sim.pbd_solver.entities:
                 if pbd_entity.surface.vis_mode == "visual":
                     # Apply surface visual with UVs to the trimesh
@@ -848,9 +960,25 @@ class RasterizerContext:
                     )
                 for idx in self.rendered_envs_idx:
                     if pbd_entity.surface.vis_mode == "recon":
-                        self.add_dynamic_node(pbd_entity, None)
+                        if pbd_entity is recon_fluid_entity:
+                            self.add_dynamic_node(pbd_entity, None)
                     elif pbd_entity.surface.vis_mode == "particle":
-                        if self.render_particle_as == "sphere":
+                        if self.render_particle_as == "points":
+                            # Multiflow: point cloud with per-particle colors driven by the concentration
+                            # field c (0 = water blue, 1 = coffee brown). Positions live in the "pos"
+                            # buffer and colors in the interleaved "vertex" buffer; both are updated
+                            # per frame in `update_pbd`.
+                            c_all = qd_to_numpy(self.sim.pbd_solver.particles.c)
+                            c = c_all[pbd_entity.particle_start : pbd_entity.particle_end, idx]
+                            self.add_static_node(
+                                pbd_entity,
+                                pyrender.Mesh.from_points(
+                                    pbd_entity.init_particles.astype(np.float32),
+                                    colors=self._concentration_colors(c),
+                                ),
+                                i_b=idx,
+                            )
+                        elif self.render_particle_as == "sphere":
                             mesh = mu.create_sphere(
                                 self.sim.pbd_solver.particle_radius * self.particle_size_scale, subdivisions=1
                             )
@@ -904,6 +1032,33 @@ class RasterizerContext:
             particles_vel_all = qd_to_numpy(self.sim.pbd_solver.particles_render.vel)
             active_all = qd_to_numpy(self.sim.pbd_solver.particles_render.active).astype(dtype=np.bool_, copy=False)
             vverts_all = qd_to_numpy(self.sim.pbd_solver.vverts_render.pos) + self.scene.envs_offset
+            recon_entities = [e for e in self.sim.pbd_solver.entities if e.surface.vis_mode == "recon"]
+            if self.render_particle_as == "points" or recon_entities:
+                c_render_all = qd_to_numpy(self.sim.pbd_solver.particles_render.c)
+            for idx in self.rendered_envs_idx:
+                if not recon_entities:
+                    continue
+                # Multiflow: one merged iso-surface over every recon-mode liquid entity, colored
+                # per vertex by the concentration field SPH-interpolated at the same smoothing
+                # scale as the surface. Separate per-entity surfaces would interpenetrate wherever
+                # the liquids intermingle (milk poured into coffee); the merged density field
+                # renders a single continuous surface carrying the concentration gradient.
+                particles_env = particles_all[:, idx]
+                active_env = active_all[:, idx]
+                spans = [(e.particle_start, e.particle_end) for e in recon_entities]
+                positions = np.concatenate([particles_env[s:e][active_env[s:e]] for s, e in spans])
+                c_env = c_render_all[:, idx]
+                c = np.concatenate([c_env[s:e][active_env[s:e]] for s, e in spans])
+                recon = pu.particles_to_mesh_with_attributes(
+                    positions,
+                    radius=self.sim.pbd_solver.particle_radius,
+                    backend=recon_entities[0].surface.recon_backend,
+                    attributes={"c": c},
+                )
+                recon.mesh.visual = trimesh.visual.ColorVisuals(
+                    vertex_colors=self._concentration_colors(recon.vertex_attributes["c"])
+                )
+                self.add_dynamic_node(recon_entities[0], pyrender.Mesh.from_trimesh(recon.mesh, smooth=True))
             for pbd_entity in self.sim.pbd_solver.entities:
                 for idx in self.rendered_envs_idx:
                     particles_env = particles_all[:, idx]
@@ -912,20 +1067,21 @@ class RasterizerContext:
                     vverts_env = vverts_all[:, idx]
 
                     if pbd_entity.surface.vis_mode == "recon":
-                        positions = particles_env[pbd_entity.particle_start : pbd_entity.particle_end][
-                            active_env[pbd_entity.particle_start : pbd_entity.particle_end]
-                        ]
-                        mesh = pu.particles_to_mesh(
-                            positions=positions,
-                            radius=self.sim.pbd_solver.particle_radius,
-                            backend=pbd_entity.surface.recon_backend,
-                        )
-                        mesh.visual = mu.surface_uvs_to_trimesh_visual(pbd_entity.surface, n_verts=len(mesh.vertices))
-                        self.add_dynamic_node(pbd_entity, pyrender.Mesh.from_trimesh(mesh, smooth=True))
+                        # merged fluid surface handled above for the whole recon set
+                        continue
 
                     # TODO: need to support multi-env visulaization for tet mode (it's using static node)
                     elif pbd_entity.surface.vis_mode == "particle":
-                        if self.render_particle_as == "sphere":
+                        if self.render_particle_as == "points":
+                            node = self.static_nodes[(idx, pbd_entity.uid)]
+                            pos = particles_env[pbd_entity.particle_start : pbd_entity.particle_end]
+                            c = c_render_all[pbd_entity.particle_start : pbd_entity.particle_end, idx]
+                            # Inactive particles are left at qd_nowhere by `_kernel_update_render_fields`,
+                            # i.e. far outside the frustum, so they never show up as ghost points.
+                            self.jit.update_buffer(node, "pos", pos.astype(np.float32))
+                            self.jit.update_buffer(node, "vertex", self._concentration_colors(c))
+
+                        elif self.render_particle_as == "sphere":
                             tfs = np.tile(np.eye(4), (pbd_entity.n_particles, 1, 1))
                             tfs[:, :3, 3] = particles_env[pbd_entity.particle_start : pbd_entity.particle_end]
 
@@ -1230,6 +1386,7 @@ class RasterizerContext:
         self.update_mpm()
         self.update_sph()
         self.update_pbstf()
+        self.update_ipbf()
         self.update_pbd()
         self.update_fem()
         self.update_sensors()

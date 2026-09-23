@@ -7,31 +7,17 @@ import sys
 import threading
 import time
 from contextlib import nullcontext
-from threading import Event, Lock, RLock, Semaphore, Thread
+from threading import Event, RLock, Semaphore, Thread
 from typing import TYPE_CHECKING, Optional
 
 import numpy as np
+
 import OpenGL
 from OpenGL.GL import *
+import pyglet
 
 import genesis as gs
 from genesis.vis.keybindings import Key, KeyAction, Keybind, Keybindings, KeyMod
-
-# Importing tkinter and creating a first context before importing pyglet is necessary to avoid later segfault on MacOS.
-# Note that destroying the window will cause segfault at exit.
-root = None
-if sys.platform.startswith("darwin"):
-    try:
-        from tkinter import Tk
-
-        root = Tk()
-        root.withdraw()
-    except Exception:
-        # Some minimal Python install may not provide a working tkinter interface even if it is a standard library
-        pass
-
-import pyglet
-
 from genesis.vis.viewer_plugins import EVENT_HANDLE_STATE, EVENT_HANDLED, ViewerPlugin
 
 from .camera import IntrinsicsCamera, OrthographicCamera, PerspectiveCamera
@@ -66,6 +52,10 @@ pyglet.options["shadow_window"] = False
 if pyglet.options.get("dpi_scaling") != "real":
     pyglet.options["dpi_scaling"] = "real"
 
+# Keeps the screen free of any window. pyglet's own option is EGL-backed and also selects its window and display
+# classes, so it cannot be requested off Linux, whereas 'GS_HEADLESS' applies everywhere.
+IS_HEADLESS = pyglet.options["headless"] or bool(os.environ.get("GS_HEADLESS"))
+
 
 class Viewer(pyglet.window.Window):
     """An interactive viewer for 3D scenes.
@@ -85,8 +75,6 @@ class Viewer(pyglet.window.Window):
     viewer_flags : dict
         A set of flags for controlling the viewer's behavior.
         Described in the note below.
-    world_up_axis : (3,) float
-        The scene axis that mouse orbiting treats as vertical.
     **kwargs : dict
         Any keyword arguments left over will be interpreted as belonging to
         either the :attr:`.Viewer.render_flags` or :attr:`.Viewer.viewer_flags`
@@ -185,7 +173,6 @@ class Viewer(pyglet.window.Window):
         shadow=False,
         plane_reflection=False,
         env_separate_rigid=False,
-        world_up_axis=None,
         plugins=None,
         enable_help_text=True,
         **kwargs,
@@ -209,7 +196,6 @@ class Viewer(pyglet.window.Window):
         self._thread: Optional[Thread] = None
         self._run_in_thread = run_in_thread
         self._seg_node_map = context.seg_node_map
-        self._world_up_axis = world_up_axis
 
         self._offscreen_event = Event()
         self._offscreen_pending_render = None
@@ -221,7 +207,6 @@ class Viewer(pyglet.window.Window):
         self._offscreen_result = None
 
         self._video_recorder = None
-        self._recording_lock = Lock()
         # Step counter of the last frame written to the video, so a paused (non-advancing) simulation does not fill
         # the recording with duplicate frozen frames.
         self._last_recorded_t = -1
@@ -618,8 +603,6 @@ class Viewer(pyglet.window.Window):
     def save_video(self, filename=None):
         """Save the stored frames to a video file.
 
-        The save dialog opens once at least one frame has been captured.
-
         To use this asynchronously, run the viewer with the ``record``
         flag and the ``run_in_thread`` flags set.
         Kill the viewer after your desired time with
@@ -632,49 +615,36 @@ class Viewer(pyglet.window.Window):
             a file dialog will be opened to ask the user where
             to save the video file.
         """
-        with self._recording_lock:
-            self.viewer_flags["record"] = False
-            video_recorder = self._video_recorder
-            self._video_recorder = None
-            if video_recorder is None:
-                return
-            video_recorder.close()
-            recording_filename = video_recorder.filename
-        if not os.path.isfile(recording_filename):
-            gs.logger.warning("Recording captured zero frames, so no video file was generated.")
-            return
+        self._video_recorder.close()
         if filename is None:
             filename = self._get_save_filename(["mp4"])
         if filename is None:
-            os.remove(recording_filename)
+            os.remove(self._video_recorder.filename)
         else:
-            shutil.move(recording_filename, filename)
+            shutil.move(self._video_recorder.filename, filename)
 
     def toggle_recording(self) -> bool:
         """Start or stop recording the on-screen viewer to a video file, returning the resulting record state.
 
         Starting opens a fresh video writer and marks the window title; stopping closes it and prompts (via
         save_video) for a destination. Both the 'R' keybind and the overlay record button drive this one path."""
-        with self._recording_lock:
-            is_recording = self.viewer_flags["record"]
-            if not is_recording:
-                # Importing moviepy is very slow and rarely needed, so defer it to the first recording.
-                from moviepy.video.io.ffmpeg_writer import FFMPEG_VideoWriter
-
-                self._video_recorder = FFMPEG_VideoWriter(
-                    filename=os.path.join(gs.utils.misc.get_cache_dir(), "tmp_video.mp4"),
-                    fps=self.viewer_flags["refresh_rate"],
-                    size=self.viewport_size,
-                )
-                # Sentinel so the first frame is always captured regardless of the current step counter.
-                self._last_recorded_t = -1
-                self.viewer_flags["record"] = True
-        if is_recording:
+        if self.viewer_flags["record"]:
             self.save_video()
             self.set_caption(self.viewer_flags["window_title"])
         else:
+            # Importing moviepy is very slow and rarely needed, so defer it to the first recording.
+            from moviepy.video.io.ffmpeg_writer import FFMPEG_VideoWriter
+
+            self._video_recorder = FFMPEG_VideoWriter(
+                filename=os.path.join(gs.utils.misc.get_cache_dir(), "tmp_video.mp4"),
+                fps=self.viewer_flags["refresh_rate"],
+                size=self.viewport_size,
+            )
+            # Sentinel so the first frame is always captured regardless of the current step counter.
+            self._last_recorded_t = -1
             self.set_caption("{} (RECORDING)".format(self.viewer_flags["window_title"]))
-        return not is_recording
+        self.viewer_flags["record"] = not self.viewer_flags["record"]
+        return self.viewer_flags["record"]
 
     def on_close(self):
         """Exit the event loop when the window is closed."""
@@ -879,9 +849,8 @@ class Viewer(pyglet.window.Window):
 
         # Capture the recording frame right after the scene render, before any on-screen overlay (captions, help
         # text, and the plugins' ImGui panel / gizmo) is drawn, so the video shows only the rendered scene.
-        with self._recording_lock:
-            if self.viewer_flags["record"]:
-                self._record()
+        if self.viewer_flags["record"]:
+            self._record()
 
         if self.viewer_flags["caption"] is not None:
             for caption in self.viewer_flags["caption"]:
@@ -1027,17 +996,9 @@ class Viewer(pyglet.window.Window):
         self._camera_node.matrix = self._default_camera_pose
         oc = self._default_orth_cam
         oc.xmag, oc.ymag = self._orth_cam_reset_mags
-        self._trackball = Trackball(
-            self._default_camera_pose,
-            self.viewport_size,
-            scale,
-            centroid,
-            world_up_axis=self._world_up_axis,
-        )
+        self._trackball = Trackball(self._default_camera_pose, self.viewport_size, scale, centroid)
 
     def _get_save_filename(self, file_exts):
-        global root
-
         file_types = {
             "mp4": ("video files", "*.mp4"),
             "png": ("png files", "*.png"),
@@ -1045,29 +1006,28 @@ class Viewer(pyglet.window.Window):
             "gif": ("gif files", "*.gif"),
             "all": ("all files", "*"),
         }
-        filetypes = [file_types[x] for x in file_exts]
         save_dir = self.viewer_flags["save_directory"]
         if save_dir is None:
             save_dir = os.getcwd()
 
         try:
-            # Importing tkinter is very slow and not used very often. Let's delay import.
-            from tkinter import filedialog
+            # Imported on demand because 'imgui-bundle' is an optional dependency, unavailable on some platforms.
+            from imgui_bundle import portable_file_dialogs
 
-            dialog = filedialog.SaveAs(
-                parent=None,
-                initialdir=save_dir,
-                title="Select file save location",
-                filetypes=filetypes,
-                defaultextension=".png",
-            )
-            filename = dialog.show()
+            # The dialog is the native one of the platform and runs out of process, leaving pyglet sole owner of the
+            # windowing system. Filters are a flat sequence alternating label and patterns.
+            filters = [field for file_ext in file_exts for field in file_types[file_ext]]
+            filename = portable_file_dialogs.save_file("Select file save location", save_dir, filters).result()
         except Exception as e:
             gs.logger.warning(f"Failed to open file save location dialog: {e}")
             return None
 
         if not filename:
             return None
+        # The dialog hands the name back as typed, and a missing extension would leave the writer downstream with
+        # no format to select, so fall back on the first one offered.
+        if not os.path.splitext(filename)[1]:
+            filename = f"{filename}.{file_exts[0]}"
         return os.path.normpath(filename)
 
     def _save_image(self):
@@ -1311,7 +1271,8 @@ class Viewer(pyglet.window.Window):
                 self.refresh()
 
                 # At this point, we are all set to display the graphical window
-                self.set_visible(True)
+                if not IS_HEADLESS:
+                    self.set_visible(True)
 
                 # Run the entire rendering pipeline once again, as a final validation that everything is fine
                 self.refresh()

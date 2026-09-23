@@ -88,6 +88,11 @@ class Renderer(object):
         self._floor_texture_color = None
         self._floor_texture_depth = None
 
+        # Tri-state probe of the legacy point sprite state: None = unprobed, True = accepted, False = rejected. The
+        # fragment shaders gate point sprites on gl_PointCoord, and compatibility-profile contexts of some drivers
+        # only substitute that coordinate once the legacy state is enabled, leaving it at (0,0) otherwise.
+        self._point_sprite_supported = None
+
         self.jit = jit
 
     @property
@@ -836,8 +841,14 @@ class Renderer(object):
             and not flags & RenderFlags.FLAT
             and not flags & RenderFlags.SEG
         ):
-            vertex_shader = "mesh.vert"
-            fragment_shader = "mesh.frag"
+            # Point clouds carry what they visualize in their vertex colour, so they shade flat: a lit shade would
+            # paint the per-particle light response as azimuthal bands over curved particle surfaces.
+            if primitive.mode == GLTF.POINTS:
+                vertex_shader = "flat.vert"
+                fragment_shader = "flat.frag"
+            else:
+                vertex_shader = "mesh.vert"
+                fragment_shader = "mesh.frag"
             if primitive.double_sided:
                 geometry_shader = "mesh_double_sided.geom"
                 defines["DOUBLE_SIDED"] = 1
@@ -862,6 +873,12 @@ class Renderer(object):
         else:
             vertex_shader = "mesh_depth.vert"
             fragment_shader = "mesh_depth.frag"
+
+        # GL points rasterize as axis-aligned squares, so a cloud of them unions into a box-edged silhouette. The
+        # define lets the fragment shaders clip each sprite to a disc; keyed on the mode, so triangle meshes compile
+        # the same programs as before.
+        if primitive.mode == GLTF.POINTS:
+            defines["ROUND_POINTS"] = 1
 
         # Set up vertex buffer DEFINES
         bf = primitive.buf_flags
@@ -945,7 +962,24 @@ class Renderer(object):
     # Viewport Management
     ###########################################################################
 
+    def _enable_point_sprite_coords(self):
+        """Turn on the legacy point sprite state the current context needs for gl_PointCoord to interpolate.
+
+        Core-profile contexts dropped the enum and substitute the coordinate unconditionally, so a rejected enable
+        is remembered and never retried. Enabled on every pass rather than once, since a recreated context starts
+        without the state.
+        """
+        if self._point_sprite_supported is False:
+            return
+        try:
+            glEnable(GL_POINT_SPRITE)
+            self._point_sprite_supported = True
+        except OpenGL.error.GLError:
+            self._point_sprite_supported = False
+
     def _configure_forward_pass_viewport(self, flags):
+        self._enable_point_sprite_coords()
+
         # If using offscreen render, bind main framebuffer
         if flags & RenderFlags.OFFSCREEN:
             self._configure_main_framebuffer()
@@ -988,6 +1022,7 @@ class Renderer(object):
         glDisable(GL_BLEND)
 
     def _configure_shadow_mapping_viewport(self, light, flags):
+        self._enable_point_sprite_coords()
         self._configure_shadow_framebuffer()
         glBindFramebuffer(GL_FRAMEBUFFER, self._shadow_fb)
         light.shadow_texture._bind_as_depth_attachment()

@@ -341,21 +341,23 @@ class FEMSolver(Solver):
 
         self.n_envs = self.sim.n_envs
         self._B = self.sim._B
-        self.tet_wrong_order = qd.field(dtype=gs.qd_bool, shape=(), needs_grad=False)
-
-        # batch fields
-        self.init_batch_fields()
-
-        # rendering
-        self.envs_offset = qd.Vector.field(3, dtype=qd.f32, shape=self._B)
-        self.envs_offset.from_numpy(self._scene.envs_offset.astype(np.float32))
 
         # elements and bodies
         self._n_elements_max = self.n_elements
         self._n_vertices_max = self.n_vertices
         self._n_vverts = self.n_vverts
         self._n_vfaces = self.n_vfaces
+
         if self.n_elements_max > 0:
+            self.tet_wrong_order = qd.field(dtype=gs.qd_bool, shape=(), needs_grad=False)
+
+            # batch fields
+            self.init_batch_fields()
+
+            # rendering
+            self.envs_offset = qd.Vector.field(3, dtype=qd.f32, shape=self._B)
+            self.envs_offset.from_numpy(self._scene.envs_offset.astype(np.float32))
+
             self.init_element_fields()
             self.init_surface_fields()
             self.init_vvert_fields()
@@ -379,7 +381,8 @@ class FEMSolver(Solver):
             self.init_constraints()
 
         # FIXME: _gravity must be a raw qd.field() — see comment in mpm_solver.py
-        if self._gravity is not None:
+        # Only when active — see the SNode-tree note in mpm_solver.py.
+        if self.is_active and self._gravity is not None:
             gravity = self._gravity.to_numpy()
             self._gravity = qd.field(dtype=gs.qd_vec3, shape=(self._B,))
             self._gravity.from_numpy(gravity)
@@ -1368,13 +1371,14 @@ class FEMSolver(Solver):
     def _kernel_get_el2v(
         self,
         element_el_start: qd.i32,
-        n_elements: qd.i32,
+        element_v_start: qd.i32,
         el2v: qd.types.ndarray(),
+        n_elements: qd.i32,
     ):
-        for i_e in range(n_elements):
-            i_global = i_e + element_el_start
+        for i_e_ in range(n_elements):
+            i_e = i_e_ + element_el_start
             for j in qd.static(range(4)):
-                el2v[i_global, j] = self.elements_i[i_global].el2v[j]
+                el2v[i_e_, j] = self.elements_i[i_e].el2v[j] - element_v_start
 
     @qd.kernel
     def _kernel_get_state(

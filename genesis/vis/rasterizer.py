@@ -28,13 +28,15 @@ class Rasterizer(RBC):
         if self._offscreen:
             # Select PyOpenGL backend for `pyrender.OffscreenRenderer`.
             # If env variable is set, use specified platform if supported, otherwise some platform-specific default.
-            platform = os.environ.get("PYOPENGL_PLATFORM", "egl" if sys.platform == "linux" else "pyglet")
-            if platform not in ("osmesa", "pyglet", "egl"):
+            default_platform = {"linux": "egl", "darwin": "cgl"}.get(sys.platform, "pyglet")
+            platform = os.environ.get("PYOPENGL_PLATFORM", default_platform)
+            if platform not in ("osmesa", "pyglet", "egl", "cgl"):
                 gs.logger.warning(f"PYOPENGL_PLATFORM='{platform}' not supported. Falling back to 'pyglet'.")
                 platform = "pyglet"
             if sys.platform == "win32" and platform == "osmesa":
-                gs.raise_exception("PYOPENGL_PLATFORM='osmesa' not supported on Windows OS. Falling back to 'pyglet'.")
-                platform = "pyglet"
+                gs.raise_exception("PYOPENGL_PLATFORM='osmesa' not supported on Windows OS.")
+            if sys.platform != "darwin" and platform == "cgl":
+                gs.raise_exception("PYOPENGL_PLATFORM='cgl' is only supported on MacOS.")
 
             # Start the viewer
             self._renderer = pyrender.OffscreenRenderer(
@@ -80,6 +82,13 @@ class Rasterizer(RBC):
         if self._offscreen:
             # Set the context
             self._renderer.make_current()
+
+            # Honor the camera target's `point_size` for GL_POINTS primitives: the JIT forward pass draws
+            # GL points at whatever glPointSize the context holds and never sets it itself.
+            from OpenGL.GL import GL_PROGRAM_POINT_SIZE, glDisable, glPointSize
+
+            glDisable(GL_PROGRAM_POINT_SIZE)
+            glPointSize(self._camera_targets[camera.uid].point_size)
 
             try:
                 if rgb or depth or normal:

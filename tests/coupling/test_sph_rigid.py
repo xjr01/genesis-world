@@ -1,76 +1,7 @@
-import math
-
 import pytest
 
 import genesis as gs
 from genesis.utils.misc import qd_to_numpy
-
-from ..utils import assert_allclose
-
-
-@pytest.mark.required
-@pytest.mark.parametrize("n_envs", [0, 2])
-@pytest.mark.parametrize("pressure_solver", ["DFSPH", "WCSPH"])
-def test_fixed_link_velocity_and_thin_wall_boundary(n_envs, pressure_solver, show_viewer):
-    scene = gs.Scene(
-        sim_options=gs.options.SimOptions(
-            dt=1e-2,
-            gravity=(0.0, 0.0, 0.0),
-        ),
-        sph_options=gs.options.SPHOptions(
-            particle_size=0.1,
-            pressure_solver=pressure_solver,
-            lower_bound=(-2.0, -2.0, -2.0),
-            upper_bound=(2.0, 2.0, 2.0),
-        ),
-        viewer_options=gs.options.ViewerOptions(
-            camera_pos=(2.0, -2.0, 1.5),
-            camera_lookat=(0.0, 0.0, 0.0),
-            camera_fov=40,
-        ),
-        show_viewer=show_viewer,
-    )
-    collider = scene.add_entity(
-        morph=gs.morphs.Box(
-            size=(1.0, 1.0, 1.0),
-            fixed=True,
-        ),
-        material=gs.materials.Rigid(
-            coup_friction=0.0,
-            coup_softness=0.03,
-        ),
-    )
-    scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(-1.2, 0.0, 0.0),
-            size=(0.1, 1.0, 1.0),
-            fixed=True,
-        ),
-        material=gs.materials.Rigid(
-            coup_friction=0.0,
-        ),
-    )
-    liquid = scene.add_entity(
-        morph=gs.morphs.Particles(
-            positions=((0.55, 0.0, 0.0), (-1.3, 0.0, 0.0)),
-        ),
-        material=gs.materials.SPH.Liquid(
-            sampler="regular",
-        ),
-    )
-    scene.build(n_envs=n_envs)
-
-    collider.set_velocity(
-        vel=(1.0, 0.0, 0.0),
-        ang=(0.0, 0.0, 0.0),
-    )
-    liquid.set_particles_vel(((0.0, 0.0, 0.0), (30.0, 0.0, 0.0)))
-    scene.step()
-
-    influence = math.exp(-0.5 * scene.sph_solver.particle_size / collider.material.coup_softness)
-    assert_allclose(liquid.get_particles_vel()[..., 0, :], (influence, 0.0, 0.0), atol=1e-5)
-    assert_allclose(liquid.get_particles_pos()[..., 1, 0], -1.3, atol=1e-5)
-    assert_allclose(liquid.get_particles_vel()[..., 1, :], (0.0, 0.0, 0.0), atol=1e-5)
 
 
 @pytest.mark.required

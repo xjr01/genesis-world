@@ -6,11 +6,12 @@ import sys
 import shutil
 import tempfile
 from multiprocessing import Process, Queue
+from typing import NamedTuple
 
 import igl
 import numpy as np
+import pysplashsurf
 import trimesh
-from scipy import ndimage
 
 import genesis as gs
 
@@ -242,59 +243,6 @@ def box_to_particles(p_size=0.01, pos=(0, 0, 0), size=(1, 1, 1), sampler="random
     return positions
 
 
-def mesh_cavity_to_particles(mesh, p_size, seed, max_height, clearance=None, height_axis=1):
-    """Sample the mesh cavity connected to ``seed`` on a regular lattice below ``max_height``.
-
-    Six-connected flood filling confines the result to the selected positive signed-distance component. A clearance of
-    at least half the lattice spacing makes every axial step observe the rejected band around a positive-thickness wall.
-    The function raises when the selected component reaches the mesh bounds, which indicates a path into the exterior.
-    """
-    if p_size <= 0.0:
-        gs.raise_exception("Mesh cavity particle spacing must be positive.")
-    if clearance is None:
-        clearance = 0.5 * p_size
-    if clearance < 0.5 * p_size:
-        gs.raise_exception("Mesh cavity clearance must be at least half the particle spacing.")
-    if height_axis not in (0, 1, 2):
-        gs.raise_exception("Mesh cavity height axis must be 0, 1, or 2.")
-
-    seed = np.array(seed)
-    lower = mesh.bounds[0] + clearance
-    upper = mesh.bounds[1] - clearance
-    upper[height_axis] = min(upper[height_axis], max_height)
-    if np.any(seed < lower) or np.any(seed > upper):
-        gs.raise_exception("Mesh cavity seed must lie within the sampling bounds and below the maximum height.")
-
-    grid_axes = []
-    axis_tolerance = p_size * 1e-9
-    for axis in range(3):
-        negative = np.arange(seed[axis] - p_size, lower[axis] - p_size, -p_size)
-        negative = negative[negative >= lower[axis] - axis_tolerance][::-1]
-        positive = np.arange(seed[axis], upper[axis] + p_size, p_size)
-        positive = positive[positive <= upper[axis] + axis_tolerance]
-        grid_axes.append(np.concatenate((negative, positive)))
-
-    resolution = tuple(len(grid_axis) for grid_axis in grid_axes)
-    query_points = np.stack(np.meshgrid(*grid_axes, indexing="ij"), axis=-1).reshape((-1, 3))
-    signed_distance, *_ = igl.signed_distance(query_points, mesh.vertices, mesh.faces)
-    is_available = signed_distance.reshape(resolution) >= clearance
-    seed_idx = tuple(np.searchsorted(grid_axes[axis], seed[axis]) for axis in range(3))
-    if not is_available[seed_idx]:
-        gs.raise_exception("Mesh cavity seed must be at least the requested clearance from the mesh surface.")
-
-    labels, _ = ndimage.label(is_available, ndimage.generate_binary_structure(rank=3, connectivity=1))
-    is_selected = labels == labels[seed_idx]
-    for axis in range(3):
-        has_boundary_reach = np.take(is_selected, indices=0, axis=axis).any()
-        if axis != height_axis:
-            has_boundary_reach |= np.take(is_selected, indices=-1, axis=axis).any()
-        if has_boundary_reach:
-            gs.raise_exception("Mesh cavity flood fill reached the mesh bounds.")
-
-    particles_idx = np.nonzero(is_selected)
-    return np.column_stack(tuple(grid_axes[axis][particles_idx[axis]] for axis in range(3)))
-
-
 def cylinder_to_particles(p_size=0.01, pos=(0, 0, 0), radius=0.5, height=1.0, sampler="random"):
     if "pbs" in sampler:
         mesh = trimesh.creation.cylinder(radius=radius, height=height)
@@ -371,6 +319,33 @@ def shell_to_particles(p_size=0.01, pos=(0, 0, 0), inner_radius=0.5, outer_radiu
     return positions
 
 
+def _parse_recon_backend(backend):
+    args_dict = dict()
+    args_list = backend.split("-")
+    if len(args_list) >= 2:
+        args_dict["rscale"] = float(args_list[1])
+        args_list = args_list[2:]
+        for i in range(0, len(args_list), 2):
+            args_dict[args_list[i]] = float(args_list[i + 1])
+    return args_dict
+
+
+def _splashsurf_recon_kwargs(args_dict):
+    """Shared splashsurf pipeline parameters; ``particle_radius`` is passed by the caller because
+    only it knows whether the backend rscale applies."""
+    return dict(
+        smoothing_length=2.0,
+        cube_size=0.8,
+        iso_surface_threshold=0.6,
+        mesh_smoothing_weights=True,
+        mesh_smoothing_iters=int(args_dict.get("smooth", 25)),
+        normals_smoothing_iters=10,
+        mesh_cleanup=True,
+        compute_normals=True,
+        multi_threading=True,
+    )
+
+
 def _splashsurf_worker(positions, radius, args_dict, result_queue):
     try:
         import pysplashsurf
@@ -378,15 +353,7 @@ def _splashsurf_worker(positions, radius, args_dict, result_queue):
         mesh_with_data, _ = pysplashsurf.reconstruction_pipeline(
             positions,
             particle_radius=radius * args_dict.get("rscale", 1.0),
-            smoothing_length=2.0,
-            cube_size=0.8,
-            iso_surface_threshold=0.6,
-            mesh_smoothing_weights=True,
-            mesh_smoothing_iters=int(args_dict.get("smooth", 25)),
-            normals_smoothing_iters=10,
-            mesh_cleanup=True,
-            compute_normals=True,
-            multi_threading=True,
+            **_splashsurf_recon_kwargs(args_dict),
         )
         normals = mesh_with_data.point_attributes["normals"]
         vertices = mesh_with_data.mesh.vertices
@@ -398,15 +365,6 @@ def _splashsurf_worker(positions, radius, args_dict, result_queue):
 
 
 def particles_to_mesh(positions, radius, backend):
-    def parse_args(backend):
-        args_dict = dict()
-        args_list = backend.split("-")
-        if len(args_list) >= 2:
-            args_dict["rscale"] = float(args_list[1])
-            args_list = args_list[2:]
-            for i in range(0, len(args_list), 2):
-                args_dict[args_list[i]] = float(args_list[i + 1])
-        return args_dict
 
     if positions.shape[0] == 0:
         return trimesh.Trimesh(vertices=np.zeros((0, 3)), faces=np.zeros((0, 3)))
@@ -423,7 +381,7 @@ def particles_to_mesh(positions, radius, backend):
     else:
         radii = np.array([])
 
-    args_dict = parse_args(backend)
+    args_dict = _parse_recon_backend(backend)
 
     if "openvdb" in backend:
         if sys.platform != "linux" or sys.version_info[:2] == (3, 9):
@@ -466,6 +424,47 @@ def particles_to_mesh(positions, radius, backend):
         return mesh
     else:
         gs.raise_exception(f"Unsupported backend: {backend}.")
+
+
+class ReconstructedParticleMesh(NamedTuple):
+    mesh: trimesh.Trimesh
+    vertex_attributes: dict
+
+
+def particles_to_mesh_with_attributes(positions, radius, backend, attributes):
+    """Reconstruct the particle iso-surface and carry per-particle float attributes onto the mesh
+    vertices, SPH-interpolated by splashsurf at the same smoothing scale as the surface.
+
+    Runs the pipeline in-process: the renderer calls this once per frame, and the per-call process
+    spawn used by ``particles_to_mesh`` for heap reclamation costs more than the reconstruction
+    itself. The allocator reaches a steady state under repeated calls, keeping the in-process path
+    bounded over long render sessions.
+    """
+    if "splashsurf" not in backend:
+        gs.raise_exception(f"Backend '{backend}' does not support attribute interpolation.")
+    attrs = {name: np.ascontiguousarray(values, dtype=np.float64) for name, values in attributes.items()}
+    if positions.shape[0] == 0:
+        return ReconstructedParticleMesh(
+            mesh=trimesh.Trimesh(vertices=np.zeros((0, 3)), faces=np.zeros((0, 3))),
+            vertex_attributes={name: np.zeros(0) for name in attrs},
+        )
+
+    args_dict = _parse_recon_backend(backend)
+    mesh_with_data, _ = pysplashsurf.reconstruction_pipeline(
+        np.ascontiguousarray(positions, dtype=np.float64),
+        attributes_to_interpolate=attrs,
+        particle_radius=radius * args_dict.get("rscale", 1.0),
+        **_splashsurf_recon_kwargs(args_dict),
+    )
+    return ReconstructedParticleMesh(
+        mesh=trimesh.Trimesh(
+            vertices=mesh_with_data.mesh.vertices,
+            faces=mesh_with_data.mesh.triangles,
+            face_normals=mesh_with_data.point_attributes["normals"],
+            process=False,
+        ),
+        vertex_attributes={name: np.asarray(mesh_with_data.point_attributes[name]) for name in attrs},
+    )
 
 
 def init_foam_generator(

@@ -21,44 +21,31 @@ from syrupy.extensions.image import PNGImageSnapshotExtension
 
 from tests.gpu_info import detect_gpu_backend
 
-# Mock tkinter module for backward compatibility because it is a hard dependency for old Genesis versions
-has_tkinter = False
-try:
-    import tkinter
-
-    has_tkinter = True
-except ImportError:
-    tkinter = type(sys)("tkinter")
-    tkinter.filedialog = lambda *arg, **kwargs: None
-    tkinter.mainloop = type(sys)("mainloop")
-    tkinter.mainloop.__code__ = ""
-    tkinter.Tk = type(sys)("Tk")
-    tkinter.Misc = type(sys)("Misc")
-    tkinter.Misc.mainloop = tkinter.mainloop
-    sys.modules["tkinter"] = tkinter
-
-# Determine whether a screen is available
-if has_tkinter:
-    has_display = True
-    try:
-        root = tkinter.Tk()
-        root.withdraw()
-        root.destroy()
-    except tkinter.TclError:
-        has_display = False
-else:
-    # Assuming headless server if tkinter is not installed unless DISPLAY env var is available on Linux
-    if sys.platform.startswith("linux"):
-        has_display = bool(os.environ.get("DISPLAY"))
-    else:
-        has_display = False
-
-# Determine whether EGL driver is available
-has_egl = True
+# Determine whether rendering without a screen is possible, which pyglet implements through its EGL backend.
+is_headless_supported = True
 try:
     pyglet.lib.load_library("EGL")
 except ImportError:
-    has_egl = False
+    is_headless_supported = False
+
+# Determine whether a screen is available, which only the interactive viewer needs. Resolving a display binds pyglet's
+# windowing backend and would rule out its headless one, so the environment answers where headless exists, and pyglet
+# elsewhere, which is what detects a Mac whose displays are all asleep.
+if is_headless_supported:
+    has_display = bool(os.environ.get("DISPLAY")) if sys.platform.startswith("linux") else False
+else:
+    try:
+        has_display = bool(pyglet.display.get_display().get_screens())
+    except Exception:
+        has_display = False
+
+# Determine whether the optional 'imgui-bundle' dependency is available
+try:
+    import imgui_bundle  # noqa: F401
+
+    is_imgui_bundle_supported = True
+except ImportError:
+    is_imgui_bundle_supported = False
 
 # Forcibly disable Mujoco OpenGL to avoid conflicts with Genesis
 os.environ["MUJOCO_GL"] = "0"
@@ -68,11 +55,11 @@ os.environ["TQDM_DISABLE"] = "1"
 
 # pyglet must be configured in headless mode before importing Genesis if necessary.
 # Note that environment variables are used instead of global options to ease option propagation to subprocesses.
-if not has_display and has_egl:
+if not has_display and is_headless_supported:
     pyglet.options["headless"] = True
     os.environ["PYGLET_HEADLESS"] = "1"
 
-IS_INTERACTIVE_VIEWER_AVAILABLE = has_display or has_egl
+IS_INTERACTIVE_VIEWER_AVAILABLE = has_display or is_headless_supported
 
 TOL_SINGLE = 5e-5
 TOL_DOUBLE = 1e-9
@@ -100,6 +87,7 @@ SKIP_NO_MADRONA = _skip_reason("BatchRenderer is not supported because 'gs_madro
 SKIP_NO_LUISA = _skip_reason("RayTracer is not supported because 'LuisaRenderPy' is not available.")
 SKIP_NO_VIEWER = _skip_reason("Interactive viewer not supported on this platform.")
 SKIP_NO_OMNIVERSE_KIT = _skip_reason("omniverse-kit support not available")
+SKIP_NO_IMGUI_BUNDLE = _skip_reason("'imgui-bundle' is not available.")
 
 
 def is_mem_monitoring_supported():
@@ -196,10 +184,13 @@ def pytest_cmdline_main(config: pytest.Config) -> None:
     if is_pdb_enabled:
         config.option.reruns = 0
 
-    # Force headless rendering if available and the interactive viewer is disabled.
-    # FIXME: It breaks rendering on some platform...
-    # if not show_viewer and has_egl:
-    #     pyglet.options["headless"] = True
+    # Force headless mode when the viewer is not wanted, so a local run stays off the developer's desktop. Exporting
+    # the variable carries the request to the xdist workers; pyglet's own option only applies where EGL backs it.
+    if not show_viewer:
+        os.environ["GS_HEADLESS"] = "1"
+        if is_headless_supported:
+            pyglet.options["headless"] = True
+            os.environ["PYGLET_HEADLESS"] = "1"
 
     # Make sure that the number of workers is not too large if specified
     if isinstance(config.option.numprocesses, int):
@@ -466,7 +457,7 @@ def pytest_runtest_setup(item):
         cuda_visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES")
         if cuda_visible_devices is not None:
             gpu_index = int(cuda_visible_devices)
-            if has_egl:
+            if is_headless_supported:
                 try:
                     os.environ["EGL_DEVICE_ID"] = str(_get_egl_index(gpu_index))
                 except (AttributeError, KeyError):
@@ -743,8 +734,23 @@ def debug(request):
     return debug
 
 
+@pytest.fixture
+def use_deterministic_algorithms(request):
+    use_deterministic_algorithms = None
+    for mark in request.node.iter_markers("use_deterministic_algorithms"):
+        if mark.args:
+            if use_deterministic_algorithms is not None:
+                pytest.fail("'use_deterministic_algorithms' can only be specified once.")
+            (use_deterministic_algorithms,) = mark.args
+    if use_deterministic_algorithms is None:
+        use_deterministic_algorithms = True
+    return use_deterministic_algorithms
+
+
 @pytest.fixture(scope="function", autouse=True)
-def initialize_genesis(request, monkeypatch, tmp_path, backend, precision, performance_mode, debug, cache):
+def initialize_genesis(
+    request, monkeypatch, tmp_path, backend, precision, performance_mode, debug, cache, use_deterministic_algorithms
+):
     import genesis as gs
 
     # Early return if backend is None
@@ -801,23 +807,9 @@ def initialize_genesis(request, monkeypatch, tmp_path, backend, precision, perfo
             seed=0,
             logging_level=logging_level,
             performance_mode=performance_mode,
+            use_deterministic_algorithms=use_deterministic_algorithms,
         )
         gc.collect()
-
-        # Prefer the decomposed solver on GPU so both code paths (decomposed on GPU, monolith on CPU) are tested
-        # Skip for benchmarks - let auto-detection choose freely
-        expr = Expression.compile(request.config.option.markexpr)
-        is_benchmarks = expr.evaluate(MarkMatcher.from_markers((pytest.mark.benchmarks,)))
-        if not is_benchmarks:
-            from genesis.utils.array_class import RigidSimStaticConfig
-
-            _RigidSimStaticConfig_init_orig = RigidSimStaticConfig.__init__
-
-            def _RigidSimStaticConfig_init(self, *args, **kwargs):
-                kwargs.setdefault("prefer_decomposed_solver", int(gs.backend != gs.cpu))
-                _RigidSimStaticConfig_init_orig(self, *args, **kwargs)
-
-            monkeypatch.setattr(RigidSimStaticConfig, "__init__", _RigidSimStaticConfig_init)
 
         if gs.backend != gs.cpu and gs.device.index is not None:
             # The device torch selected must be one this worker is allowed to use. Anything else - including a
@@ -849,7 +841,7 @@ def mj_sim(
     gjk_collision,
     friction_cone,
 ):
-    from .utils import build_mujoco_sim
+    from .utils.simulators import build_mujoco_sim
 
     return build_mujoco_sim(
         xml_path,
@@ -879,7 +871,7 @@ def gs_sim(
     show_viewer,
     mj_sim,
 ):
-    from .utils import build_genesis_sim
+    from .utils.simulators import build_genesis_sim
 
     return build_genesis_sim(
         xml_path,
@@ -951,7 +943,7 @@ class PixelMatchSnapshotExtension(PNGImageSnapshotExtension):
     def matches(self, *, serialized_data, snapshot_data) -> bool:
         # Imported here rather than at module top: conftest must not be coupled to any other test module at load
         # time, as that can cause hard-to-debug side effects.
-        from .utils import IMG_BLUR_KERNEL_SIZE, IMG_NUM_ERR_THR, IMG_STD_ERR_THR, assert_pixel_match
+        from .utils.assertions import IMG_BLUR_KERNEL_SIZE, IMG_NUM_ERR_THR, IMG_STD_ERR_THR, assert_pixel_match
 
         std_err_threshold = IMG_STD_ERR_THR if self._std_err_threshold is None else self._std_err_threshold
         ratio_err_threshold = IMG_NUM_ERR_THR if self._ratio_err_threshold is None else self._ratio_err_threshold
@@ -985,7 +977,7 @@ def png_snapshot(request, snapshot):
             assert path.is_file()
             path.unlink()
     else:
-        from .utils import get_hf_dataset
+        from .utils.assets import get_hf_dataset
 
         # The snapshots repository mirrors the tests tree ('rendering/__snapshots__/test_offscreen/...'), so the
         # snapshot directory path relative to the tests root is also its path in the repository.

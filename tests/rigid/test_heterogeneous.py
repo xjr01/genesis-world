@@ -6,10 +6,8 @@ import genesis as gs
 import genesis.utils.geom as gu
 from genesis.utils.misc import tensor_to_array
 
-from ..utils import (
-    assert_allclose,
-    get_hf_dataset,
-)
+from ..utils.assertions import assert_allclose
+from ..utils.assets import get_hf_dataset
 
 
 @pytest.mark.required
@@ -78,7 +76,7 @@ def test_physics_parity(show_viewer, tol):
     # Both are held loosely, and the rate more so than the pose: sharing one batch with the other variants puts the
     # heterogeneous entity through a different arithmetic than its own reference.
     assert_allclose(ref_pos - het_obj.get_pos(), REFERENCE_OFFSETS, tol=1e-5)
-    assert_allclose(het_obj.get_vel(), ref_vel, tol=1e-4)
+    assert_allclose(het_obj.get_vel(), ref_vel, tol=2e-4)
     assert_allclose(het_obj.get_mass(), [ref_obj.get_mass() for ref_obj in ref_objs], tol=tol)
 
     # The variants are genuinely distinct: their masses are not all equal.

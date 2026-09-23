@@ -5,6 +5,7 @@ import xml.etree.ElementTree as ET
 
 import numpy as np
 import pytest
+import torch
 import trimesh
 
 import quadrants as qd
@@ -12,9 +13,9 @@ import quadrants as qd
 import genesis as gs
 import genesis.utils.geom as gu
 import genesis.utils.point_cloud as pc
-from genesis.utils.misc import tensor_to_array
+from genesis.utils.misc import sanitize_index, tensor_to_array
 
-from ..utils import assert_allclose, assert_equal
+from ..utils.assertions import assert_allclose, assert_equal
 
 
 @pytest.mark.required
@@ -273,6 +274,52 @@ def test_coacd_options_pca_validation():
 
 
 @pytest.mark.required
+@pytest.mark.parametrize(
+    ("index", "expected"),
+    (
+        (-1, (3,)),
+        (-5, (-5,)),
+        ([-5, -4, -1], (-5, 0, 3)),
+        ([-4, -2], (0, 2)),
+        ((-3, -1), (1, 3)),
+        (np.array((-2, -1), dtype=np.int32), (2, 3)),
+        (np.array((-5, -1), dtype=np.int32), (-5, 3)),
+        (np.array((1, 3), dtype=np.uint32), (1, 3)),
+        (np.array((-2.0, -1.0), dtype=np.float64), (2, 3)),
+        (torch.tensor((-2, -1), dtype=torch.int32), (2, 3)),
+        (torch.tensor((-5, -1), dtype=torch.int32), (-5, 3)),
+        (torch.tensor((0, 3), dtype=torch.uint8), (0, 3)),
+        (torch.tensor((-2.0, -1.0)), (2, 3)),
+        (range(-4, 0), (0, 1, 2, 3)),
+        (range(-5, 0), (-5, 0, 1, 2, 3)),
+        (range(-2, 1), (2, 3, 0)),
+        (slice(-2, None), (2, 3)),
+        (slice(-1, None, -1), (3, 2, 1, 0)),
+        (np.array((False, True, False, True)), (1, 3)),
+        (torch.tensor((False, True, False, True)), (1, 3)),
+    ),
+)
+def test_sanitize_index(index, expected):
+    assert_equal(sanitize_index(index, -1, 4, 0, "index"), expected)
+
+
+@pytest.mark.required
+@pytest.mark.parametrize(
+    "index",
+    (
+        {0, 1},
+        [[0, 1]],
+        ["a"],
+        np.array((True,), dtype=bool),
+        torch.tensor((True,), dtype=torch.bool),
+    ),
+)
+def test_sanitize_index_rejects_invalid_collections(index):
+    with pytest.raises(gs.GenesisException):
+        sanitize_index(index, -1, 4, 0, "index")
+
+
+@pytest.mark.required
 def test_fps_algorithm_core():
     # Shape, dtype, determinism, anchor-on-no-seed, and invalid n_samples all in one test.
     points = np.random.default_rng(1).random((50, 3))
@@ -522,3 +569,27 @@ def test_set_gravity_accepts_field_and_tensor():
     finally:
         gs.destroy()
         os.environ.pop("GS_ENABLE_NDARRAY", None)
+
+
+@pytest.mark.required
+@pytest.mark.parametrize(
+    "boxes_size",
+    [
+        # A light body under a heavy scene aggregate, below the floor quoted on the solver tolerance.
+        [1.0, 0.001],
+        # A uniformly tiny scene, below the absolute floor the working precision resolves at all.
+        pytest.param([0.0002], marks=pytest.mark.precision("32")),
+    ],
+)
+def test_warn_solver_numerical_stability(boxes_size, caplog):
+    scene = gs.Scene(show_viewer=False)
+    for i, size in enumerate(boxes_size):
+        scene.add_entity(
+            gs.morphs.Box(
+                pos=(float(i), 0.0, 0.5 * size),
+                size=(size, size, size),
+            ),
+        )
+    with caplog.at_level("WARNING"):
+        scene.build()
+    assert any("too small for the constraint solver" in record.message for record in caplog.records)

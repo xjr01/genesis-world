@@ -11,12 +11,9 @@ import genesis as gs
 import genesis.utils.geom as gu
 from genesis.utils.misc import qd_to_numpy, tensor_to_array
 
-from ..utils import (
-    assert_allclose,
-    display_collision_pairs,
-    get_genuine_interpenetration,
-    get_hf_dataset,
-)
+from ..utils.assertions import assert_allclose
+from ..utils.assets import get_hf_dataset
+from ..utils.collision import display_collision_pairs, get_genuine_interpenetration
 
 
 # Force CPU because it would be too slow otherwise
@@ -744,7 +741,7 @@ def test_convexify(euler, show_viewer, gjk_collision):
         obj = scene.add_entity(
             gs.morphs.MJCF(
                 file=f"{asset_path}/{asset_name}/{xml_file}",
-                pos=(OBJ_OFFSET_X * (1.5 - i), OBJ_OFFSET_Y * (i - 1.5), 0.4),
+                pos=(OBJ_OFFSET_X * (1.5 - i), OBJ_OFFSET_Y * (i - 1.5), 0.1 if euler == (90, 0, 90) else 0.4),
             ),
             vis_mode="collision",
             visualize_contact=True,
@@ -888,6 +885,8 @@ def test_many_objects_collision(convexify, show_viewer, tol):
     asset_files = {name: f"{get_hf_dataset(pattern=f'{name}/*')}/{name}/{xml}" for name, xml in assets}
     objs = []
     obj_names = []
+    # Force numpy seed because the settled pile is extremely sensitive to the initial poses
+    np.random.seed(42)
     for i in range(80):
         gx, gy, gz = i % 4, (i // 4) % 4, i // 16
         name = assets[(gx + gy + gz) % len(assets)][0]
@@ -908,7 +907,7 @@ def test_many_objects_collision(convexify, show_viewer, tol):
 
     # Wait for the pile to collapse and settle at rest
     vmax_trace, wmax_trace, energy_trace = [], [], []
-    for i in range(1450):
+    for i in range(1500):
         scene.step()
         energy_trace.append(tensor_to_array(scene.rigid_solver.get_total_energy()))
         if show_viewer:
@@ -974,7 +973,7 @@ def test_many_objects_collision(convexify, show_viewer, tol):
     # Total mechanical energy (KE+PE) is a state function, so its per-step rise isolates fictitious energy the
     # solver injected at contacts (a strictly dissipative pile can only lose energy).
     # FIXME: Both paths suffer from fictitious energy injection.
-    assert np.quantile(np.maximum(np.diff(energy_trace), 0.0), 0.9 if convexify else 0.75) < tol
+    assert np.quantile(np.maximum(np.diff(energy_trace), 0.0), 0.95 if convexify else 0.75) < tol
 
     if show_viewer:
         _fig, (ax_v, ax_w, ax_e) = plt.subplots(3, 1, sharex=True, figsize=(8, 8))

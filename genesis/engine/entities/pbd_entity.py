@@ -607,17 +607,37 @@ class PBDParticleEntity(PBDBaseEntity):
         )
 
     def _add_particles_to_solver(self):
+        # optional concentration init (multiflow demo): a per-entity constant `c_init` takes
+        # precedence; otherwise the two-phase `c_init_z_mid` split (c0 = 1 below z_mid, 0 above);
+        # material without either keeps the previous all-zero behavior.
+        c_const = getattr(self._material, "c_init", None)
+        z_mid = getattr(self._material, "c_init_z_mid", None)
+        if c_const is not None:
+            c_init = np.full(self._n_particles, c_const, dtype=gs.np_float)
+        elif z_mid is None:
+            c_init = np.zeros(self._n_particles, dtype=gs.np_float)
+        else:
+            c_init = (self._particles[:, 2] < z_mid).astype(gs.np_float)
         self._kernel_add_particles_to_solver(
             f=self._sim.cur_substep_local,
             particles=self._particles,
             rho=self._material.rho,
             material_type=int(self.solver.MATERIAL.LIQUID),
             active=self.active,
+            c_init=c_init,
+            boundary_group=int(getattr(self._material, "boundary_group", 0)),
         )
 
     @qd.kernel
     def _kernel_add_particles_to_solver(
-        self, f: qd.i32, particles: qd.types.ndarray(), rho: qd.float32, material_type: qd.i32, active: qd.i32
+        self,
+        f: qd.i32,
+        particles: qd.types.ndarray(),
+        rho: qd.float32,
+        material_type: qd.i32,
+        active: qd.i32,
+        c_init: qd.types.ndarray(),
+        boundary_group: qd.i32,
     ):
         for i_p_ in range(self._n_particles):
             i_p = i_p_ + self._particle_start
@@ -638,8 +658,11 @@ class PBDParticleEntity(PBDBaseEntity):
             self.solver.particles[i_p, i_b].vel = qd.Vector.zero(gs.qd_float, 3)
             self.solver.particles[i_p, i_b].dpos = qd.Vector.zero(gs.qd_float, 3)
             self.solver.particles[i_p, i_b].free = True
+            self.solver.particles[i_p, i_b].c = c_init[i_p_]
+            self.solver.particles[i_p, i_b].dc = 0.0
 
             self.solver.particles_ng[i_p, i_b].active = qd.cast(active, gs.qd_bool)
+            self.solver.particles_ng[i_p, i_b].boundary_group = boundary_group
 
     @property
     def n_fluid_particles(self):

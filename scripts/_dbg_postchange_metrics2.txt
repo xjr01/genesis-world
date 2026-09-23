@@ -1,0 +1,24 @@
+t=  0.00s  ph=0  th=  0.0  jug=  5700  mugM=    0  z_surf= 0.212  dome=    0  over=   0  outer=    0  table=    0  KE=0.000e+00  nan=0  (421 ms/frame avg)
+t=  0.50s  ph=0  th=  0.0  jug=  5700  mugM=    0  z_surf= 0.209  dome=    0  over=   0  outer=    0  table=    0  KE=3.095e+01  nan=0  (75 ms/frame avg)
+t=  1.00s  ph=1  th=  0.0  jug=  5700  mugM=    0  z_surf= 0.210  dome=    0  over=   0  outer=    0  table=    0  KE=3.068e+01  nan=0  (67 ms/frame avg)
+t=  1.50s  ph=1  th=  0.0  jug=  5700  mugM=    0  z_surf= 0.153  dome=    0  over=   0  outer=    0  table=    0  KE=6.879e+02  nan=0  (64 ms/frame avg)
+t=  2.00s  ph=1  th=  0.0  jug=  5700  mugM=    0  z_surf= 0.152  dome=    0  over=   0  outer=    0  table=    0  KE=4.737e+02  nan=0  (63 ms/frame avg)
+t=  2.50s  ph=2  th=  0.0  jug=  5700  mugM=    0  z_surf= 0.152  dome=    0  over=   0  outer=    0  table=    0  KE=4.255e+00  nan=0  (62 ms/frame avg)
+t=  3.00s  ph=2  th=  5.3  jug=  5700  mugM=    0  z_surf= 0.152  dome=    0  over=   0  outer=    0  table=    0  KE=6.076e+00  nan=0  (61 ms/frame avg)
+t=  3.50s  ph=2  th= 18.7  jug=  5700  mugM=    0  z_surf= 0.152  dome=    0  over=   0  outer=    0  table=    0  KE=1.046e+01  nan=0  (61 ms/frame avg)
+t=  4.00s  ph=2  th= 36.0  jug=  5700  mugM=    0  z_surf= 0.152  dome=    0  over=   0  outer=    0  table=    0  KE=1.376e+01  nan=0  (61 ms/frame avg)
+t=  4.50s  ph=2  th= 53.3  jug=  5700  mugM=    0  z_surf= 0.152  dome=    0  over=   0  outer=    0  table=    0  KE=3.844e+01  nan=0  (60 ms/frame avg)
+t=  5.00s  ph=2  th= 66.7  jug=  5700  mugM=  152  z_surf= 0.459  dome=  152  over=   0  outer=    0  table=    0  KE=6.615e+01  nan=0  (60 ms/frame avg)
+t=  5.50s  ph=3  th= 72.0  jug=  5397  mugM=  798  z_surf= 0.471  dome=  510  over=   0  outer=    0  table=    0  KE=1.774e+02  nan=0  (60 ms/frame avg)
+t=  6.00s  ph=3  th= 72.0  jug=  4935  mugM= 1073  z_surf= 0.464  dome=  441  over=   0  outer=    0  table=    0  KE=2.524e+02  nan=0  (60 ms/frame avg)
+t=  6.50s  ph=3  th= 72.0  jug=  4709  mugM= 1025  z_surf= 0.461  dome=  391  over=   0  outer=   10  table=    0  KE=1.977e+02  nan=0  (60 ms/frame avg)
+t=  7.00s  ph=3  th= 72.0  jug=  4543  mugM=  919  z_surf= 0.454  dome=  312  over=  10  outer=    0  table=  160  KE=1.531e+02  nan=0  (60 ms/frame avg)
+t=  7.50s  ph=3  th= 72.0  jug=  4491  mugM=  868  z_surf= 0.453  dome=  295  over=   0  outer=    0  table=  289  KE=1.862e+02  nan=0  (60 ms/frame avg)
+t=  8.00s  ph=3  th= 72.0  jug=  4406  mugM=  854  z_surf= 0.450  dome=  284  over=   0  outer=    0  table=  409  KE=8.447e+01  nan=0  (60 ms/frame avg)
+[1] nan    max = 0                                        -> PASS
+[2] z_min  min = +0.0000  (table 0.00, limit -0.012)     -> PASS
+[3] sum_c drift = 2.047e-07  (limit 1e-2, sum_c0=7157.00)      -> PASS
+    first_over_t = 6.133333333333334  (n_over_rim >= 5 for 8 consecutive frames, from t>=2.5s)
+    milk census: in jug=4406, in mug=593, on table=409, other=292 (total 5700) | milk r p50/p90 = 0.309/0.409, z p50/p90 = 0.420/0.466
+[8] KE last-2s median = 1.459e+02  (warn limit 2.0)              -> WARN
+[9] frame_ms p95 = 64  (warn limit 1000)                    -> PASS

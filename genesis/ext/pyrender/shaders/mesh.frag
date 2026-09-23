@@ -342,6 +342,13 @@ float point_PCF(samplerCube shadow_map, vec3 frag_to_light, float bias)
 ///////////////////////////////////////////////////////////////////////////////
 void main()
 {
+#ifdef ROUND_POINTS
+    // GL points rasterize as axis-aligned squares, so a cloud of them unions into a box-edged silhouette; clip each
+    // sprite back to the disc the particle stands for.
+    vec2 sprite_coord = gl_PointCoord - vec2(0.5);
+    if (dot(sprite_coord, sprite_coord) > 0.25) discard;
+#endif
+
     vec3 reflected_position = (reflection_mat * vec4(frag_position, 1.0)).xyz;
     if(length(reflected_position - frag_position) > 1e-4 && length(reflected_position-cam_pos)<length(frag_position-cam_pos)) discard;
     

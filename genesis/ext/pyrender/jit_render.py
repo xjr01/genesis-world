@@ -9,7 +9,7 @@ import OpenGL.constant as GL_constant
 
 from .material import MetallicRoughnessMaterial, SpecularGlossinessMaterial
 from .light import DirectionalLight, PointLight
-from .constants import RenderFlags, MAX_N_LIGHTS
+from .constants import GLTF, RenderFlags, MAX_N_LIGHTS
 from .numba_gl_wrapper import GLWrapper
 
 
@@ -316,9 +316,9 @@ class JITRenderer:
         self.textures = np.zeros((n, 8), np.int32)  # 0: flag, 1-7: texture id
         self.pbr_mat = np.zeros((n, 9), np.float32)  # base_color <- 4, metallic <- 1, roughness <- 1, emissive <- 3
         self.spec_mat = np.zeros((n, 11), np.float32)  # diffuse <- 4, specular <- 3, glossiness <- 1, emissive <- 3
-        self.render_flags = np.zeros(
-            (n, 9), np.int8
-        )  # (blend, wireframe, double sided, pbr texture, reflective floor, transparent, marker, env shared, env filtered)
+        # (blend, wireframe, double sided, pbr texture, reflective floor, transparent, marker, env shared, env
+        # filtered, flat shaded)
+        self.render_flags = np.zeros((n, 10), np.int8)
         self.mode = np.zeros(n, np.int32)
         self.n_instances = np.zeros(n, np.int32)
         # Per-(primitive, env) visibility used only when a primitive is "env filtered" (render_flags column 8), i.e. a
@@ -400,6 +400,7 @@ class JITRenderer:
             self.render_flags[i, 1] = material.wireframe
             self.render_flags[i, 2] = material.doubleSided
             self.render_flags[i, 3] = isinstance(material, MetallicRoughnessMaterial)
+            self.render_flags[i, 9] = primitive.mode == GLTF.POINTS
             self.render_flags[i, 4] = primitive.is_floor and not floor_existed
             self.render_flags[i, 5] = node_list[i].mesh.is_transparent
             self.render_flags[i, 6] = node_list[i].mesh.is_marker
@@ -534,7 +535,7 @@ class JITRenderer:
                 pid = program_id[id]
                 if pid != last_pid:
                     gl.glUseProgram(pid)
-                    if is_rgba and not flags & RenderFlags_FLAT:
+                    if is_rgba and not flags & RenderFlags_FLAT and not render_flags[id, 9]:
                         # Strip shadow flags for markers — their programs have no shadow uniforms
                         light_flags = flags
                         if render_flags[id, 6]:
@@ -569,7 +570,11 @@ class JITRenderer:
                 set_uniform_matrix_4fv(pid, "M", pose[id], gl)
                 gl.glBindVertexArray(vao_id[id])
 
-                if is_rgba and not flags & RenderFlags_FLAT:
+                if is_rgba and not flags & RenderFlags_FLAT and render_flags[id, 9]:
+                    # A flat-shaded primitive shows its vertex colour alone, so its program carries no lights or
+                    # textures and only needs the base colour that colour multiplies.
+                    set_uniform_4fv(pid, "material.base_color_factor", pbr_mat[id, :4], gl)
+                elif is_rgba and not flags & RenderFlags_FLAT:
                     tf = textures[id, 0]
                     texture_list = [
                         "normal_texture",

@@ -1,3 +1,4 @@
+import numpy as np
 import quadrants as qd
 
 import genesis as gs
@@ -11,32 +12,6 @@ from .sph_entity import SPHEntity
 class PBSTFEntity(SPHEntity):
     """Particle entity simulated by :class:`PBSTFSolver`."""
 
-    def __init__(
-        self,
-        scene,
-        solver,
-        material,
-        morph,
-        surface,
-        particle_size,
-        idx,
-        particle_start,
-        fluid_particle_start=None,
-        name: str | None = None,
-    ):
-        self._fluid_particle_start = particle_start if fluid_particle_start is None else fluid_particle_start
-        super().__init__(
-            scene,
-            solver,
-            material,
-            morph,
-            surface,
-            particle_size,
-            idx,
-            particle_start,
-            name=name,
-        )
-
     def init_sampler(self):
         if self._material.sampler == "staggered":
             self.sampler = "staggered"
@@ -44,78 +19,42 @@ class PBSTFEntity(SPHEntity):
             super().init_sampler()
 
     def _add_particles_to_solver(self):
+        # optional concentration init (multiflow demo): a per-entity constant `c_init` takes
+        # precedence; otherwise the two-phase `c_init_z_mid` split (c = 1 below z_mid, 0 above);
+        # material without either keeps the previous all-zero behavior.
+        if self._material.c_init is not None:
+            c_init = np.full(self._n_particles, self._material.c_init, dtype=gs.np_float)
+        elif self._material.c_init_z_mid is None:
+            c_init = np.zeros(self._n_particles, dtype=gs.np_float)
+        else:
+            c_init = (self._particles[:, 2] < self._material.c_init_z_mid).astype(gs.np_float)
         self._solver._kernel_add_particles(
             self._sim.cur_substep_local,
             self.active,
-            self._fluid_particle_start,
+            self._particle_start,
             self._n_particles,
             self._material.rho,
+            c_init,
             self._particles,
         )
+
+    @qd.kernel
+    def get_frame_c(
+        self,
+        c: qd.types.ndarray(),  # shape [B, n_particles]
+    ):
+        """Retrieve particle concentrations for the given frame."""
+        for i_p_, i_b in qd.ndrange(self.n_particles, self._sim._B):
+            i_p = i_p_ + self._particle_start
+            c[i_b, i_p_] = self.solver.particles[i_p, i_b].c
 
     @gs.assert_built
     def get_state(self):
         state = PBSTFEntityState(self, self.sim.cur_step_global)
-        envs_idx = self._scene._sanitize_envs_idx(None)
-        self._solver._kernel_get_particles_pos(self._fluid_particle_start, self._n_particles, envs_idx, state.pos)
-        self._solver._kernel_get_particles_vel(self._fluid_particle_start, self._n_particles, envs_idx, state.vel)
+        self.get_frame(self.sim.cur_substep_local, state.pos, state.vel)
+        self.get_frame_c(state.c)
         self._queried_states.append(state)
         return state
 
-    @gs.assert_built
-    def set_particles_pos(self, poss, particles_idx_local=None, envs_idx=None):
-        envs_idx = self._scene._sanitize_envs_idx(envs_idx)
-        particles_idx_local = self._sanitize_particles_idx_local(particles_idx_local, envs_idx)
-        poss = self._sanitize_particles_tensor(poss, gs.tc_float, particles_idx_local, envs_idx, (3,))
-        self._solver._kernel_set_particles_pos(particles_idx_local + self._fluid_particle_start, envs_idx, poss)
-
-    def get_particles_pos(self, envs_idx=None):
-        envs_idx = self._scene._sanitize_envs_idx(envs_idx)
-        poss = self._sanitize_particles_tensor(None, gs.tc_float, None, envs_idx, (3,))
-        self._solver._kernel_get_particles_pos(self._fluid_particle_start, self._n_particles, envs_idx, poss)
-        return poss[0] if self._scene.n_envs == 0 else poss
-
-    def get_position(self, envs_idx=None):
-        return self.get_particles_pos(envs_idx)
-
-    @gs.assert_built
-    def set_particles_vel(self, vels, particles_idx_local=None, envs_idx=None):
-        envs_idx = self._scene._sanitize_envs_idx(envs_idx)
-        particles_idx_local = self._sanitize_particles_idx_local(particles_idx_local, envs_idx)
-        vels = self._sanitize_particles_tensor(vels, gs.tc_float, particles_idx_local, envs_idx, (3,))
-        self._solver._kernel_set_particles_vel(particles_idx_local + self._fluid_particle_start, envs_idx, vels)
-
-    def get_particles_vel(self, envs_idx=None):
-        envs_idx = self._scene._sanitize_envs_idx(envs_idx)
-        vels = self._sanitize_particles_tensor(None, gs.tc_float, None, envs_idx, (3,))
-        self._solver._kernel_get_particles_vel(self._fluid_particle_start, self._n_particles, envs_idx, vels)
-        return vels[0] if self._scene.n_envs == 0 else vels
-
-    @gs.assert_built
-    def set_particles_active(self, actives, particles_idx_local=None, envs_idx=None):
-        envs_idx = self._scene._sanitize_envs_idx(envs_idx)
-        particles_idx_local = self._sanitize_particles_idx_local(particles_idx_local, envs_idx)
-        actives = self._sanitize_particles_tensor(actives, gs.tc_bool, particles_idx_local, envs_idx)
-        self._solver._kernel_set_particles_active(particles_idx_local + self._fluid_particle_start, envs_idx, actives)
-
-    def get_particles_active(self, envs_idx=None):
-        envs_idx = self._scene._sanitize_envs_idx(envs_idx)
-        actives = self._sanitize_particles_tensor(None, gs.tc_bool, None, envs_idx)
-        self._solver._kernel_get_particles_active(self._fluid_particle_start, self._n_particles, envs_idx, actives)
-        return actives[0] if self._scene.n_envs == 0 else actives
-
-    @gs.assert_built
-    def get_mass(self, envs_idx=None):
-        """Return the active liquid mass in each selected environment."""
-        envs_idx = self._scene._sanitize_envs_idx(envs_idx)
-        mass = gs.zeros((len(envs_idx),), dtype=gs.tc_float, requires_grad=False, scene=self._scene)
-        self._solver._kernel_get_mass(self._fluid_particle_start, self._n_particles, mass, envs_idx)
-        return mass
-
     def _get_morph_identifier(self) -> str:
         return f"pbstf_{ParticleEntity._get_morph_identifier(self)}"
-
-    @property
-    def fluid_particle_start(self):
-        """Starting index in the solver's liquid-particle phase."""
-        return self._fluid_particle_start

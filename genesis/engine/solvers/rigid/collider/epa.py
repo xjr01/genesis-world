@@ -639,8 +639,10 @@ def func_epa_init_polytope_3d(
         # @TODO: It's possible for GJK to return a triangle with origin not contained in it but within tolerance
         # from it. In that case, the hexahedron could possibly be constructed that does ont contain the origin, but
         # there is penetration depth.
+        # The check only runs when GJK reported a positive separation: a reported penetration means the origin is
+        # enclosed up to rounding, where the containment test is not trustworthy.
         if (
-            gjk_state.simplex.dist[i_b] > 10 * collider_info.gjk.FLOAT_MIN[None]
+            gjk_state.distance[i_b] > 10 * collider_info.gjk.FLOAT_MIN[None]
             and (not tets_has_origin[0])
             and (not tets_has_origin[1])
         ):
@@ -713,6 +715,8 @@ def func_epa_init_polytope_4d(
         )
 
     # If origin is on any face of the tetrahedron, replace the simplex with a 2-simplex (triangle)
+    dist2_min = collider_info.gjk.FLOAT_MAX[None]
+    v1_min, v2_min, v3_min = vi[0], vi[1], vi[2]
     for i in range(4):
         # Vertex indices for the faces in the hexahedron
         v1, v2, v3 = vi[0], vi[1], vi[2]
@@ -729,6 +733,9 @@ def func_epa_init_polytope_4d(
             a1, a2, a3 = 2, 0, 1
 
         dist2 = func_attach_face_to_polytope(i_b, v1, v2, v3, a1, a2, a3, gjk_state, collider_info)
+        if dist2 < dist2_min:
+            dist2_min = dist2
+            v1_min, v2_min, v3_min = v1, v2, v3
 
         if dist2 < collider_info.gjk.FLOAT_MIN_SQ[None]:
             func_replace_simplex_3(i_b, v1, v2, v3, gjk_state)
@@ -736,7 +743,6 @@ def func_epa_init_polytope_4d(
             break
 
     if flag == EPA_POLY_INIT_RETURN_CODE.SUCCESS:
-        # If the tetrahedron does not contain the origin, we do not proceed anymore.
         if (
             func_origin_tetra_intersection(
                 gjk_state.polytope_verts.mink[i_b, vi[0]],
@@ -746,7 +752,13 @@ def func_epa_init_polytope_4d(
             )
             == RETURN_CODE.FAIL
         ):
-            flag = EPA_POLY_INIT_RETURN_CODE.P4_MISSING_ORIGIN
+            # A flat contact terminates GJK with a nearly degenerate tetrahedron, on which this strict test flips
+            # with rounding, differing across backends and kernels at single precision. Aborting would silently drop
+            # a genuine contact, so rebuild from the face nearest the origin through the 2-simplex initialization,
+            # which grants deep contacts its own leniency and still rejects a genuinely invalid state. The polytope
+            # built above is reset alongside (see func_replace_simplex_3), so that rebuild starts from empty.
+            func_replace_simplex_3(i_b, v1_min, v2_min, v3_min, gjk_state)
+            flag = EPA_POLY_INIT_RETURN_CODE.P4_FALLBACK3
 
     if flag == EPA_POLY_INIT_RETURN_CODE.SUCCESS:
         # Initialize face map
@@ -874,7 +886,8 @@ def func_attach_face_to_polytope(
 @qd.func
 def func_replace_simplex_3(i_b, i_v1, i_v2, i_v3, gjk_state: array_class.GJKState):
     """
-    Replace the simplex with a 2-simplex (triangle) from polytope vertices.
+    Replace the simplex with a 2-simplex (triangle) from polytope vertices, and reset the polytope so that a
+    subsequent polytope initialization rebuilds it from empty.
 
     Parameters
     ----------
@@ -890,6 +903,8 @@ def func_replace_simplex_3(i_b, i_v1, i_v2, i_v3, gjk_state: array_class.GJKStat
             i_v = i_v3
         gjk_state.simplex_vertex.obj1[i_b, i] = gjk_state.polytope_verts.obj1[i_b, i_v]
         gjk_state.simplex_vertex.obj2[i_b, i] = gjk_state.polytope_verts.obj2[i_b, i_v]
+        gjk_state.simplex_vertex.local_obj1[i_b, i] = gjk_state.polytope_verts.local_obj1[i_b, i_v]
+        gjk_state.simplex_vertex.local_obj2[i_b, i] = gjk_state.polytope_verts.local_obj2[i_b, i_v]
         gjk_state.simplex_vertex.id1[i_b, i] = gjk_state.polytope_verts.id1[i_b, i_v]
         gjk_state.simplex_vertex.id2[i_b, i] = gjk_state.polytope_verts.id2[i_b, i_v]
         gjk_state.simplex_vertex.mink[i_b, i] = gjk_state.polytope_verts.mink[i_b, i_v]
@@ -1308,6 +1323,10 @@ def func_plane_normal(v1, v2, v3, collider_info: array_class.ColliderInfo):
     d31 = v3 - v1
     d32 = v3 - v2
 
+    # The three cross products are one quantity up to sign, so they differ only in rounding, and a sliver triangle
+    # cancels catastrophically in some of the orderings while resolving in the others. Every ordering is therefore
+    # tried before reporting the triangle degenerate: the whole point of the sequence is that a vanishing cross
+    # product says nothing about the ones not yet computed. Reporting it instead discards the contact entirely.
     for i in qd.static(range(3)):
         if not finished:
             n = gs.qd_vec3(0.0, 0.0, 0.0)
@@ -1320,12 +1339,7 @@ def func_plane_normal(v1, v2, v3, collider_info: array_class.ColliderInfo):
             else:
                 # Normal = (v1 - v3) x (v2 - v3)
                 n = d31.cross(d32)
-            nn = n.norm()
-            if nn == 0:
-                # Zero normal, cannot project.
-                flag = RETURN_CODE.FAIL
-                finished = True
-            elif nn > collider_info.gjk.FLOAT_MIN[None]:
+            if n.norm() > collider_info.gjk.FLOAT_MIN[None]:
                 normal = n.normalized()
                 flag = RETURN_CODE.SUCCESS
                 finished = True

@@ -3,16 +3,15 @@ import math
 import numpy as np
 import pytest
 import torch
+from quadrants.lang._perf_dispatch import PerformanceDispatcher
 
 import genesis as gs
 import genesis.utils.geom as gu
+from genesis.engine.solvers.rigid.constraint import solver as constraint_solver
+from genesis.engine.solvers.rigid.constraint.solver import ConstraintSolver
 from genesis.utils.misc import qd_to_numpy, tensor_to_array
 
-from ..utils import (
-    assert_allclose,
-    assert_equal,
-    init_simulators,
-)
+from ..utils.assertions import assert_allclose, assert_equal
 
 
 @pytest.mark.required
@@ -24,8 +23,27 @@ def test_gravity(show_viewer, tol):
     sphere = scene.add_entity(gs.morphs.Sphere())
     scene.build(n_envs=3)
 
+    envs_idx_cases = (
+        ([-3, -1], (0, 2)),
+        (range(-3, 0), (0, 1, 2)),
+        (range(-1, 1), (2, 0)),
+        (slice(-2, None), (1, 2)),
+        (slice(-1, None, -1), (2, 1, 0)),
+    )
+    gravity_values = torch.tensor(((1.0, 0.0, 0.0), (0.0, 2.0, 0.0), (0.0, 0.0, 3.0)))
+    for envs_idx, expected_envs_idx in envs_idx_cases:
+        values = gravity_values[: len(expected_envs_idx)]
+
+        scene.sim.set_gravity((0.0, 0.0, 0.0))
+        scene.sim.set_gravity(values, envs_idx=envs_idx)
+        actual_gravity = scene.rigid_solver.get_gravity()
+
+        scene.sim.set_gravity((0.0, 0.0, 0.0))
+        scene.sim.set_gravity(values, envs_idx=expected_envs_idx)
+        assert_equal(actual_gravity, scene.rigid_solver.get_gravity())
+
     scene.sim.set_gravity(torch.tensor([0.0, 0.0, 0.0]))
-    scene.sim.set_gravity(torch.tensor([[1.0, 0.0, 0.0], [0.0, 2.0, 0.0]]), envs_idx=[0, 1])
+    scene.sim.set_gravity(torch.tensor([[9.0, 0.0, 0.0], [0.0, 2.0, 0.0]]), envs_idx=[0, 1])
     scene.sim.set_gravity(torch.tensor([1.0, 0.0, 0.0]), envs_idx=np.int64(-3))
     scene.sim.set_gravity(torch.tensor([0.0, 0.0, 3.0]), envs_idx=-1)
     for envs_idx in (-4, 3, np.int64(-4), np.int64(3)):
@@ -93,7 +111,7 @@ def test_box_box_dynamics(gs_sim):
         cube2_quat = gu.xyz_to_quat(
             np.array([*(0.15 * np.random.rand(2)), np.pi * np.random.rand()]),
         )
-        init_simulators(gs_sim, qpos=np.concatenate((cube1_pos, cube1_quat, cube2_pos, cube2_quat)))
+        gs_robot.set_qpos(np.concatenate((cube1_pos, cube1_quat, cube2_pos, cube2_quat)))
         for i in range(110):
             gs_sim.scene.step()
             if i > 100:
@@ -638,6 +656,103 @@ def test_cholesky_tiling(monkeypatch, tol):
 
     # analysis for choice tolerance: https://github.com/Genesis-Embodied-AI/Genesis/pull/2659#discussion_r3041684256
     assert_allclose(*values, tol=5e-4)
+
+
+@pytest.mark.required
+@pytest.mark.use_deterministic_algorithms(False)
+@pytest.mark.parametrize("backend", [gs.gpu])
+def test_solve_arm_equivalence(monkeypatch, show_viewer, tol):
+    SIZE = 0.1
+    N_STEPS = 12
+
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=0.01,
+            gravity=(0.0, 0.0, -9.81),
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(1.1, -1.1, 0.7),
+            camera_lookat=(1.1, 0.1, 0.05),
+        ),
+        show_viewer=show_viewer,
+    )
+    scene.add_entity(gs.morphs.Plane())
+    # Islands of one, three and nine bodies at once, each sunk a ten-thousandth of its height so contact has real depth
+    positions = [(0.0, 0.0, (1 - 1e-4) * SIZE / 2)]
+    positions += [(10 * SIZE, 0.0, (1 - 1e-4) * SIZE * (0.5 + i)) for i in range(3)]
+    positions += [(20 * SIZE + SIZE * (i % 3), SIZE * (i // 3), (1 - 1e-4) * SIZE / 2) for i in range(9)]
+    for pos in positions:
+        scene.add_entity(
+            morph=gs.morphs.Box(
+                size=(SIZE, SIZE, SIZE),
+                pos=pos,
+            ),
+            vis_mode="collision",
+        )
+    scene.build(n_envs=2)
+    solver = scene.rigid_solver
+    constraint_state = solver.constraint_solver.constraint_state
+    dofs = solver.dyn_state.dofs
+
+    # Selecting by index into the candidates the dispatcher deems eligible replaces its whole decision, the timing it
+    # would do and any QD_PERFDISPATCH_FORCE in the environment alike, and demanding more than one candidate means a
+    # selection that stopped working fails here instead of quietly comparing one implementation against itself.
+    selected = 0
+
+    def call_selected(self, *args, **kwargs):
+        eligible = self._get_compatible_functions(*args, **kwargs)
+        # Registration order, so an index means the same implementation on every call and every run.
+        candidates = [impl for impl in self._dispatch_impls if impl in eligible]
+        assert len(candidates) > 1
+        return candidates[selected](*args, **kwargs)
+
+    monkeypatch.setattr(PerformanceDispatcher, "__call__", call_selected)
+
+    # A solve leaves its own inputs changed: the warm start it wrote, the factor and active set the incremental path
+    # maintains across calls, and the applied force it folded the constraint force into. The second implementation gets
+    # all of them back exactly as the first one received them, or it would be solving a different problem.
+    solve_inputs = (
+        constraint_state.qacc_ws,
+        constraint_state.is_warmstart,
+        constraint_state.active,
+        constraint_state.prev_active,
+        constraint_state.incr_changed_idx,
+        constraint_state.incr_n_changed,
+        constraint_state.nt_H,
+        constraint_state.nt_jacobi,
+        constraint_state.use_full_hessian,
+        constraint_state.solver_iter_counter,
+        constraint_state.improved,
+        dofs.force,
+    )
+
+    accelerations = []
+    resolve_orig = ConstraintSolver.resolve
+
+    def resolve_compared(self):
+        nonlocal selected
+        inputs = [qd_to_numpy(tensor, copy=True) for tensor in solve_inputs]
+        accelerations.clear()
+        # The candidate order is fixed, so solving with index 0 last leaves the trajectory to one implementation.
+        for selected in (1, 0):
+            for tensor, value in zip(solve_inputs, inputs):
+                tensor.from_numpy(value)
+            resolve_orig(self)
+            accelerations.append(qd_to_numpy(constraint_state.qacc, copy=True))
+
+    monkeypatch.setattr(ConstraintSolver, "resolve", resolve_compared)
+
+    for i_step in range(N_STEPS):
+        scene.step()
+        assert not solver.get_error_envs_mask().any()
+        # Neither implementation may be compared on a solve that had nothing to resolve
+        assert (qd_to_numpy(constraint_state.n_constraints) > 32).all()
+
+        compared, reference = accelerations
+        # The two implementations spread every reduction, factor and solve differently, so their accelerations land
+        # within rounding of each other and never on the same value: a gap of exactly zero means one of them ran twice.
+        assert np.abs(compared.astype(np.float64) - reference.astype(np.float64)).max() > 0.0
+        assert_allclose(compared, reference, tol=tol, err_msg=f"step {i_step}")
 
 
 @pytest.mark.slow  # ~200s

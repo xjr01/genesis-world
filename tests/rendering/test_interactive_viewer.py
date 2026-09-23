@@ -2,106 +2,21 @@ import re
 import sys
 import threading
 import time
-from threading import Lock
-from unittest.mock import MagicMock, Mock
 
 import numpy as np
 import OpenGL.error
 import pytest
 
 import genesis as gs
-from genesis.ext.pyrender.trackball import Trackball
 from genesis.options.sensors import RasterizerCameraOptions
 from genesis.utils.misc import tensor_to_array
 from genesis.vis.keybindings import Key, KeyAction, Keybind, KeyMod, MouseButton
 
-from ..conftest import IS_INTERACTIVE_VIEWER_AVAILABLE, SKIP_NO_VIEWER
-from ..utils import assert_allclose, assert_equal
+from ..conftest import IS_INTERACTIVE_VIEWER_AVAILABLE, SKIP_NO_IMGUI_BUNDLE, SKIP_NO_VIEWER, is_imgui_bundle_supported
+from ..utils.assertions import assert_allclose
 from .conftest import RENDERER_TYPE
 
 CAM_RES = (480, 320)
-
-
-@pytest.mark.required
-def test_trackball_orbit_respects_world_up_axis():
-    rotation_z_to_y = np.array(((1.0, 0.0, 0.0), (0.0, 0.0, 1.0), (0.0, -1.0, 0.0)))
-    transform_z_to_y = np.eye(4)
-    transform_z_to_y[:3, :3] = rotation_z_to_y
-    camera_pos_z = np.array((4.0, -3.0, 2.0))
-    target_z = np.array((0.5, -0.25, 0.75))
-    world_up_z = np.array((0.0, 0.0, 1.0))
-    camera_backward_z = camera_pos_z - target_z
-    camera_backward_z /= np.linalg.norm(camera_backward_z)
-    camera_right_z = np.cross(world_up_z, camera_backward_z)
-    camera_right_z /= np.linalg.norm(camera_right_z)
-    camera_up_z = np.cross(camera_backward_z, camera_right_z)
-    camera_pose_z = np.eye(4)
-    camera_pose_z[:3, :3] = np.column_stack((camera_right_z, camera_up_z, camera_backward_z))
-    camera_pose_z[:3, 3] = camera_pos_z
-    camera_pose_y = transform_z_to_y @ camera_pose_z
-    target_y = rotation_z_to_y @ target_z
-    world_up_y = rotation_z_to_y @ world_up_z
-    viewport_size = (640.0, 480.0)
-    scale = 5.0
-    mouse_down = (100.0, 100.0)
-    mouse_drag = (140.0, 125.0)
-    trackball_z_default = Trackball(camera_pose_z, viewport_size, scale, target_z)
-    trackball_z = Trackball(camera_pose_z, viewport_size, scale, target_z, world_up_axis=world_up_z)
-    trackball_y = Trackball(camera_pose_y, viewport_size, scale, target_y, world_up_axis=world_up_y)
-
-    for trackball in (trackball_z_default, trackball_z, trackball_y):
-        trackball.down(mouse_down)
-        trackball.drag(mouse_drag)
-
-    assert_allclose(trackball_z.pose, trackball_z_default.pose, atol=1e-12)
-    assert_allclose(trackball_y.pose, transform_z_to_y @ trackball_z.pose, atol=1e-12)
-
-
-@pytest.mark.required
-def test_recording_without_frames(tmp_path, monkeypatch):
-    pyrender_viewer = object.__new__(gs.ext.pyrender.viewer.Viewer)
-    pyrender_viewer._recording_lock = Lock()
-    pyrender_viewer._viewer_flags = {"record": True}
-    video_recorder = Mock(filename=tmp_path / "tmp_video.mp4")
-    pyrender_viewer._video_recorder = video_recorder
-    get_save_filename = Mock()
-    monkeypatch.setattr(gs.ext.pyrender.viewer.Viewer, "_get_save_filename", get_save_filename)
-
-    pyrender_viewer.save_video()
-
-    assert_equal(video_recorder.close.call_count, 1)
-    assert_equal(get_save_filename.call_count, 0)
-
-
-@pytest.mark.required
-def test_recording_uses_independent_lock(monkeypatch):
-    pyrender_viewer = object.__new__(gs.ext.pyrender.viewer.Viewer)
-    recording_lock = Lock()
-    pyrender_viewer._recording_lock = recording_lock
-    render_lock = MagicMock()
-    render_lock.__enter__.side_effect = AssertionError("Recording must not acquire the scene render lock.")
-    pyrender_viewer._render_lock = render_lock
-    pyrender_viewer._viewer_flags = {
-        "record": False,
-        "refresh_rate": 60,
-        "window_title": "Viewer",
-    }
-    pyrender_viewer._viewport_size = (64, 64)
-
-    def set_caption(_caption):
-        is_recording_lock_acquired = recording_lock.acquire(blocking=False)
-        assert_equal(is_recording_lock_acquired, True)
-        recording_lock.release()
-
-    pyrender_viewer.set_caption = set_caption
-    video_writer = Mock()
-    monkeypatch.setattr("moviepy.video.io.ffmpeg_writer.FFMPEG_VideoWriter", video_writer)
-
-    pyrender_viewer.toggle_recording()
-
-    assert_equal(pyrender_viewer.viewer_flags["record"], True)
-    assert_equal(render_lock.__enter__.call_count, 0)
-    assert_equal(video_writer.call_count, 1)
 
 
 # Note that software emulation is so slow that it may takes minutes to render a single frame...
@@ -277,6 +192,7 @@ def test_default_plugin(n_envs):
 @pytest.mark.required
 @pytest.mark.parametrize("renderer_type", [RENDERER_TYPE.RASTERIZER])
 @pytest.mark.skipif(not IS_INTERACTIVE_VIEWER_AVAILABLE, reason=SKIP_NO_VIEWER)
+@pytest.mark.skipif(not is_imgui_bundle_supported, reason=SKIP_NO_IMGUI_BUNDLE)
 def test_key_press(renderer_type, tmp_path, monkeypatch, renderer, png_snapshot):
     IMAGE_FILENAME = tmp_path / "screenshot.png"
 

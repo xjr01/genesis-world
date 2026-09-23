@@ -28,9 +28,22 @@ class Liquid(Base["PBDParticleEntity"]):
         Relaxation factor for solving the density constraint. Default is 0.2.
     viscosity_relaxation : float, optional
         Relaxation factor used in the viscosity solver. Default is 0.01.
+    c_init_z_mid : float or None, optional
+        If given, particles sampled below this world z are initialized with concentration c=1 ("coffee"),
+        the rest with c=0 ("water"). None keeps the all-zero default. Default is None.
+    c_init : float or None, optional
+        If given, all particles of this entity are initialized with this constant concentration,
+        overriding `c_init_z_mid`. Default is None.
+    boundary_group : int, optional
+        Clamp ownership group (multiflow pitcher demos): 0 = primary boundary, 1 = pitcher clamp
+        (requires `PBDOptions.boundary_pitcher`). Group-1 particles transfer to group 0 permanently
+        once they leave the pitcher's keep region. Default is 0.
     """
 
     rho: PositiveFloat = 1000.0
     sampler: SamplerType = DEFAULT_SAMPLER
     density_relaxation: ValidFloat = 0.2
     viscosity_relaxation: ValidFloat = 0.01
+    c_init_z_mid: float | None = None
+    c_init: float | None = None
+    boundary_group: int = 0

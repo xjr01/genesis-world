@@ -111,6 +111,12 @@ vec4 srgb_to_linear(vec4 srgb)
 ///////////////////////////////////////////////////////////////////////////////
 void main()
 {
+#ifdef ROUND_POINTS
+    // GL points rasterize as axis-aligned squares, so a cloud of them unions into a box-edged silhouette; clip each
+    // sprite back to the disc the particle stands for.
+    vec2 sprite_coord = gl_PointCoord - vec2(0.5);
+    if (dot(sprite_coord, sprite_coord) > 0.25) discard;
+#endif
 
     // Compute albedo
     vec4 base_color = material.base_color_factor;

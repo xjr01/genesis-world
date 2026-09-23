@@ -3,7 +3,7 @@ from .drone_entity import DroneEntity
 from .emitter import Emitter
 from .fem_entity import FEMEntity
 from .hybrid_entity import HybridEntity
-from .ipbstf_entity import IPBSTFEntity
+from .ipbf_entity import IPBFEntity
 from .mpm_entity import MPMEntity
 from .pbd_entity import (
     PBD2DEntity,
@@ -11,9 +11,8 @@ from .pbd_entity import (
     PBDFreeParticleEntity,
     PBDParticleEntity,
 )
-from .pbstf_entity import PBSTFEntity
-from .pbstf_porous_entity import PBSTFPorousEntity
 from .rigid_entity import KinematicEntity, RigidEntity
-from .sf_entity import SFParticleEntity
 from .sph_entity import SPHEntity
+from .sf_entity import SFParticleEntity
+from .pbstf_entity import PBSTFEntity
 from .tool_entity import ToolEntity

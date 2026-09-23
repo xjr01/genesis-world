@@ -140,46 +140,57 @@ class SPHEntityState(RBC):
         return self._vel
 
 
-class IPBSTFEntityState(SPHEntityState):
-    """Dynamic state queried from an implicit position-based surface-tension fluid (IPBSTF) entity."""
+class IPBFEntityState(RBC):
+    """
+    Dynamic state queried from a genesis IPBFEntity.
+    """
+
+    def __init__(self, entity, s_global):
+        self._entity = entity
+        self._s_global = s_global
+        base_shape = (self.entity.sim._B, self._entity.n_particles)
+        args = {
+            "dtype": gs.tc_float,
+            "requires_grad": False,
+            "scene": self._entity.scene,
+        }
+
+        self._pos = gs.zeros(base_shape + (3,), **args)
+        self._vel = gs.zeros(base_shape + (3,), **args)
+
+    @property
+    def entity(self):
+        return self._entity
+
+    @property
+    def s_global(self):
+        return self._s_global
+
+    @property
+    def pos(self):
+        return self._pos
+
+    @property
+    def vel(self):
+        return self._vel
 
 
 class PBSTFEntityState(SPHEntityState):
     """Dynamic state queried from a genesis PBSTFEntity."""
 
-
-class PBSTFPorousEntityState(SPHEntityState):
-    """Dynamic state queried from a position-based surface-tension fluid (PBSTF) porous elastic entity."""
-
     def __init__(self, entity, s_global):
         super().__init__(entity, s_global)
-        self._active = gs.zeros(
-            (self.entity.sim._B, self._entity.n_particles),
-            dtype=gs.tc_bool,
-            requires_grad=False,
-            scene=self._entity.scene,
-        )
-        self._is_fixed = gs.zeros(
-            (self.entity.sim._B, self._entity.n_particles),
-            dtype=gs.tc_bool,
-            requires_grad=False,
-            scene=self._entity.scene,
-        )
-
-    def serializable(self):
-        self._entity = None
-        self._pos = self._pos.detach()
-        self._vel = self._vel.detach()
-        self._active = self._active.detach()
-        self._is_fixed = self._is_fixed.detach()
+        args = {
+            "dtype": gs.tc_float,
+            "requires_grad": False,
+            "scene": self._entity.scene,
+        }
+        # concentration (multiflow demo): passive scalar, part of the state so settled npz round-trips c
+        self._c = gs.zeros((self.entity.sim._B, self._entity.n_particles), **args)
 
     @property
-    def active(self):
-        return self._active
-
-    @property
-    def is_fixed(self):
-        return self._is_fixed
+    def c(self):
+        return self._c
 
 
 class FEMEntityState:

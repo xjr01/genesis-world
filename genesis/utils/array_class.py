@@ -1,6 +1,7 @@
 import dataclasses
 import math
 from enum import IntEnum
+from typing import NamedTuple
 
 import quadrants as qd
 from typing_extensions import dataclass_transform  # Made it into standard lib from Python 3.12
@@ -88,8 +89,9 @@ class ErrorCode(IntEnum):
     INVALID_CONTACT_NAN = 0b00000000000000000000000000010000
     INVALID_FORCE_NAN = 0b00000000000000000000000000100000
     INVALID_ACC_NAN = 0b00000000000000000000000001000000
-    INVALID_IPBSTF_STATE_NAN = 0b00000000000000000000000010000000
+    # PBSTF solver error codes keep the same bit values as the upstream reference implementation.
     INVALID_PBSTF_STATE_NAN = 0b00000000000000000000000100000000
+    INVALID_PBSTF_DEFORMABLE_COLLIDER = 0b00000000000000000000001000000000
 
 
 # =========================================== RigidInfo ===========================================
@@ -411,6 +413,173 @@ def get_island_state(solver, collider):
     )
 
 
+# =========================================== IKState ===========================================
+
+
+@dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
+class IKState:
+    """Damped-least-squares inverse-kinematics scratch, one column per parallel solve.
+
+    A column is an environment for the entity API or a candidate restart for the planner; error_dim = 6 * n_targets
+    stacks the per-target pose residuals.
+    """
+
+    # Single-target spatial Jacobian (6 x n_dofs), rebuilt per target link and copied into the stacked block.
+    jacobian: qd.Tensor
+    # Stacked multi-target Jacobian and its transpose, feeding the damped normal-equations solve.
+    jacobian_stacked: qd.Tensor
+    jacobian_stacked_t: qd.Tensor
+    # Damped normal matrix J J^T + damping^2 I, its lower / upper LU factors and forward-substitution scratch, and
+    # its inverse.
+    mat: qd.Tensor
+    lu_lower: qd.Tensor
+    lu_upper: qd.Tensor
+    lu_y: qd.Tensor
+    inv: qd.Tensor
+    # Stacked pose residual, the best residual seen across restarts, and inv @ residual.
+    err_pose: qd.Tensor
+    err_pose_best: qd.Tensor
+    vec: qd.Tensor
+    # Joint-space step and the best configuration found across restarts.
+    delta_qpos: qd.Tensor
+    qpos_best: qd.Tensor
+
+
+def get_ik_state(n_qs, n_dofs, error_dim, n_cols):
+    return IKState(
+        jacobian=V(dtype=gs.qd_float, shape=(6, n_dofs, n_cols)),
+        jacobian_stacked=V(dtype=gs.qd_float, shape=(error_dim, n_dofs, n_cols)),
+        jacobian_stacked_t=V(dtype=gs.qd_float, shape=(n_dofs, error_dim, n_cols)),
+        mat=V(dtype=gs.qd_float, shape=(error_dim, error_dim, n_cols)),
+        lu_lower=V(dtype=gs.qd_float, shape=(error_dim, error_dim, n_cols)),
+        lu_upper=V(dtype=gs.qd_float, shape=(error_dim, error_dim, n_cols)),
+        lu_y=V(dtype=gs.qd_float, shape=(error_dim, error_dim, n_cols)),
+        inv=V(dtype=gs.qd_float, shape=(error_dim, error_dim, n_cols)),
+        err_pose=V(dtype=gs.qd_float, shape=(error_dim, n_cols)),
+        err_pose_best=V(dtype=gs.qd_float, shape=(error_dim, n_cols)),
+        vec=V(dtype=gs.qd_float, shape=(error_dim, n_cols)),
+        delta_qpos=V(dtype=gs.qd_float, shape=(n_dofs, n_cols)),
+        qpos_best=V(dtype=gs.qd_float, shape=(n_qs, n_cols)),
+    )
+
+
+@dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
+class IKScratchFK:
+    """Per-column forward-kinematics scratch for the entity inverse-kinematics solve.
+
+    Holds the working configuration and the link / joint frames it produces, so each Gauss-Newton step evaluates
+    and integrates poses on caller-owned buffers without mutating live solver state. A column is an environment.
+    """
+
+    # Entity-local working configuration iterated by the solve.
+    qpos: qd.Tensor
+    # Link poses and joint frames placed by func_forward_kinematics_scratch, feeding the error and the Jacobian.
+    links_pos: qd.Tensor
+    links_quat: qd.Tensor
+    joints_xanchor: qd.Tensor
+    joints_xaxis: qd.Tensor
+
+
+def get_ik_scratch_fk(n_qs, n_links, n_joints, n_cols):
+    return IKScratchFK(
+        qpos=V(dtype=gs.qd_float, shape=(n_qs, n_cols)),
+        links_pos=V(dtype=gs.qd_vec3, shape=(n_links, n_cols)),
+        links_quat=V(dtype=gs.qd_vec4, shape=(n_links, n_cols)),
+        joints_xanchor=V(dtype=gs.qd_vec3, shape=(n_joints, n_cols)),
+        joints_xaxis=V(dtype=gs.qd_vec3, shape=(n_joints, n_cols)),
+    )
+
+
+@dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
+class IKTargets:
+    """Inverse-kinematics targets and DOF selection for one solve batch, one column per parallel solve.
+
+    A column is an environment for the entity API or a candidate restart for the planner. Positions and
+    orientations are vec-typed so the solver reads a target pose per (link, column) directly; the host populates
+    every field before the solve.
+    """
+
+    # Global indices of the target links, the effective DOFs to move, and the columns (solver envs) to solve.
+    links_idx: qd.Tensor
+    dofs_idx: qd.Tensor
+    envs_idx: qd.Tensor
+    # Target pose per (link, column) and the link-local point whose pose is driven, in the world frame.
+    pos: qd.Tensor
+    quat: qd.Tensor
+    local_point: qd.Tensor
+    # Optional custom initial configuration per (column, q); used only when custom_init_qpos is set.
+    init_qpos: qd.Tensor
+    # Which position / rotation axes to solve (shared across links), and per-link position / rotation enables.
+    pos_mask: qd.Tensor
+    rot_mask: qd.Tensor
+    link_pos_mask: qd.Tensor
+    link_rot_mask: qd.Tensor
+
+
+def get_ik_targets(n_links, n_dofs, n_qs, n_cols):
+    return IKTargets(
+        links_idx=V(dtype=gs.qd_int, shape=(n_links,)),
+        dofs_idx=V(dtype=gs.qd_int, shape=(n_dofs,)),
+        envs_idx=V(dtype=gs.qd_int, shape=(n_cols,)),
+        pos=V_VEC(3, dtype=gs.qd_float, shape=(n_links, n_cols)),
+        quat=V_VEC(4, dtype=gs.qd_float, shape=(n_links, n_cols)),
+        local_point=V_VEC(3, dtype=gs.qd_float, shape=(n_links,)),
+        init_qpos=V(dtype=gs.qd_float, shape=(n_cols, n_qs)),
+        pos_mask=V(dtype=gs.qd_float, shape=(3,)),
+        rot_mask=V(dtype=gs.qd_float, shape=(3,)),
+        link_pos_mask=V(dtype=gs.qd_int, shape=(n_links,)),
+        link_rot_mask=V(dtype=gs.qd_int, shape=(n_links,)),
+    )
+
+
+@dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
+class KinematicsScratch:
+    """Buffers backing the kinematics queries of every entity of one solver.
+
+    A column is an environment. The Jacobian spans the widest entity, and the configuration cache spans the solver
+    configuration so the global q indices callers already work in index it directly.
+    """
+
+    jacobian: qd.Tensor
+    qpos_cache: qd.Tensor
+
+
+def get_kinematics_scratch(solver):
+    n_dofs = max((entity.n_dofs for entity in solver.entities), default=0)
+    is_active = n_dofs > 0
+
+    return KinematicsScratch(
+        jacobian=V(dtype=gs.qd_float, shape=maybe_shape((6, n_dofs, solver._B), is_active)),
+        qpos_cache=V(dtype=gs.qd_float, shape=maybe_shape((solver.n_qs, solver._B), is_active)),
+    )
+
+
+class IKScratch(NamedTuple):
+    """The three solve-time buffers an inverse-kinematics call needs, shared by every entity of one solver.
+
+    Sized by the largest entity the solver holds and by the target cap, so each solve writes the leading rows its own
+    entity spans; a column is an environment.
+    """
+
+    state: IKState
+    fk: IKScratchFK
+    targets: IKTargets
+
+
+def get_ik_scratch(solver):
+    n_qs = max(entity.n_qs for entity in solver.entities)
+    n_dofs = max(entity.n_dofs for entity in solver.entities)
+    n_links = max(entity.n_links for entity in solver.entities)
+    n_joints = max(entity.n_joints for entity in solver.entities)
+    n_tgts = solver._options.IK_max_targets
+
+    return IKScratch(
+        state=get_ik_state(n_qs, n_dofs, 6 * n_tgts, solver._B),
+        fk=get_ik_scratch_fk(n_qs, n_links, n_joints, solver._B),
+        targets=get_ik_targets(n_tgts, n_dofs, n_qs, solver._B),
+    )
+
+
 @dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
 class ConstraintState:
     # Union-find partition of links into contact islands, read by the per-island Newton solve and hibernation.
@@ -463,7 +632,8 @@ class ConstraintState:
     quad_gauss: qd.Tensor
     ls_alpha: qd.Tensor
     ls_improvement: qd.Tensor
-    ls_alpha_newton: qd.Tensor
+    # Cost derivative and curvature along the search direction at alpha=0, [deriv, curvature], curvature floored at EPS
+    ls_p0_deriv: qd.Tensor
     ls_gtol: qd.Tensor
     eq_sum: qd.Tensor
     ls_it: qd.Tensor
@@ -612,7 +782,7 @@ def get_constraint_state(constraint_solver, solver, collider):
         quad_gauss=V(dtype=gs.qd_float, shape=(2, _B)),
         ls_alpha=V(dtype=gs.qd_float, shape=(_B,)),
         ls_improvement=V(dtype=gs.qd_float, shape=(_B,)),
-        ls_alpha_newton=V(dtype=gs.qd_float, shape=(_B,)),
+        ls_p0_deriv=V(dtype=gs.qd_float, shape=(2, _B)),
         ls_gtol=V(dtype=gs.qd_float, shape=(_B,)),
         eq_sum=V(dtype=gs.qd_float, shape=(2, _B)),
         Ma=V(dtype=gs.qd_float, shape=(solver.n_dofs_, _B), layout=dof_vec_layout),
@@ -1091,12 +1261,11 @@ def get_epa_polytope_vertex(_B, gjk_info, is_active):
 @dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
 class GJKSimplex:
     nverts: qd.Tensor
-    dist: qd.Tensor
 
 
 def get_gjk_simplex(_B, is_active):
     shape = maybe_shape((_B,), is_active)
-    return GJKSimplex(nverts=V(dtype=gs.qd_int, shape=shape), dist=V(dtype=gs.qd_float, shape=shape))
+    return GJKSimplex(nverts=V(dtype=gs.qd_int, shape=shape))
 
 
 @dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
@@ -1452,9 +1621,7 @@ def get_gjk_info(**kwargs):
 
 @qd.data_oriented
 class GJKStaticConfig(metaclass=AutoInitMeta):
-    # This is disabled by default, because it is often less stable than the other multi-contact detection algorithm.
-    # However, we keep the code here for compatibility with MuJoCo and for possible future use.
-    enable_mujoco_multi_contact: bool
+    enable_contact_patch: bool
 
 
 # =========================================== SupportField ===========================================
@@ -1769,8 +1936,6 @@ class LinksState:
     j_quat_bw: qd.Tensor
     j_vel: qd.Tensor
     j_ang: qd.Tensor
-    kinematic_vel: qd.Tensor
-    kinematic_ang: qd.Tensor
     cd_ang: qd.Tensor
     cd_vel: qd.Tensor
     # Whether any contact or connect/weld equality row involves the link this step. Written by the constraint
@@ -1828,8 +1993,6 @@ def get_links_state(solver):
         j_quat_bw=V(dtype=gs.qd_vec4, shape=shape_bw, needs_grad=requires_grad),
         j_vel=V(dtype=gs.qd_vec3, shape=shape, needs_grad=requires_grad),
         j_ang=V(dtype=gs.qd_vec3, shape=shape, needs_grad=requires_grad),
-        kinematic_vel=V(dtype=gs.qd_vec3, shape=shape),
-        kinematic_ang=V(dtype=gs.qd_vec3, shape=shape),
         cd_ang=V(dtype=gs.qd_vec3, shape=shape, needs_grad=requires_grad),
         cd_vel=V(dtype=gs.qd_vec3, shape=shape, needs_grad=requires_grad),
         is_constrained=V(dtype=gs.qd_bool, shape=shape),
@@ -2562,6 +2725,8 @@ class DataManager:
 
         equalities_info = get_equalities_info(solver, is_dynamic)
 
+        self.kinematics_scratch = get_kinematics_scratch(solver)
+
         self.dyn_info = DynInfo(
             entities=entities_info,
             links=links_info,
@@ -2594,6 +2759,20 @@ class DataManager:
 
         self.rigid_adjoint_cache = get_rigid_adjoint_cache(solver)
         self.errno = V(dtype=gs.qd_int, shape=(solver._B,))
+
+        self._solver = solver
+        self._ik_scratch = None
+
+    @property
+    def ik_scratch(self) -> IKScratch:
+        """Inverse-kinematics scratch, allocated the first time a solve asks for it.
+
+        The damped normal matrix it holds is quadratic in RigidOptions.IK_max_targets, so a scene that never solves
+        inverse kinematics carries none of it.
+        """
+        if self._ik_scratch is None:
+            self._ik_scratch = get_ik_scratch(self._solver)
+        return self._ik_scratch
 
 
 # =========================================== RaycastResult ===========================================

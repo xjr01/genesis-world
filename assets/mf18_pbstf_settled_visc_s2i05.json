@@ -1,0 +1,79 @@
+{
+  "solver": "PBSTF",
+  "kernel": "cubic",
+  "particle_size": 0.002,
+  "support_radius": 0.006,
+  "default_mass": 7.98565633886028e-06,
+  "recipe": {
+    "dt": 0.004166666666666667,
+    "substeps": 4,
+    "max_solver_iterations": 20,
+    "topology_rebuild_interval": 2,
+    "density_compliance": 375000.0,
+    "surface_tension_compliance": 0.0048,
+    "surface_distance_compliance": 40.0,
+    "interior_distance_compliance": 180.0,
+    "surface_viscosity": 0.2,
+    "interior_viscosity": 0.05,
+    "sampler": "regular",
+    "rho": 1000.0,
+    "diffusion_coeff": 0.005,
+    "gravity": [
+      0.0,
+      0.0,
+      -9.81
+    ],
+    "is_collider_adhesion_friction_enabled": true,
+    "collider_adhesion_compliance": 1000000000000.0,
+    "collider_friction": 0.1
+  },
+  "colliders": [
+    {
+      "type": "box",
+      "lower": [
+        -0.318,
+        -0.265,
+        -0.0132
+      ],
+      "upper": [
+        0.552,
+        0.265,
+        0.0
+      ],
+      "role": "table"
+    },
+    {
+      "type": "mesh",
+      "file": "mf18_cup_big.obj",
+      "sdf_res": 150,
+      "role": "mug",
+      "pose": "identity"
+    },
+    {
+      "type": "mesh",
+      "file": "mf18_cup_small.obj",
+      "sdf_res": 150,
+      "role": "jug",
+      "pose": "rest [0.14 0.   0.  ]"
+    }
+  ],
+  "asset_hashes": {
+    "mf18_cup_big.obj": "132de7db3e5572f49bcf88b84f5a6feb046014031ef76ef9b1570ce7ab56dc30",
+    "mf18_cup_small.obj": "b0482f497d0a8e5e6c853cb603a35caaef065e0a9fc0d2dbd3c08932ea6d349e"
+  },
+  "n_coffee": 40680,
+  "n_milk": 21812,
+  "settle": {
+    "duration_s": 6.0,
+    "vel_saved": "zeroed",
+    "end_ke": 0.0005891930195502937,
+    "speed_median": 0.01573668047785759,
+    "speed_p99": 0.1890372931957245,
+    "speed_max": 0.8679537773132324,
+    "n_coffee_mug": 40680,
+    "n_milk_jug": 21812,
+    "n_below_table": 0,
+    "nan": 0
+  },
+  "created": "2026-09-22T16:51:25.604696+00:00"
+}
