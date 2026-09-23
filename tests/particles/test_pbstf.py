@@ -799,7 +799,12 @@ def test_teapot_initial_particles_pose_and_case_time_steps():
     for case in CASES:
         settings = case_settings(case)
         expected_scale = 300 if case in (CASE_MOP, CASE_SWEEP, CASE_TAP, CASE_TEAPOT) else 150
-        expected_dt = 0.01 if case in (CASE_MOP, CASE_SWEEP, CASE_TEAPOT) else 1.0 / 30.0
+        if case in (CASE_MOP, CASE_SWEEP):
+            expected_dt = 0.002
+        elif case == CASE_TEAPOT:
+            expected_dt = 0.01
+        else:
+            expected_dt = 1.0 / 30.0
         assert_equal(settings.scale, expected_scale)
         assert_equal(settings.dt, expected_dt)
     for time, angle_degrees in ((0.0, 0.0), (18.0, 27.0), (28.0, 27.0), (29.6, 19.0), (35.0, 19.0)):
@@ -1074,10 +1079,10 @@ def test_mop_sponge_full_simulation_and_collision(n_envs, show_viewer):
     assert isinstance(sponge_entity.material, gs.materials.PBD.Elastic)
     assert_equal(sponge_entity.material.rho, manipulator.sponge_density)
     assert_equal(liquid_entity.material.density_compliance, 33750.0)
-    assert_equal(liquid_entity.material.surface_tension_compliance, 1.0 / 2000.0)
+    assert_equal(liquid_entity.material.surface_tension_compliance, 1.0 / 225.0)
     assert_equal(liquid_entity.material.surface_distance_compliance, 40.0)
     assert_equal(liquid_entity.material.interior_distance_compliance, 180.0)
-    assert_equal(liquid_entity.material.collider_adhesion_compliance, 30.0)
+    assert_equal(liquid_entity.material.collider_adhesion_compliance, 20.0)
     sponge_x = sponge_init_positions[:, 0]
     sponge_y = sponge_init_positions[:, 1]
     finger_contact_mask = np.isclose(sponge_y, sponge_y.max())

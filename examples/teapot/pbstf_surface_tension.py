@@ -224,13 +224,13 @@ def _case_liquid_material(case):
         return _liquid_material(
             sampler="regular",
             density_compliance=33750.0,
-            surface_tension_compliance=1.0 / 2000.0,
+            surface_tension_compliance=1.0 / 225.0,
             surface_distance_compliance=40.0,
             interior_distance_compliance=180.0,
             surface_viscosity=0.5,
             interior_viscosity=0.5,
             is_collider_adhesion_friction_enabled=True,
-            collider_adhesion_compliance=30.0,
+            collider_adhesion_compliance=20.0,
             collider_friction=0.5,
         )
     return _liquid_material()
@@ -376,7 +376,7 @@ def case_settings(case):
             )
         return CaseSettings(
             scale=300,
-            dt=0.01,
+            dt=0.002,
             gravity=(0.0, -9.8, 0.0),
             lower_bound=(-0.4, -1.0 / 15.0, -4.0 / 15.0),
             upper_bound=(0.4, 4.0 / 15.0, 4.0 / 15.0),
@@ -392,11 +392,11 @@ def case_settings(case):
                 ),
                 wipe_collider,
             ),
-            max_solver_iterations=30,
+            max_solver_iterations=10,
             max_surface_neighbors=128,
             max_localmesh_neighbors=64,
             enable_pca_normals=False,
-            steps=1000,
+            steps=5000,
             teapot=None,
             emitter=None,
             mop=wipe if case == CASE_MOP else None,
@@ -596,7 +596,7 @@ def add_case_entities(
                 ),
                 material=gs.materials.PBD.Elastic(
                     rho=manipulator.sponge_density,
-                    stretch_relaxation=0.1,
+                    stretch_relaxation=0.25,
                     volume_relaxation=0.15,
                 ),
                 surface=gs.surfaces.Default(
@@ -825,7 +825,7 @@ def build_scene(
                 particle_size=0.005,
                 lower_bound=settings.lower_bound,
                 upper_bound=settings.upper_bound,
-                max_solver_iterations=30,
+                max_solver_iterations=100,
                 constraint_acceleration=0.85,
             )
             if case == CASE_MOP
@@ -836,7 +836,7 @@ def build_scene(
             lower_bound=settings.lower_bound,
             upper_bound=settings.upper_bound,
             max_solver_iterations=settings.max_solver_iterations,
-            topology_rebuild_interval=2,
+            topology_rebuild_interval=10,
             max_surface_neighbors=settings.max_surface_neighbors,
             max_localmesh_neighbors=settings.max_localmesh_neighbors,
             enable_pca_normals=settings.enable_pca_normals,
