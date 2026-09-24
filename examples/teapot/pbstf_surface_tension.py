@@ -230,7 +230,7 @@ def _case_liquid_material(case):
             surface_viscosity=0.5,
             interior_viscosity=0.5,
             is_collider_adhesion_friction_enabled=True,
-            collider_adhesion_compliance=20.0,
+            collider_adhesion_compliance=50.0,
             collider_friction=0.5,
         )
     return _liquid_material()
@@ -324,7 +324,7 @@ def case_settings(case):
         if case == CASE_MOP:
             mop_manipulator = MopManipulatorSettings(
                 entity_name="mop_manipulator",
-                sponge_grid_resolution=(15, 10, 30),
+                sponge_grid_resolution=(10, 7, 20),
                 sponge_density=30.0,
                 asset="urdf/panda_bullet/panda.urdf",
                 is_visible=True,
@@ -338,7 +338,7 @@ def case_settings(case):
                 grasp_quat=(0.6532814824, 0.6532814824, 0.2705980501, -0.2705980501),
                 initial_qpos=(0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785, 0.04, 0.04),
                 finger_open_qpos=0.04,
-                finger_closed_qpos=0.4 / 15.0,
+                finger_closed_qpos=0.036,
             )
         wipe = WipeSettings(
             collider_idx=1,
@@ -353,8 +353,8 @@ def case_settings(case):
             start_pos=(-7.0 / 30.0, 0.0, 0.0),
             end_pos=(7.0 / 30.0, 0.0, 0.0),
             quat=(1.0, 0.0, 0.0, 0.0),
-            settle_time=1.0,
-            wipe_time=5.0,
+            settle_time=0.2,
+            wipe_time=2.5,
             mop_manipulator=mop_manipulator,
         )
         if case == CASE_MOP:
@@ -363,7 +363,7 @@ def case_settings(case):
                 quat=wipe.quat,
                 lower=wipe.collider_lower,
                 upper=wipe.collider_upper,
-                absorption_rate=2000.0,
+                absorption_rate=4000.0,
                 absorption_capacity_fraction=1.0,
                 pbd_entity_name=wipe.collider_entity_name,
             )
