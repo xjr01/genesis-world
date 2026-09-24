@@ -1,19 +1,12 @@
+import io
 import math
 import os
 
 import numpy as np
+import torch
 
-import igl
-import pytest
-import trimesh
-
-import quadrants as qd
-
-import genesis as gs
-import genesis.utils.geom as geom_utils
-import genesis.utils.mesh as mesh_utils
-import genesis.utils.particle as particle_utils
 from examples.teapot.pbstf_surface_tension import (
+    CASES,
     CASE_BOUNCE,
     CASE_CONE,
     CASE_MERGE,
@@ -21,7 +14,6 @@ from examples.teapot.pbstf_surface_tension import (
     CASE_SWEEP,
     CASE_TAP,
     CASE_TEAPOT,
-    CASES,
     build_scene,
     case_settings,
     get_wipe_settings,
@@ -31,6 +23,14 @@ from examples.teapot.pbstf_surface_tension import (
     update_wipe_case,
     wipe_pose,
 )
+import igl
+import pytest
+from tests.utils import assert_allclose, assert_equal
+import trimesh
+
+import quadrants as qd
+
+import genesis as gs
 from genesis.engine.boundaries import (
     AbsorbentBoxStaticCollider,
     BoxStaticCollider,
@@ -44,8 +44,10 @@ from genesis.engine.boundaries import (
     static_collider_separates,
 )
 from genesis.utils.element import create_tetrahedral_grid
+import genesis.utils.geom as geom_utils
+import genesis.utils.mesh as mesh_utils
 from genesis.utils.misc import qd_to_numpy, tensor_to_array
-from tests.utils import assert_allclose, assert_equal
+import genesis.utils.particle as particle_utils
 
 
 @pytest.mark.required
@@ -876,19 +878,19 @@ def test_case_settings():
     assert_equal(mop_settings.static_colliders[1].upper, sweep_settings.static_colliders[1].upper)
     assert_equal(mop_settings.static_colliders[1].pos, sweep_settings.static_colliders[1].pos)
     assert_equal(mop_settings.static_colliders[1].quat, sweep_settings.static_colliders[1].quat)
-    assert_equal(mop_settings.static_colliders[1].absorption_rate, 2000.0)
+    assert_equal(mop_settings.static_colliders[1].absorption_rate, 4000.0)
     assert_equal(mop_settings.static_colliders[1].absorption_capacity_fraction, 1.0)
     assert mop_settings.static_colliders[1].pbd_entity_name == mop.collider_entity_name
     assert mop_settings.static_colliders[1].sdf_res is None
     assert mop.mop_manipulator.asset == "urdf/panda_bullet/panda.urdf"
     assert mop.mop_manipulator.is_visible
-    assert_equal(mop.mop_manipulator.sponge_grid_resolution, (15, 10, 30))
+    assert_equal(mop.mop_manipulator.sponge_grid_resolution, (10, 7, 20))
     assert_equal(mop.mop_manipulator.sponge_density, 30.0)
     assert_equal(mop.mop_manipulator.scale, 1.0)
     assert_equal(mop.mop_manipulator.finger_open_qpos, 0.04)
     assert mop.table_entity_name == "wipe_table"
     assert_equal(mop.mop_manipulator.tool_center_point, (0.0, 0.0, 3.02 / 15.0))
-    assert_equal(mop.mop_manipulator.finger_closed_qpos, 0.4 / 15.0)
+    assert_equal(mop.mop_manipulator.finger_closed_qpos, 0.036)
     for time in (0.0, mop.settle_time, mop.settle_time + 0.5 * mop.wipe_time, 20.0):
         assert_equal(wipe_pose(time, mop), wipe_pose(time, sweep))
 
@@ -1082,7 +1084,7 @@ def test_mop_sponge_full_simulation_and_collision(n_envs, show_viewer):
     assert_equal(liquid_entity.material.surface_tension_compliance, 1.0 / 225.0)
     assert_equal(liquid_entity.material.surface_distance_compliance, 40.0)
     assert_equal(liquid_entity.material.interior_distance_compliance, 180.0)
-    assert_equal(liquid_entity.material.collider_adhesion_compliance, 20.0)
+    assert_equal(liquid_entity.material.collider_adhesion_compliance, 50.0)
     sponge_x = sponge_init_positions[:, 0]
     sponge_y = sponge_init_positions[:, 1]
     finger_contact_mask = np.isclose(sponge_y, sponge_y.max())
@@ -1251,6 +1253,7 @@ def test_emitter_build_emit_and_wrap(n_envs, show_viewer):
     emitter = scene.add_emitter(
         material=gs.materials.PBSTF.Liquid(
             sampler="regular",
+            c_init=0.75,
         ),
         max_particles=20,
     )
@@ -1266,6 +1269,7 @@ def test_emitter_build_emit_and_wrap(n_envs, show_viewer):
         generation_speed=200.0,
     )
     assert emitter.next_particle == 9
+    emitter.entity.set_particles_concentration(0.1)
     emitter.emit(
         droplet_shape="circle",
         droplet_size=0.8,
@@ -1280,6 +1284,7 @@ def test_emitter_build_emit_and_wrap(n_envs, show_viewer):
     assert emitter.next_particle == 12
     assert (active.sum(axis=-1) == 12).all()
     assert_allclose(velocities[active], (0.0, -0.5, 0.0), atol=1e-6)
+    assert_allclose(tensor_to_array(emitter.entity.get_particles_concentration())[active], 0.75, atol=1e-7)
     expected_mass = emitter.entity.material.rho * emitter.entity.particle_size**3 / math.sqrt(2.0)
     assert_allclose(tensor_to_array(emitter.entity.get_mass()) / active.sum(axis=-1), expected_mass, rtol=1e-3)
 
@@ -1291,6 +1296,122 @@ def test_emitter_build_emit_and_wrap(n_envs, show_viewer):
     scene.reset()
     assert emitter.next_particle == 0
     assert not tensor_to_array(emitter.entity.get_particles_active()).any()
+    assert_allclose(emitter.entity.get_particles_concentration(), 0.75, atol=1e-7)
+
+
+@pytest.mark.required
+@pytest.mark.parametrize("backend", [gs.cuda])
+@pytest.mark.parametrize("n_envs", [0, 2])
+@pytest.mark.parametrize("diffusion_coeff", [0.0, 0.005])
+def test_concentration_transport(n_envs, diffusion_coeff, show_viewer):
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=0.001,
+            gravity=(0.0, 0.0, 0.0),
+        ),
+        pbd_options=gs.options.PBDOptions(
+            particle_size=0.06,
+            lower_bound=(-0.5, -0.5, 0.0),
+            upper_bound=(0.5, 2.0, 0.8),
+            diffusion_coeff=diffusion_coeff,
+            is_surface_tension_enabled=True,
+        ),
+        ipbf_options=gs.options.IPBFOptions(
+            particle_size=0.06,
+            lower_bound=(-0.5, -0.5, 0.0),
+            upper_bound=(0.5, 2.0, 0.8),
+            has_boundary_particles=False,
+            diffusion_coeff=diffusion_coeff,
+            is_surface_tension_enabled=True,
+        ),
+        pbstf_options=gs.options.PBSTFOptions(
+            diffusion_coeff=diffusion_coeff,
+            particle_size=0.06,
+            max_solver_iterations=2,
+            lower_bound=(-0.5, -0.5, 0.0),
+            upper_bound=(0.5, 2.0, 0.8),
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(2.0, 2.5, 2.0),
+            camera_lookat=(0.0, 0.7, 0.3),
+        ),
+        show_viewer=show_viewer,
+    )
+    liquids = []
+    for index, material_type in enumerate(
+        (gs.materials.PBD.Liquid, gs.materials.IPBF.Liquid, gs.materials.PBSTF.Liquid)
+    ):
+        pair = []
+        for x, c_init in ((-0.08, 1.0), (0.08, None)):
+            material = material_type(sampler="regular", c_init=0.0 if c_init is None else c_init)
+            if isinstance(material, (gs.materials.PBD.Liquid, gs.materials.PBSTF.Liquid)):
+                material = material_type(sampler="regular", c_init=c_init, c_init_z_mid=0.3)
+            pair.append(
+                scene.add_entity(
+                    morph=gs.morphs.Box(
+                        pos=(x, index * 0.7, 0.3),
+                        size=(0.12, 0.12, 0.12),
+                    ),
+                    material=material,
+                )
+            )
+        liquids.append(pair)
+    scene.build(n_envs=n_envs)
+    initial_state = scene.get_state()
+    initial = []
+    for pair in liquids:
+        assert_equal(pair[0].get_particles_concentration(), 1.0)
+        for entity in pair:
+            if (
+                isinstance(entity.material, (gs.materials.PBD.Liquid, gs.materials.PBSTF.Liquid))
+                and entity.material.c_init is None
+            ):
+                expected = tensor_to_array(entity.get_particles_pos())[..., 2] < 0.3
+                assert_equal(entity.get_particles_concentration(), expected)
+            entity.set_particles_pos(entity.get_particles_pos().flip(dims=(-2,)))
+            entity.set_particles_vel((0.2, 0.0, 0.0))
+        initial.append(
+            np.concatenate([tensor_to_array(entity.get_particles_concentration()) for entity in pair], axis=-1)
+        )
+    for _ in range(3):
+        scene.step()
+    for pair, concentrations_initial in zip(liquids, initial):
+        concentrations = np.concatenate(
+            [tensor_to_array(entity.get_particles_concentration()) for entity in pair], axis=-1
+        )
+        assert_allclose(concentrations.sum(axis=-1), concentrations_initial.sum(axis=-1), rtol=2e-6, atol=1e-6)
+        assert ((concentrations >= 0.0) & (concentrations <= 1.0)).all()
+        if diffusion_coeff:
+            assert (concentrations.var(axis=-1) < concentrations_initial.var(axis=-1)).all()
+        else:
+            assert_equal(concentrations, concentrations_initial)
+    state = scene.get_state()
+    state.serializable()
+    with io.BytesIO() as buffer:
+        torch.save(state, buffer)
+        buffer.seek(0)
+        state = torch.load(buffer, weights_only=False)
+    concentrations_saved = [entity.get_particles_concentration() for pair in liquids for entity in pair]
+    for pair in liquids:
+        for entity in pair:
+            entity.set_particles_concentration(0.25)
+    scene.reset(state, envs_idx=[1] if n_envs else None)
+    for entity, saved in zip((entity for pair in liquids for entity in pair), concentrations_saved):
+        if n_envs:
+            assert_equal(entity.get_particles_concentration(envs_idx=[0]), 0.25)
+            assert_equal(entity.get_particles_concentration(envs_idx=[1]), saved[1:2])
+        else:
+            assert_equal(entity.get_particles_concentration(), saved)
+    scene.reset(initial_state)
+    for pair in liquids:
+        for entity in pair:
+            entity.set_particles_concentration(0.25)
+    scene.reset()
+    for pair, concentrations_initial in zip(liquids, initial):
+        concentrations = np.concatenate(
+            [tensor_to_array(entity.get_particles_concentration()) for entity in pair], axis=-1
+        )
+        assert_equal(concentrations, concentrations_initial)
 
 
 @pytest.mark.required
@@ -1527,7 +1648,7 @@ def test_sweep_box_pushes_water(show_viewer):
     assert liquid.n_particles == 840
     assert_equal(liquid.material.density_compliance, 33750.0)
     assert_equal(liquid.material.surface_tension_compliance, 1.0 / 225.0)
-    assert_equal(liquid.material.collider_adhesion_compliance, 20.0)
+    assert_equal(liquid.material.collider_adhesion_compliance, 50.0)
     assert liquid.material.collider_friction == 0.5
     with pytest.raises(gs.GenesisException, match="not absorbent"):
         scene.pbstf_solver.get_static_collider_wetness(1)

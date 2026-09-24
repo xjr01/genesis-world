@@ -21,7 +21,7 @@ class SimState(RBC):
             self._solvers_state.append(solver.get_state(f_local))
 
     def serializable(self):
-        self.scene = None
+        self._scene = None
 
         for solver_state in self._solvers_state:
             if solver_state is not None:
@@ -298,6 +298,7 @@ class PBSTFSolverState(_ParticleFluidSolverState):
         }
         self._static_colliders_pos = gs.zeros((scene.sim._B, solver._n_static_colliders, 3), **args)
         self._static_colliders_quat = gs.zeros((scene.sim._B, solver._n_static_colliders, 4), **args)
+        self._c = gs.zeros((scene.sim._B, solver.n_particles), **args)
         self._deformable_static_colliders_surface_vertices = None
         self._deformable_static_colliders_voxel_positions = None
         self._deformable_static_colliders_voxel_search_order = None
@@ -340,6 +341,7 @@ class PBSTFSolverState(_ParticleFluidSolverState):
         super().serializable()
         self._static_colliders_pos = self._static_colliders_pos.detach()
         self._static_colliders_quat = self._static_colliders_quat.detach()
+        self._c = self._c.detach()
         if self._deformable_static_colliders_surface_vertices is not None:
             self._deformable_static_colliders_surface_vertices = (
                 self._deformable_static_colliders_surface_vertices.detach()
@@ -351,9 +353,7 @@ class PBSTFSolverState(_ParticleFluidSolverState):
                 self._deformable_static_colliders_voxel_search_order.detach()
             )
         if self._is_deformable_static_colliders_sdf_active is not None:
-            self._is_deformable_static_colliders_sdf_active = (
-                self._is_deformable_static_colliders_sdf_active.detach()
-            )
+            self._is_deformable_static_colliders_sdf_active = self._is_deformable_static_colliders_sdf_active.detach()
         if self._absorbed_collider_idx is not None:
             self._absorbed_collider_idx = self._absorbed_collider_idx.detach()
             self._absorbed_voxel_idx = self._absorbed_voxel_idx.detach()
@@ -370,6 +370,10 @@ class PBSTFSolverState(_ParticleFluidSolverState):
     @property
     def static_colliders_quat(self):
         return self._static_colliders_quat
+
+    @property
+    def c(self):
+        return self._c
 
     @property
     def deformable_static_colliders_surface_vertices(self):
@@ -418,7 +422,10 @@ class PBSTFSolverState(_ParticleFluidSolverState):
 
 class PBDSolverState:
     """
-    Dynamic state queried from a PBDSolver.
+    Dynamic entity state queried from a PBDSolver.
+
+    Solver-owned boundary balls are reconstructed from their local geometry and set poses, so
+    they are deliberately excluded from Scene snapshots.
     """
 
     def __init__(self, scene):
@@ -428,11 +435,18 @@ class PBDSolverState:
             "requires_grad": scene.requires_grad,
             "scene": self._scene,
         }
-        self._pos = gs.zeros((scene.sim._B, scene.sim.pbd_solver.n_particles, 3), **args)
-        self._vel = gs.zeros((self._scene.sim._B, scene.sim.pbd_solver.n_particles, 3), **args)
+        n_entity_particles = sum(entity.n_particles for entity in scene.sim.pbd_solver.entities)
+        self._pos = gs.zeros((scene.sim._B, n_entity_particles, 3), **args)
+        self._vel = gs.zeros((self._scene.sim._B, n_entity_particles, 3), **args)
         args["dtype"] = gs.tc_bool
         args["requires_grad"] = False
-        self._free = gs.zeros((self._scene.sim._B, scene.sim.pbd_solver.n_particles), **args)
+        self._free = gs.zeros((self._scene.sim._B, n_entity_particles), **args)
+
+    def serializable(self):
+        self._scene = None
+        self._pos = self._pos.detach()
+        self._vel = self._vel.detach()
+        self._free = self._free.detach()
 
     @property
     def scene(self):
@@ -487,3 +501,54 @@ class FEMSolverState:
     @property
     def active(self):
         return self._active
+
+
+class IPBFSolverState(_ParticleFluidSolverState):
+    """Dynamic state of an implicit position-based fluid solver."""
+
+    def __init__(self, scene):
+        super().__init__(scene, scene.sim.ipbf_solver)
+        self._c = gs.zeros((scene.sim._B, scene.sim.ipbf_solver.n_particles), dtype=gs.tc_float, scene=scene)
+        self._boundary_group = gs.zeros(self._active.shape, dtype=gs.tc_int, scene=scene)
+
+    @property
+    def c(self):
+        return self._c
+
+    @property
+    def boundary_group(self):
+        return self._boundary_group
+
+    def serializable(self):
+        super().serializable()
+        self._c = self._c.detach()
+        self._boundary_group = self._boundary_group.detach()
+
+
+class PBDFluidSolverState(PBDSolverState):
+    """Particle liquid state including concentrations, activation and container membership."""
+
+    def __init__(self, scene):
+        super().__init__(scene)
+        shape = self.free.shape
+        self._c = gs.zeros(shape, dtype=gs.tc_float, scene=scene)
+        self._active = gs.zeros(shape, dtype=gs.tc_bool, scene=scene)
+        self._boundary_group = gs.zeros(shape, dtype=gs.tc_int, scene=scene)
+
+    def serializable(self):
+        super().serializable()
+        self._c = self._c.detach()
+        self._active = self._active.detach()
+        self._boundary_group = self._boundary_group.detach()
+
+    @property
+    def c(self):
+        return self._c
+
+    @property
+    def active(self):
+        return self._active
+
+    @property
+    def boundary_group(self):
+        return self._boundary_group

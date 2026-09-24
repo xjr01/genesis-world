@@ -1,8 +1,8 @@
 import quadrants as qd
 
 import genesis as gs
-import genesis.utils.geom as gu
 from genesis.engine.boundaries import query_static_collider
+import genesis.utils.geom as gu
 
 
 @qd.func
@@ -101,9 +101,7 @@ def kernel_set_deformable_collider_sdf(
     sdf_inv_cell_size: qd.types.ndarray(),
     collider: qd.template(),
 ):
-    for x, y, z, env_idx_local in qd.ndrange(
-        collider.sdf_res, collider.sdf_res, collider.sdf_res, envs_idx.shape[0]
-    ):
+    for x, y, z, env_idx_local in qd.ndrange(collider.sdf_res, collider.sdf_res, collider.sdf_res, envs_idx.shape[0]):
         collider.sdf[x, y, z, envs_idx[env_idx_local]] = sdf[env_idx_local, x, y, z]
     for env_idx_local in range(envs_idx.shape[0]):
         env_idx = envs_idx[env_idx_local]
@@ -146,9 +144,7 @@ def kernel_get_deformable_collider_geometry(
         collider.n_voxels, collider.n_voxels, collider.voxel_search_order.shape[2]
     ):
         state_idx = voxel_search_order_state_start + origin_voxel_idx * collider.n_voxels + search_idx
-        voxel_search_order[env_idx, state_idx] = collider.voxel_search_order[
-            origin_voxel_idx, search_idx, env_idx
-        ]
+        voxel_search_order[env_idx, state_idx] = collider.voxel_search_order[origin_voxel_idx, search_idx, env_idx]
 
 
 @qd.kernel
@@ -385,9 +381,10 @@ def kernel_capture_particles(
                                     voxel_distance = (
                                         qd.abs(voxel_offset[0]) + qd.abs(voxel_offset[1]) + qd.abs(voxel_offset[2])
                                     )
-                                    target_local_pos = collider.lower_qd + (
-                                        origin_voxel_idx + voxel_offset + 0.5
-                                    ) * collider.voxel_size_qd
+                                    target_local_pos = (
+                                        collider.lower_qd
+                                        + (origin_voxel_idx + voxel_offset + 0.5) * collider.voxel_size_qd
+                                    )
                                     if qd.static(collider.is_deformable):
                                         yz_resolution = collider.grid_res_qd[1] * collider.grid_res_qd[2]
                                         origin_x = origin_voxel_idx_local // yz_resolution
@@ -524,6 +521,8 @@ def kernel_check_fluid_state(
                     and not qd.math.isnan(vel)
                     and not qd.math.isinf(vel)
                 )
+            concentration = particles[particle_idx, env_idx].c
+            is_valid = is_valid and not qd.math.isnan(concentration) and not qd.math.isinf(concentration)
             density = particles[particle_idx, env_idx].density
             is_valid = is_valid and not qd.math.isnan(density) and not qd.math.isinf(density)
             if not is_valid:

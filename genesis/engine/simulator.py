@@ -7,6 +7,7 @@ from genesis.options.morphs import Morph
 from genesis.options.solvers import (
     BaseCouplerOptions,
     FEMOptions,
+    IPBFOptions,
     IPBSTFOptions,
     IPCCouplerOptions,
     KinematicOptions,
@@ -18,8 +19,8 @@ from genesis.options.solvers import (
     RigidOptions,
     SAPCouplerOptions,
     SFOptions,
-    SimOptions,
     SPHOptions,
+    SimOptions,
     ToolOptions,
 )
 from genesis.repr_base import RBC
@@ -29,6 +30,7 @@ from .entities import HybridEntity
 from .sensors import SensorManager
 from .solvers import (
     FEMSolver,
+    IPBFSolver,
     IPBSTFSolver,
     KinematicSolver,
     MPMSolver,
@@ -79,6 +81,8 @@ class Simulator(RBC):
         An SFOptions object that contains all the options for the SFSolver.
     pbd_options : gs.PBDOptions | gs.PBDUnifiedOptions
         Selects the PBD solver and its simulation settings.
+    ipbf_options : gs.IPBFOptions
+        Options for the implicit position-based fluid (IPBF) solver.
     ipbstf_options : gs.IPBSTFOptions
         Options for the implicit position-based surface-tension fluid (IPBSTF) solver.
     pbstf_options : gs.PBSTFOptions
@@ -98,6 +102,7 @@ class Simulator(RBC):
         fem_options: FEMOptions,
         sf_options: SFOptions,
         pbd_options: PBDOptions | PBDUnifiedOptions,
+        ipbf_options: IPBFOptions,
         ipbstf_options: IPBSTFOptions,
         pbstf_options: PBSTFOptions,
     ):
@@ -114,6 +119,7 @@ class Simulator(RBC):
         self.fem_options = fem_options
         self.sf_options = sf_options
         self.pbd_options = pbd_options
+        self.ipbf_options = ipbf_options
         self.ipbstf_options = ipbstf_options
         self.pbstf_options = pbstf_options
 
@@ -138,6 +144,7 @@ class Simulator(RBC):
             if isinstance(self.pbd_options, PBDUnifiedOptions)
             else PBDSolver(self.scene, self, self.pbd_options)
         )
+        self.ipbf_solver = IPBFSolver(self.scene, self, self.ipbf_options)
         self.ipbstf_solver = IPBSTFSolver(self.scene, self, self.ipbstf_options)
         self.pbstf_solver = PBSTFSolver(self.scene, self, self.pbstf_options)
         self.fem_solver = FEMSolver(self.scene, self, self.fem_options)
@@ -151,6 +158,7 @@ class Simulator(RBC):
                 self.mpm_solver,
                 self.sph_solver,
                 self.pbd_solver,
+                self.ipbf_solver,
                 self.ipbstf_solver,
                 self.pbstf_solver,
                 self.fem_solver,
@@ -198,6 +206,8 @@ class Simulator(RBC):
             entity = self.sph_solver.add_entity(self.n_entities, material, morph, surface, name=name)
         elif isinstance(material, gs.materials.PBD.Base):
             entity = self.pbd_solver.add_entity(self.n_entities, material, morph, surface, name=name)
+        elif isinstance(material, gs.materials.IPBF.Base):
+            entity = self.ipbf_solver.add_entity(self.n_entities, material, morph, surface, name=name)
         elif isinstance(material, gs.materials.IPBSTF.Base):
             entity = self.ipbstf_solver.add_entity(self.n_entities, material, morph, surface, name=name)
         elif isinstance(material, gs.materials.PBSTF.Base):
@@ -304,6 +314,8 @@ class Simulator(RBC):
             self.rigid_solver.check_errno()
         if self.ipbstf_solver.is_active and self._cur_substep_global % RATE_CHECK_ERRNO == 0:
             self.ipbstf_solver.check_errno()
+        if self.ipbf_solver.is_active and self._cur_substep_global % RATE_CHECK_ERRNO == 0:
+            self.ipbf_solver.check_errno()
         if self.pbstf_solver.is_active and self._cur_substep_global % RATE_CHECK_ERRNO == 0:
             self.pbstf_solver.check_errno()
 

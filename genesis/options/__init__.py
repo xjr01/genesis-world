@@ -3,6 +3,7 @@ from .profiling import ProfilingOptions
 from .solvers import (
     BaseCouplerOptions,
     FEMOptions,
+    IPBFOptions,
     IPBSTFOptions,
     IPCCouplerOptions,
     KinematicOptions,
@@ -20,8 +21,8 @@ from .solvers import (
     RigidOptions,
     SAPCouplerOptions,
     SFOptions,
-    SimOptions,
     SPHOptions,
+    SimOptions,
     ToolOptions,
 )
 from .vis import ViewerOptions, VisOptions
@@ -31,6 +32,7 @@ __all__ = [
     "CoacdOptions",
     "FEMOptions",
     "FoamOptions",
+    "IPBFOptions",
     "IPBSTFOptions",
     "IPCCouplerOptions",
     "KinematicOptions",

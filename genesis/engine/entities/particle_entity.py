@@ -2,16 +2,19 @@ import functools
 from pathlib import Path
 
 import numpy as np
-import quadrants as qd
 import torch
+
 import trimesh
 
+import quadrants as qd
+
 import genesis as gs
+from genesis.engine.entities.particle_concentration import kernel_get_concentration, kernel_set_concentration
+from genesis.engine.states.cache import QueriedStates
 import genesis.utils.geom as gu
 import genesis.utils.mesh as mu
+from genesis.utils.misc import broadcast_tensor, qd_to_torch, to_gs_tensor
 import genesis.utils.particle as pu
-from genesis.engine.states.cache import QueriedStates
-from genesis.utils.misc import to_gs_tensor, broadcast_tensor
 
 from .base_entity import Entity
 
@@ -56,6 +59,43 @@ class ParticleEntity(Entity):
     need_skinning : bool, default=True
         Whether to enable skinning for rendering this entity's mesh.
     """
+
+    @gs.assert_built
+    def get_particles_concentration(self, envs_idx=None):
+        """Return passive liquid concentrations, with shape [B, N] or [N] for an unbatched scene."""
+        if not isinstance(
+            self.material, (gs.materials.PBD.Liquid, gs.materials.PBSTF.Liquid, gs.materials.IPBF.Liquid)
+        ):
+            gs.raise_exception("Concentration requires a PBD, PBSTF, or IPBF liquid material.")
+        envs_idx = self.scene._sanitize_envs_idx(envs_idx)
+        concentrations = self._sanitize_particles_tensor(None, gs.tc_float, None, envs_idx)
+        if gs.use_zerocopy:
+            concentrations[:] = qd_to_torch(self.solver.particles.c, transpose=True)[
+                envs_idx, self.particle_start : self.particle_end
+            ]
+        else:
+            kernel_get_concentration(envs_idx, self.particle_start, concentrations, self.solver.particles)
+        return concentrations if self.scene.n_envs else concentrations[0]
+
+    @gs.assert_built
+    def set_particles_concentration(self, concentrations, particles_idx_local=None, envs_idx=None):
+        """Set passive liquid concentrations in [0, 1]; scalar inputs broadcast across selected particles."""
+        if not isinstance(
+            self.material, (gs.materials.PBD.Liquid, gs.materials.PBSTF.Liquid, gs.materials.IPBF.Liquid)
+        ):
+            gs.raise_exception("Concentration requires a PBD, PBSTF, or IPBF liquid material.")
+        envs_idx = self.scene._sanitize_envs_idx(envs_idx)
+        particles_idx = self._sanitize_particles_idx_local(particles_idx_local, envs_idx) + self.particle_start
+        concentrations = self._sanitize_particles_tensor(concentrations, gs.tc_float, particles_idx, envs_idx)
+        if not ((concentrations >= 0.0) & (concentrations <= 1.0)).all():
+            gs.raise_exception("Concentrations must be finite and between zero and one.")
+        if gs.use_zerocopy:
+            concentrations_t = qd_to_torch(self.solver.particles.c, transpose=True, copy=False)
+            concentrations_t[envs_idx[:, None], particles_idx] = concentrations
+            if gs.backend == gs.metal:
+                torch.mps.synchronize()
+        else:
+            kernel_set_concentration(particles_idx, envs_idx, concentrations, self.solver.particles)
 
     def __init__(
         self,

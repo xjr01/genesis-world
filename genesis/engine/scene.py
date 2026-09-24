@@ -3,8 +3,8 @@ import os
 import pickle
 import sys
 import time
+from typing import Callable, Iterable, Literal, TYPE_CHECKING, overload
 import weakref
-from typing import TYPE_CHECKING, Callable, Iterable, Literal, overload
 
 import numpy as np
 import torch
@@ -12,17 +12,15 @@ import torch
 import trimesh
 
 import quadrants as qd
-from quadrants.lang import impl
 
 import genesis as gs
-import genesis.utils.geom as gu
-import genesis.utils.mesh as mu
 from genesis.engine.force_fields import ForceField
 from genesis.engine.materials.base import EntityT, Material
 from genesis.engine.states.solvers import SimState
 from genesis.options import (
     BaseCouplerOptions,
     FEMOptions,
+    IPBFOptions,
     IPBSTFOptions,
     KinematicOptions,
     LegacyCouplerOptions,
@@ -33,8 +31,8 @@ from genesis.options import (
     ProfilingOptions,
     RigidOptions,
     SFOptions,
-    SimOptions,
     SPHOptions,
+    SimOptions,
     ToolOptions,
     ViewerOptions,
     VisOptions,
@@ -45,6 +43,8 @@ from genesis.options.renderers import Rasterizer, RendererOptions
 from genesis.options.surfaces import Surface
 from genesis.recorders import RecorderManager
 from genesis.repr_base import RBC
+import genesis.utils.geom as gu
+import genesis.utils.mesh as mu
 from genesis.utils.misc import sanitize_index, tensor_to_array
 from genesis.utils.tools import FPSTracker
 from genesis.utils.warnings import warn_once
@@ -84,6 +84,8 @@ class Scene(RBC):
         The options configuring the sf_solver (``scene.sim.SFSolver``).
     pbd_options : gs.options.PBDOptions
         The options configuring the pbd_solver (``scene.sim.PBDSolver``).
+    ipbf_options : gs.options.IPBFOptions
+        Options for the implicit position-based fluid (IPBF) solver.
     ipbstf_options : gs.options.IPBSTFOptions
         The options configuring the implicit position-based surface-tension fluid (IPBSTF) solver.
     pbstf_options : gs.options.PBSTFOptions
@@ -112,6 +114,7 @@ class Scene(RBC):
         fem_options: FEMOptions | None = None,
         sf_options: SFOptions | None = None,
         pbd_options: PBDOptions | PBDUnifiedOptions | None = None,
+        ipbf_options: IPBFOptions | None = None,
         ipbstf_options: IPBSTFOptions | None = None,
         pbstf_options: PBSTFOptions | None = None,
         vis_options: VisOptions | None = None,
@@ -135,6 +138,7 @@ class Scene(RBC):
         fem_options = fem_options or FEMOptions()
         sf_options = sf_options or SFOptions()
         pbd_options = pbd_options or PBDOptions()
+        ipbf_options = ipbf_options or IPBFOptions()
         ipbstf_options = ipbstf_options or IPBSTFOptions()
         pbstf_options = pbstf_options or PBSTFOptions()
         vis_options = vis_options or VisOptions()
@@ -158,6 +162,7 @@ class Scene(RBC):
             fem_options,
             sf_options,
             pbd_options,
+            ipbf_options,
             ipbstf_options,
             pbstf_options,
             vis_options,
@@ -176,6 +181,7 @@ class Scene(RBC):
         self.fem_options = fem_options.model_copy_from(sim_options)
         self.sf_options = sf_options.model_copy_from(sim_options)
         self.pbd_options = pbd_options.model_copy_from(sim_options)
+        self.ipbf_options = ipbf_options.model_copy_from(sim_options)
         self.ipbstf_options = ipbstf_options.model_copy_from(sim_options)
         self.pbstf_options = pbstf_options.model_copy_from(sim_options)
         self.profiling_options = profiling_options
@@ -197,6 +203,7 @@ class Scene(RBC):
             fem_options=self.fem_options,
             sf_options=self.sf_options,
             pbd_options=self.pbd_options,
+            ipbf_options=self.ipbf_options,
             ipbstf_options=self.ipbstf_options,
             pbstf_options=self.pbstf_options,
         )
@@ -241,6 +248,7 @@ class Scene(RBC):
         fem_options: FEMOptions,
         sf_options: SFOptions,
         pbd_options: PBDOptions | PBDUnifiedOptions,
+        ipbf_options: IPBFOptions,
         ipbstf_options: IPBSTFOptions,
         pbstf_options: PBSTFOptions,
         vis_options: VisOptions,
@@ -277,6 +285,9 @@ class Scene(RBC):
 
         if not isinstance(pbd_options, (PBDOptions, PBDUnifiedOptions)):
             gs.raise_exception("`pbd_options` requires `PBDOptions` or `PBDUnifiedOptions`.")
+
+        if not isinstance(ipbf_options, IPBFOptions):
+            gs.raise_exception("`ipbf_options` should be an instance of `IPBFOptions`.")
 
         if not isinstance(ipbstf_options, IPBSTFOptions):
             gs.raise_exception("`ipbstf_options` should be an instance of `IPBSTFOptions`.")
@@ -467,6 +478,7 @@ class Scene(RBC):
                 gs.materials.MPM.Sand,
                 gs.materials.MPM.Snow,
                 gs.materials.SPH.Liquid,
+                gs.materials.IPBF.Liquid,
                 gs.materials.IPBSTF.Liquid,
                 gs.materials.PBSTF.Liquid,
             ),
@@ -491,6 +503,7 @@ class Scene(RBC):
         elif isinstance(
             material,
             (
+                gs.materials.IPBF.Base,
                 gs.materials.IPBSTF.Base,
                 gs.materials.MPM.Base,
                 gs.materials.PBD.Base,
@@ -875,6 +888,7 @@ class Scene(RBC):
                 gs.materials.SPH.Base,
                 gs.materials.PBD.Particle,
                 gs.materials.PBD.Liquid,
+                gs.materials.IPBF.Base,
                 gs.materials.IPBSTF.Base,
                 gs.materials.PBSTF.Base,
             ),
@@ -1838,6 +1852,11 @@ class Scene(RBC):
     def pbd_solver(self):
         """The scene's `pbd_solver`, managing all the `PBDEntity` in the scene."""
         return self._sim.pbd_solver
+
+    @property
+    def ipbf_solver(self):
+        """Implicit position-based fluid solver."""
+        return self._sim.ipbf_solver
 
     @property
     def ipbstf_solver(self):

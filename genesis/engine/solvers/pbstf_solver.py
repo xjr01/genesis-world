@@ -1,5 +1,5 @@
-import math
 from dataclasses import dataclass
+import math
 
 import numpy as np
 import torch
@@ -7,7 +7,6 @@ import torch
 import quadrants as qd
 
 import genesis as gs
-import genesis.utils.geom as gu
 from genesis.engine.boundaries import (
     AbsorbentStaticCollider,
     CubeBoundary,
@@ -25,7 +24,8 @@ from genesis.engine.entities import PBD3DEntity, PBSTFEntity
 from genesis.engine.states.solvers import PBSTFSolverState
 from genesis.options.solvers import PBDUnifiedOptions
 from genesis.utils import particle
-from genesis.utils.array_class import ErrorCode
+from genesis.utils.array_class import ErrorCode, V_ANNOTATION
+import genesis.utils.geom as gu
 from genesis.utils.misc import (
     assign_indexed_tensor,
     broadcast_tensor,
@@ -110,6 +110,9 @@ class PBSTFSolver(Solver):
         self._max_surface_neighbors = options.max_surface_neighbors
         self._max_localmesh_neighbors = options.max_localmesh_neighbors
         self._enable_pca_normals = options.enable_pca_normals
+        self._diffusion_coeff = options.diffusion_coeff
+        # particle volume weighting the diffusion kernel; refined by the mass calibration in build()
+        self._particle_volume = options.particle_size**3
         self._static_colliders = tuple(
             create_static_collider(collider_options) for collider_options in options.static_colliders
         )
@@ -282,6 +285,7 @@ class PBSTFSolver(Solver):
                 gs.raise_exception("PBSTF particle mass calibration requires a positive reference density.")
             self._default_mass = float(self._material.rho / max_density)
             self._kernel_set_particle_mass(self._default_mass)
+            self._particle_volume = self._default_mass / self._material.rho
             self._kernel_reorder_particles(0)
             self._update_deformable_collider_particle_cache()
             self._kernel_compute_density(0)
@@ -550,10 +554,12 @@ class PBSTFSolver(Solver):
             lmd=gs.qd_float,
             grad_i=gs.qd_vec3,
             surface=gs.qd_bool,
+            c=gs.qd_float,  # concentration (multiflow demo: 0=water, 1=coffee)
+            dc=gs.qd_float,  # Jacobi buffer for the concentration diffusion pass
         )
         particle_state_ng = qd.types.struct(reordered_idx=gs.qd_int, active=gs.qd_bool)
         particle_info = qd.types.struct(mass=gs.qd_float, rho_rest=gs.qd_float)
-        particle_render = qd.types.struct(pos=gs.qd_vec3, vel=gs.qd_vec3, active=gs.qd_bool)
+        particle_render = qd.types.struct(pos=gs.qd_vec3, vel=gs.qd_vec3, active=gs.qd_bool, c=gs.qd_float)
 
         shape = (self._n_particles, self._B)
         self.particles = particle_state.field(shape=shape, layout=qd.Layout.SOA)
@@ -1775,6 +1781,14 @@ class PBSTFSolver(Solver):
                 )
                 self.particles_reordered[i, i_b].pos = self._project_out_static_colliders(i_b, pos)
 
+    @qd.func
+    def _task_diffusion(self, i, j, result: qd.template(), i_b):
+        if not self._is_particle_absorbed_reordered(j, i_b):
+            distance = (self.particles_reordered[i, i_b].pos - self.particles_reordered[j, i_b].pos).norm()
+            result += (self.particles_reordered[j, i_b].c - self.particles_reordered[i, i_b].c) * self.cubic_kernel(
+                distance
+            )
+
     # ------------------------------------------------------------------
     # Stepping
     # ------------------------------------------------------------------
@@ -1875,6 +1889,8 @@ class PBSTFSolver(Solver):
         self._kernel_compute_density(f)
         self._kernel_compute_viscosity()
         self._kernel_apply_viscosity()
+        if self._diffusion_coeff > 0.0:
+            kernel_solve_diffusion(f, self)
         if self._n_absorbent_static_colliders > 0:
             self._capture_absorbent_contacts()
             self._rebuild_absorption_fields(self._absorption_particles_reordered)
@@ -1934,7 +1950,7 @@ class PBSTFSolver(Solver):
         if self.is_active:
             envs_idx = self._scene._sanitize_envs_idx(envs_idx)
             pbstf_absorption.kernel_clear_errno(envs_idx, self._errno)
-            self._kernel_set_state(f, envs_idx, state.pos, state.vel, state.active)
+            self._kernel_set_state(f, envs_idx, state.pos, state.vel, state.active, state.c)
             if self._n_static_colliders > 0:
                 pbstf_absorption.kernel_set_static_colliders_pose(
                     self._n_static_colliders,
@@ -2001,6 +2017,7 @@ class PBSTFSolver(Solver):
         pos: qd.types.ndarray(),
         vel: qd.types.ndarray(),
         active: qd.types.ndarray(),
+        c: qd.types.ndarray(),
     ):
         for i, i_b_local in qd.ndrange(self._n_particles, envs_idx.shape[0]):
             i_b = envs_idx[i_b_local]
@@ -2008,12 +2025,13 @@ class PBSTFSolver(Solver):
                 self.particles[i, i_b].pos[axis] = pos[i_b, i, axis]
                 self.particles[i, i_b].vel[axis] = vel[i_b, i, axis]
             self.particles_ng[i, i_b].active = active[i_b, i]
+            self.particles[i, i_b].c = c[i_b, i]
 
     def get_state(self, f):
         if not self.is_active:
             return None
         state = PBSTFSolverState(self.scene)
-        self._kernel_get_state(f, state.pos, state.vel, state.active)
+        self._kernel_get_state(f, state.pos, state.vel, state.active, state.c)
         if self._n_static_colliders > 0:
             pbstf_absorption.kernel_get_static_colliders_pose(
                 self._n_static_colliders,
@@ -2070,12 +2088,14 @@ class PBSTFSolver(Solver):
         pos: qd.types.ndarray(),
         vel: qd.types.ndarray(),
         active: qd.types.ndarray(),
+        c: qd.types.ndarray(),
     ):
         for i, i_b in qd.ndrange(self._n_particles, self._B):
             for axis in qd.static(range(3)):
                 pos[i_b, i, axis] = self.particles[i, i_b].pos[axis]
                 vel[i_b, i, axis] = self.particles[i, i_b].vel[axis]
             active[i_b, i] = self.particles_ng[i, i_b].active
+            c[i_b, i] = self.particles[i, i_b].c
 
     def update_render_fields(self):
         self._kernel_update_render_fields(self.sim.cur_substep_local)
@@ -2086,6 +2106,7 @@ class PBSTFSolver(Solver):
             if self.particles_ng[i, i_b].active:
                 self.particles_render[i, i_b].pos = self.particles[i, i_b].pos
                 self.particles_render[i, i_b].vel = self.particles[i, i_b].vel
+                self.particles_render[i, i_b].c = self.particles[i, i_b].c
             else:
                 self.particles_render[i, i_b].pos = gu.qd_nowhere()
             self.particles_render[i, i_b].active = self.particles_ng[i, i_b].active
@@ -2098,6 +2119,7 @@ class PBSTFSolver(Solver):
         particle_start: qd.i32,
         n_particles: qd.i32,
         rho_rest: qd.f32,
+        c_init: qd.types.ndarray(),
         pos: qd.types.ndarray(),
     ):
         for i_, i_b in qd.ndrange(n_particles, self._B):
@@ -2108,6 +2130,8 @@ class PBSTFSolver(Solver):
             self.particles[i, i_b].ipos = self.particles[i, i_b].pos
             self.particles[i, i_b].vel = qd.Vector.zero(gs.qd_float, 3)
             self.particles[i, i_b].surface = False
+            self.particles[i, i_b].c = c_init[i_]
+            self.particles[i, i_b].dc = 0.0
 
         for i_ in range(n_particles):
             i = i_ + particle_start
@@ -2274,3 +2298,17 @@ class PBSTFSolver(Solver):
     @property
     def lower_bound(self):
         return self._lower_bound
+
+
+@qd.kernel
+def kernel_solve_diffusion(f: int, solver: V_ANNOTATION):
+    for i, i_b in qd.ndrange(solver._n_particles, solver._B):
+        if solver.particles_ng_reordered[i, i_b].active and (not solver._is_particle_absorbed_reordered(i, i_b)):
+            dc = gs.qd_float(0.0)
+            solver.sh.for_all_neighbors(
+                i, solver.particles_reordered.pos, solver._support_radius, dc, solver._task_diffusion, i_b
+            )
+            solver.particles_reordered[i, i_b].dc = solver._diffusion_coeff * solver._particle_volume * dc
+    for i, i_b in qd.ndrange(solver._n_particles, solver._B):
+        if solver.particles_ng_reordered[i, i_b].active and (not solver._is_particle_absorbed_reordered(i, i_b)):
+            solver.particles_reordered[i, i_b].c += solver.particles_reordered[i, i_b].dc

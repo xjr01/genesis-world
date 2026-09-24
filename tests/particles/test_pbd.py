@@ -13,6 +13,82 @@ from ..utils import assert_allclose, assert_equal
 
 @pytest.mark.required
 @pytest.mark.parametrize("n_envs", [0, 2])
+def test_analytic_container_collision(n_envs, show_viewer):
+    # Binary-exact contact coordinates and timestep preserve velocity through finite differencing.
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=1.0 / 1024.0,
+            gravity=(0.0, 0.0, 0.0),
+        ),
+        pbd_options=gs.options.PBDOptions(
+            particle_size=0.04,
+            lower_bound=(-0.2, -0.2, -0.2),
+            upper_bound=(1.4, 1.6, 1.4),
+            boundary_pitcher_shell=(0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.125, 0.125),
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(3.0, -4.0, 3.0),
+            camera_lookat=(0.5, 0.5, 0.5),
+        ),
+        show_viewer=show_viewer,
+    )
+    positions = np.array(
+        [
+            (1.03125, 0.0, 0.5),
+            (1.09375, 0.0, 0.5),
+            (0.0, 0.0, -0.03125),
+            (0.0, 0.0, -0.09375),
+            (1.03125, 0.0, -0.03125),
+            (0.0, 0.0, 1.2),
+        ]
+    )
+    velocities = np.array(
+        [
+            (1.0, 0.0, 0.0),
+            (-1.0, 0.0, 0.0),
+            (0.0, 0.0, -1.0),
+            (0.0, 0.0, 1.0),
+            (1.0, 0.0, -1.0),
+            (0.0, 0.0, 0.0),
+        ]
+    )
+    expected = np.array(
+        [
+            (1.0, 0.0, 0.5),
+            (1.125, 0.0, 0.5),
+            (0.0, 0.0, 0.0),
+            (0.0, 0.0, -0.125),
+            (1.0, 0.0, 0.0),
+            (0.0, 0.0, 1.2),
+        ]
+    )
+    liquids = []
+    for pos in positions:
+        liquids.append(
+            scene.add_entity(
+                morph=gs.morphs.Box(
+                    pos=pos,
+                    size=(0.04, 0.04, 0.04),
+                ),
+                material=gs.materials.PBD.Liquid(sampler="regular"),
+            )
+        )
+    scene.build(n_envs=n_envs)
+    for is_tilted in (False, True):
+        origin = (0.0, 0.25, 0.0) if is_tilted else (0.0, 0.0, 0.0)
+        scene.pbd_solver.set_pitcher_pose(origin, axis=(0.0, 2.0, 0.0) if is_tilted else (0.0, 0.0, 1.0))
+        coordinates = (0, 2, 1) if is_tilted else (0, 1, 2)
+        for entity, pos, vel in zip(liquids, positions[:, coordinates] + origin, velocities[:, coordinates]):
+            entity.set_particles_pos(pos)
+            entity.set_particles_vel(vel)
+        scene.step()
+        for entity, pos in zip(liquids, expected[:, coordinates] + origin):
+            assert_allclose(entity.get_particles_pos(), pos, atol=2e-6)
+            assert_allclose(entity.get_particles_vel(), 0.0, atol=2e-5)
+
+
+@pytest.mark.required
+@pytest.mark.parametrize("n_envs", [0, 2])
 def test_unified_elastic_projection(n_envs, show_viewer, asset_tmp_path):
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(

@@ -1,13 +1,11 @@
-import quadrants as qd
-
 import genesis as gs
 from genesis.engine.states.entities import PBSTFEntityState
 
+from .particle_concentration import initial_concentration
 from .particle_entity import ParticleEntity
 from .sph_entity import SPHEntity
 
 
-@qd.data_oriented
 class PBSTFEntity(SPHEntity):
     """Particle entity simulated by :class:`PBSTFSolver`."""
 
@@ -18,12 +16,14 @@ class PBSTFEntity(SPHEntity):
             super().init_sampler()
 
     def _add_particles_to_solver(self):
+        c_init = initial_concentration(self._particles, self.material.c_init, self.material.c_init_z_mid)
         self._solver._kernel_add_particles(
             self._sim.cur_substep_local,
             self.active,
             self._particle_start,
             self._n_particles,
             self._material.rho,
+            c_init,
             self._particles,
         )
 
@@ -31,6 +31,7 @@ class PBSTFEntity(SPHEntity):
     def get_state(self):
         state = PBSTFEntityState(self, self.sim.cur_step_global)
         self.get_frame(self.sim.cur_substep_local, state.pos, state.vel)
+        state.c[:] = self.get_particles_concentration()
         self._queried_states.append(state)
         return state
 

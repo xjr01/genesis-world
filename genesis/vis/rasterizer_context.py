@@ -4,12 +4,12 @@ import torch
 import trimesh
 
 import genesis as gs
-import genesis.utils.geom as gu
-import genesis.utils.mesh as mu
-import genesis.utils.particle as pu
 from genesis.ext import pyrender
 from genesis.ext.pyrender.jit_render import JITRenderer
+import genesis.utils.geom as gu
+import genesis.utils.mesh as mu
 from genesis.utils.misc import qd_to_numpy, tensor_to_array
+import genesis.utils.particle as pu
 
 
 class SegmentationColorMap:
@@ -165,6 +165,7 @@ class RasterizerContext:
         self.on_mpm()
         self.on_sph()
         self.on_pbstf()
+        self.on_multifluid()
         self.on_pbd()
         self.on_fem()
 
@@ -766,8 +767,105 @@ class RasterizerContext:
                         node = self.static_nodes[(idx, sph_entity.uid)]
                         self.jit.update_buffer(node, "model", tfs.transpose((0, 2, 1)))
 
+    def on_multifluid(self):
+        for solver in (self.sim.pbstf_solver, self.sim.ipbf_solver, self.sim.pbd_solver):
+            if not solver.is_active:
+                continue
+            liquids = [
+                entity
+                for entity in solver.entities
+                if isinstance(
+                    entity.material, (gs.materials.PBD.Liquid, gs.materials.PBSTF.Liquid, gs.materials.IPBF.Liquid)
+                )
+            ]
+            if not liquids:
+                continue
+            concentrations = qd_to_numpy(solver.particles.c, self.rendered_envs_idx, transpose=True)
+            for entity in liquids:
+                if entity.surface.vis_mode == "recon":
+                    self.add_dynamic_node(entity, None)
+                elif entity.surface.vis_mode == "particle":
+                    for env_slot, idx in enumerate(self.rendered_envs_idx):
+                        if self.render_particle_as == "points":
+                            colors = pu.concentration_colors(
+                                concentrations[env_slot, entity.particle_start : entity.particle_end]
+                            )
+                            mesh = pyrender.Mesh.from_points(entity.init_particles, colors=colors)
+                        elif solver is self.sim.pbd_solver:
+                            continue
+                        else:
+                            sphere = mu.create_sphere(solver.particle_radius * self.particle_size_scale, subdivisions=1)
+                            sphere.visual = mu.surface_uvs_to_trimesh_visual(
+                                entity.surface, n_verts=len(sphere.vertices)
+                            )
+                            poses = np.tile(np.eye(4), (entity.n_particles, 1, 1))
+                            poses[:, :3, 3] = entity.init_particles
+                            mesh = pyrender.Mesh.from_trimesh(sphere, smooth=True, poses=poses)
+                        self.add_static_node(entity, mesh, i_b=idx)
+
+    def update_multifluid(self):
+        for solver in (self.sim.pbstf_solver, self.sim.ipbf_solver, self.sim.pbd_solver):
+            if not solver.is_active:
+                continue
+            liquids = [
+                entity
+                for entity in solver.entities
+                if isinstance(
+                    entity.material, (gs.materials.PBD.Liquid, gs.materials.PBSTF.Liquid, gs.materials.IPBF.Liquid)
+                )
+            ]
+            if not liquids:
+                continue
+            particles_pos = qd_to_numpy(solver.particles_render.pos, self.rendered_envs_idx, transpose=True)
+            particles_pos = particles_pos + self.scene.envs_offset[self.rendered_envs_idx, None]
+            is_active = qd_to_numpy(solver.particles_render.active, self.rendered_envs_idx, transpose=True)
+            concentrations = qd_to_numpy(solver.particles_render.c, self.rendered_envs_idx, transpose=True)
+            recon_entities = [entity for entity in liquids if entity.surface.vis_mode == "recon"]
+            for env_slot, idx in enumerate(self.rendered_envs_idx):
+                if recon_entities:
+                    spans = [slice(entity.particle_start, entity.particle_end) for entity in recon_entities]
+                    positions = np.concatenate(
+                        [particles_pos[env_slot, span][is_active[env_slot, span]] for span in spans]
+                    )
+                    values = np.concatenate(
+                        [concentrations[env_slot, span][is_active[env_slot, span]] for span in spans]
+                    )
+                    if any(
+                        isinstance(entity.material, gs.materials.IPBF.Liquid)
+                        or entity.material.c_init is not None
+                        or entity.material.c_init_z_mid is not None
+                        for entity in recon_entities
+                    ):
+                        recon = pu.particles_to_mesh_with_concentration(
+                            positions, solver.particle_radius, recon_entities[0].surface.recon_backend, values
+                        )
+                        mesh = recon.mesh
+                        mesh.visual = trimesh.visual.ColorVisuals(
+                            vertex_colors=pu.concentration_colors(recon.concentrations)
+                        )
+                    else:
+                        mesh = pu.particles_to_mesh(
+                            positions, solver.particle_radius, recon_entities[0].surface.recon_backend
+                        )
+                        mesh.visual = mu.surface_uvs_to_trimesh_visual(
+                            recon_entities[0].surface, n_verts=len(mesh.vertices)
+                        )
+                    self.add_dynamic_node(recon_entities[0], pyrender.Mesh.from_trimesh(mesh, smooth=True))
+                for entity in liquids:
+                    if entity.surface.vis_mode != "particle":
+                        continue
+                    span = slice(entity.particle_start, entity.particle_end)
+                    node = self.static_nodes[(idx, entity.uid)]
+                    if self.render_particle_as == "points":
+                        self.jit.update_buffer(node, "pos", particles_pos[env_slot, span].astype(np.float32))
+                        self.jit.update_buffer(node, "vertex", pu.concentration_colors(concentrations[env_slot, span]))
+                    elif solver is not self.sim.pbd_solver:
+                        poses = np.tile(np.eye(4), (entity.n_particles, 1, 1))
+                        poses[:, :3, 3] = particles_pos[env_slot, span]
+                        self.jit.update_buffer(node, "model", poses.transpose((0, 2, 1)))
+
     def on_pbstf(self):
-        for solver in (self.sim.pbstf_solver, self.sim.ipbstf_solver):
+        for solver in (self.sim.ipbstf_solver,):
             if not solver.is_active:
                 continue
             for entity in solver.entities:
@@ -782,7 +880,7 @@ class RasterizerContext:
                         self.add_static_node(entity, pyrender.Mesh.from_trimesh(mesh, smooth=True, poses=tfs), i_b=idx)
 
     def update_pbstf(self):
-        for solver in (self.sim.pbstf_solver, self.sim.ipbstf_solver):
+        for solver in (self.sim.ipbstf_solver,):
             if not solver.is_active:
                 continue
             particles_all = qd_to_numpy(solver.particles_render.pos, transpose=True)
@@ -819,6 +917,10 @@ class RasterizerContext:
                     + self.scene.envs_offset[self.rendered_envs_idx, None, :]
                 )
             for pbd_entity in self.sim.pbd_solver.entities:
+                if isinstance(pbd_entity.material, gs.materials.PBD.Liquid) and (
+                    pbd_entity.surface.vis_mode == "recon" or self.render_particle_as == "points"
+                ):
+                    continue
                 if pbd_entity.surface.vis_mode == "tetrahedral":
                     vertices = vertices_render[:, pbd_entity.particle_start : pbd_entity.particle_end]
                     self.add_tetrahedral_entity(pbd_entity, vertices)
@@ -897,6 +999,10 @@ class RasterizerContext:
                 + self.scene.envs_offset[self.rendered_envs_idx, None]
             )
             for pbd_entity in self.sim.pbd_solver.entities:
+                if isinstance(pbd_entity.material, gs.materials.PBD.Liquid) and (
+                    pbd_entity.surface.vis_mode == "recon" or self.render_particle_as == "points"
+                ):
+                    continue
                 for env_slot, idx in enumerate(self.rendered_envs_idx):
                     particles_env = particles_pos[env_slot]
                     particles_vel_env = particles_vel[env_slot]
@@ -1265,8 +1371,8 @@ class RasterizerContext:
         # Update current time right away
         self._t = self.scene._t
 
-        # Remove up old dynamic nodes
-        self.clear_dynamic_nodes(only_outdated=True)
+        # A forced render rebuilds the surface at the same simulation time.
+        self.clear_dynamic_nodes(only_outdated=False)
 
         # Force updating rendering-only quantities that are not updated automatically during simulation
         self.visualizer.update_visual_states(force_render)
@@ -1281,6 +1387,7 @@ class RasterizerContext:
         self.update_mpm()
         self.update_sph()
         self.update_pbstf()
+        self.update_multifluid()
         self.update_pbd()
         self.update_fem()
         self.update_sensors()

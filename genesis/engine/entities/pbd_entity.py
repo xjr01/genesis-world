@@ -7,10 +7,11 @@ import trimesh
 import quadrants as qd
 
 import genesis as gs
-import genesis.utils.geom as gu
-import genesis.utils.mesh as mu
+from genesis.engine.entities.particle_concentration import initial_concentration
 from genesis.engine.entities.particle_entity import ParticleEntity
 from genesis.options.solvers import PBDOptions, PBDUnifiedOptions
+import genesis.utils.geom as gu
+import genesis.utils.mesh as mu
 from genesis.utils.misc import broadcast_tensor
 
 
@@ -688,17 +689,27 @@ class PBDParticleEntity(PBDBaseEntity):
         )
 
     def _add_particles_to_solver(self):
+        c_init = initial_concentration(self._particles, self.material.c_init, self.material.c_init_z_mid)
         self._kernel_add_particles_to_solver(
             f=self._sim.cur_substep_local,
             particles=self._particles,
             rho=self._material.rho,
             material_type=int(self.solver.MATERIAL.LIQUID),
             active=self.active,
+            c_init=c_init,
+            boundary_group=self._material.boundary_group,
         )
 
     @qd.kernel
     def _kernel_add_particles_to_solver(
-        self, f: qd.i32, particles: qd.types.ndarray(), rho: qd.float32, material_type: qd.i32, active: qd.i32
+        self,
+        f: qd.i32,
+        particles: qd.types.ndarray(),
+        rho: qd.float32,
+        material_type: qd.i32,
+        active: qd.i32,
+        c_init: qd.types.ndarray(),
+        boundary_group: qd.i32,
     ):
         for i_p_ in range(self._n_particles):
             i_p = i_p_ + self._particle_start
@@ -719,8 +730,11 @@ class PBDParticleEntity(PBDBaseEntity):
             self.solver.particles[i_p, i_b].vel = qd.Vector.zero(gs.qd_float, 3)
             self.solver.particles[i_p, i_b].dpos = qd.Vector.zero(gs.qd_float, 3)
             self.solver.particles[i_p, i_b].free = True
+            self.solver.particles[i_p, i_b].c = c_init[i_p_]
+            self.solver.particles[i_p, i_b].dc = 0.0
 
             self.solver.particles_ng[i_p, i_b].active = qd.cast(active, gs.qd_bool)
+            self.solver.particles_ng[i_p, i_b].boundary_group = boundary_group
 
     @property
     def n_fluid_particles(self):

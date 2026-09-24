@@ -1,4 +1,5 @@
 from .fem_solver import FEMSolver
+from .ipbf_solver import IPBFSolver
 from .ipbstf import IPBSTFSolver
 from .kinematic_solver import KinematicSolver
 from .mpm_solver import MPMSolver
