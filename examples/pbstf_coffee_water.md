@@ -43,24 +43,58 @@ Their colors follow each particle's concentration during mixing. Startup and run
 frames-per-second output; numerical diagnostics are written to the metrics CSV. The viewer refresh rate is 500 Hz,
 matching the 0.002 s simulation timestep.
 
-The script generates two watertight open cup shells in a temporary asset directory. Dimensions are in meters:
-inner radius 0.04, inner height 0.10, and wall/bottom thickness 0.017. Each cup has an outer diameter of 11.4 cm,
-a total height of 11.7 cm and a nominal capacity of about 503 mL. Both liquids start 5 cm deep above the inner
-floor, halfway up the cavity. The initial cup centers are 18 cm apart. The reference mop sponge measures
-8 x 5.53 x 16 cm.
+The two glasses use the downloaded [12 oz model by Andrew Kator & Jennifer Legaz](
+../genesis/assets/meshes/drinking_glass/README.md), licensed under Creative Commons Attribution 3.0 United States.
+The asset is stored in the repository with meter coordinates. Its measured interior volume is calibrated to
+12 US fluid ounces (354.88 mL): exterior diameter 7.59 cm, exterior height 10.43 cm, wall thickness 2.69 mm and
+center bottom thickness 12.61 mm. Rendering and collisions use the same open glass mesh.
+
+Each liquid is sampled on a regular lattice inside the actual cavity, with half a particle diameter of clearance
+from the glass. Its initial surface lies halfway between the inner floor and the rim, 4.584 cm above the floor.
+At scale 750 this gives 8517 particles per cup, each liquid with mass 0.16121738 kg. The particle clearance and
+finite lattice resolution account for the difference between particle volume and geometric half-fill volume.
+The initial cup centers are 18 cm apart. A separate mesh closing the inner cavity at the rim measures the fraction
+of water particles retained in the coffee glass.
 
 The cup walls and gravity move the liquid. The motion settles for 1 s, lifts and translates the water cup,
 tilts it to 115 degrees while raising it to clear the receiving rim, then returns it by 8.5 s.
-The lift and pouring position scale with the cup height. The 17 mm shell approximates the typical wall thickness
-of the reference teapot at its configured mesh scale.
-Scene construction, physical parameters, mesh generation and cup motion are contained in the example file.
+The water glass reaches position (0.03, 0.18, 0.0) m at its maximum tilt; the existing trajectory is retained.
+Scene construction, physical parameters, particle initialization and cup motion are contained in the example file.
 
 The timestep (0.002 s), gravity, domain, 10 solver iterations, topology rebuild interval 10, neighbor capacities
-(128/64), and liquid density/compliance/viscosity/adhesion/friction settings match the current mop example. Initial
-concentrations are coffee=1 and water=0. The example selects dimensionless diffusion strength 0.005; increasing the
-step count allows further natural mixing and settling.
+(128/64), density, surface constraints, viscosity, adhesion and friction retain the mop settings. Density compliance
+is 210937.5 for the current scale-750 scene. Initial concentrations are coffee=1 and water=0. The example selects
+dimensionless diffusion strength 0.005; increasing the step count allows further natural mixing and settling.
 
-## Validation
+## Glass asset validation
+
+The current glass scene completed the default scale-750, 5000-step recorded run. Initial geometry checks confirm
+that both liquids lie inside their cavities, have the same particle count, start at concentrations 1 and 0, and
+reach half the interior height with their particle radii included. The minimum initial particle-center distance
+to glass is 1.370 mm, exceeding the 1.333 mm particle radius. Sampling 1001 cup poses gives positive vertex-to-shell
+distances between the cups and keeps both meshes within the simulation bounds.
+
+| Observable | Result |
+| --- | --- |
+| Active particles | 17034 throughout |
+| Liquid mass | 0.32243475 kg throughout |
+| Concentration sum | 8517.000 to 8517.002 |
+| Concentration variance | 0.25 initially, 0.034807045 finally |
+| Water particles in coffee glass | 89.54% finally |
+| Water particles remaining in water glass | 6.20% at the final checkpoint |
+| State values | Finite; sampled concentrations in [0, 1] |
+| Particle centers inside glass material | Zero at all seven saved checkpoints |
+
+All coffee remains in its glass at the saved checkpoints; some water splashes outside during the pour.
+The endpoint wall checks have a minimum center distance of 1.277 mm, so slight sphere overlap is possible.
+They sample saved frames rather than continuously tracing wall crossings. Initial, settled, pouring and returned
+images were inspected. A separate `--surface --record --steps 2` run passed and its reconstructed surface was inspected.
+Ruff checks and formatting pass.
+
+Logs, geometry checks, recording and checkpoint states are under `tmp/multiflow/real-glass/`. The complete video is
+`tmp/multiflow/real-glass/out/pbstf_coffee_water/pour.mp4`; surface output is under its `surface/` subdirectory.
+
+## Integration and procedural-cup validation
 
 The isolated pre-merge checkout imported its own `genesis` package. Its 42 particle tests produced 36 passes and
 6 failures. Four failures stopped at stale mop/sweep configuration assertions. The current values are absorption
@@ -87,7 +121,8 @@ floor-wall corner. Tests check projected positions and stopped inward velocity a
 floor and underside, before and after tilting the container. The incoming shell implementation fails these
 velocity assertions. Exact binary contact coordinates and timestep keep the checks robust to finite differencing.
 
-The default recorded pour with the 17 mm shell completed all 5000 steps:
+The earlier recorded pour with the procedural 17 mm shell completed all 5000 steps. These measurements describe
+that geometry:
 
 | Observable | Result |
 | --- | --- |
@@ -109,7 +144,7 @@ trajectory checks. The closest sampled center-to-wall distance also permits slig
 
 Full logs and numerical wall checks are under `tmp/multiflow/logs/`. The baseline log is `baseline-isolated.log`,
 the full pour log is `thick-cups.log`, and its independent mesh-distance check is `thick-cups-validation.log`.
-The current recording and checkpoints are under `tmp/multiflow/thick-cups/out/pbstf_coffee_water/`.
+That recording and its checkpoints are under `tmp/multiflow/thick-cups/out/pbstf_coffee_water/`.
 The geometry check in `thick-cups-geometry.log` samples 1001 cup poses within the simulation domain, with a minimum
 cup-vertex clearance of 7.16 mm between the two shells. The initial depth remains 0.05 m above each inner floor.
 The 4 mm shell's public particle-getter and surface-render checks are recorded in `lifesize-initial-final.log`;

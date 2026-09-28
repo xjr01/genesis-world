@@ -10,7 +10,6 @@ import csv
 from dataclasses import dataclass
 import math
 from pathlib import Path
-from tempfile import TemporaryDirectory
 
 import numpy as np
 
@@ -18,12 +17,13 @@ from PIL import Image
 import trimesh
 
 import genesis as gs
+import genesis.utils.mesh as mesh_utils
+import genesis.utils.particle as particle_utils
 from genesis.utils.misc import tensor_to_array
 
 
-CUP_RADIUS = 0.06
-CUP_HEIGHT = 0.20
-CUP_THICKNESS = 0.01
+CUP_ASSET = "meshes/drinking_glass/12-oz-glass.obj"
+CUP_CAVITY_ASSET = "meshes/drinking_glass/12-oz-glass-cavity.obj"
 COFFEE_CUP_POS = (-0.09, -0.045, 0.0)
 WATER_CUP_POS = (0.09, -0.045, 0.0)
 
@@ -35,30 +35,14 @@ class CoffeeWaterScene:
     water: gs.engine.entities.PBSTFEntity
     water_cup: gs.engine.entities.RigidEntity
     camera: gs.vis.camera.Camera | None
-
-
-def cup_mesh(radius, height, thickness):
-    """Create a watertight cup shell with an open mouth along positive y."""
-    profile = np.array(
-        [
-            (0.0, 0.0),
-            (radius + thickness, 0.0),
-            (radius + thickness, height + thickness),
-            (radius, height + thickness),
-            (radius, thickness),
-            (0.0, thickness),
-        ]
-    )
-    mesh = trimesh.creation.revolve(profile, sections=96)
-    mesh.apply_transform(trimesh.transformations.rotation_matrix(-math.pi / 2.0, (1.0, 0.0, 0.0)))
-    return mesh
+    cup_cavity: trimesh.Trimesh
 
 
 def water_cup_pose(time):
     """Return the water cup pose through settling, lifting, pouring and returning, in seconds."""
-    pour_x = COFFEE_CUP_POS[0] + CUP_HEIGHT + 0.5 * CUP_RADIUS
-    lift_y = COFFEE_CUP_POS[1] + 1.6 * CUP_HEIGHT
-    pour_y = COFFEE_CUP_POS[1] + 2.25 * CUP_HEIGHT
+    pour_x = COFFEE_CUP_POS[0] + 0.12
+    lift_y = COFFEE_CUP_POS[1] + 0.16
+    pour_y = COFFEE_CUP_POS[1] + 0.225
     times = np.array((0.0, 1.0, 2.0, 2.5, 5.5, 6.5, 7.5, 8.5))
     poses = np.array(
         [
@@ -80,16 +64,23 @@ def water_cup_pose(time):
     return (pose[0], pose[1], WATER_CUP_POS[2]), (math.cos(angle / 2.0), 0.0, 0.0, math.sin(angle / 2.0))
 
 
-def build_scene(asset_dir, scale=750, is_viewer_shown=False, is_recording=False, is_surface=False):
-    """Build two half-filled cups, with all dimensions in meters and the mop liquid parameters."""
+def build_scene(scale=750, is_viewer_shown=False, is_recording=False, is_surface=False):
+    """Build two glasses filled to half the cavity height, with asset coordinates in meters."""
     if scale <= 0:
         raise ValueError("Particle scale must be positive.")
     dt = 0.002
     particle_size = 2.0 / scale
-    cup_path = Path(asset_dir) / "cup.obj"
-    cup_mesh(CUP_RADIUS, CUP_HEIGHT, CUP_THICKNESS).export(cup_path)
+    cup_path = Path(gs.utils.get_assets_dir()) / CUP_ASSET
+    cup = mesh_utils.load_mesh(cup_path)
+    cup_cavity = mesh_utils.load_mesh(Path(gs.utils.get_assets_dir()) / CUP_CAVITY_ASSET)
+    liquid_top = cup_cavity.bounds[:, 1].mean()
+    particles = particle_utils.mesh_cavity_to_particles(
+        cup,
+        p_size=particle_size,
+        seed=(0.0, liquid_top - 0.5 * particle_size, 0.0),
+        max_height=liquid_top - 0.5 * particle_size,
+    )
     cup_positions = (COFFEE_CUP_POS, WATER_CUP_POS)
-    liquid_height = 0.5 * CUP_HEIGHT
     camera_pos = (0.30, 0.35, 0.60)
     camera_lookat = (0.0, 0.05, 0.0)
     colliders = [
@@ -153,16 +144,14 @@ def build_scene(asset_dir, scale=750, is_viewer_shown=False, is_recording=False,
         )
         liquids.append(
             scene.add_entity(
-                morph=gs.morphs.Cylinder(
-                    pos=(pos[0], pos[1] + CUP_THICKNESS + 0.5 * liquid_height, pos[2]),
-                    euler=(-90.0, 0.0, 0.0),
-                    height=liquid_height,
-                    radius=CUP_RADIUS - 0.5 * particle_size,
+                morph=gs.morphs.Particles(
+                    pos=pos,
+                    positions=particles,
                 ),
                 material=gs.materials.PBSTF.Liquid(
                     sampler="regular",
                     rho=1000.0,
-                    density_compliance=210937.5,
+                    density_compliance=843750.0,
                     surface_tension_compliance=1.0 / 225.0,
                     surface_distance_compliance=40.0,
                     interior_distance_compliance=180.0,
@@ -190,12 +179,12 @@ def build_scene(asset_dir, scale=750, is_viewer_shown=False, is_recording=False,
             GUI=False,
         )
     scene.build()
-    return CoffeeWaterScene(scene, liquids[0], liquids[1], cups[1], camera)
+    return CoffeeWaterScene(scene, liquids[0], liquids[1], cups[1], camera, cup_cavity)
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--scale", type=int, default=750)
+    parser.add_argument("--scale", type=int, default=1500)
     parser.add_argument("--steps", type=int, default=5000)
     parser.add_argument("--vis", dest="is_viewer_shown", action="store_true")
     parser.add_argument("--record", dest="is_recording", action="store_true")
@@ -206,68 +195,64 @@ def main():
     gs.init(backend=gs.cuda, precision="32", logging_level="info")
     output = Path("out/pbstf_coffee_water")
     output.mkdir(parents=True, exist_ok=True)
-    with TemporaryDirectory(prefix="coffee-water-") as asset_dir:
-        demo = build_scene(asset_dir, args.scale, args.is_viewer_shown, args.is_recording, args.is_surface)
-        dt = demo.scene.sim_options.dt
-        initial_mass = tensor_to_array(demo.coffee.get_mass() + demo.water.get_mass()).sum()
+    demo = build_scene(args.scale, args.is_viewer_shown, args.is_recording, args.is_surface)
+    dt = demo.scene.sim_options.dt
+    initial_mass = tensor_to_array(demo.coffee.get_mass() + demo.water.get_mass()).sum()
+    if demo.camera is not None:
+        demo.camera.start_recording(save_to_filename=str(output / "pour.mp4"), fps=50)
+    try:
+        with (output / "metrics.csv").open("w", newline="", encoding="ascii") as metrics:
+            writer = csv.writer(metrics)
+            writer.writerow(
+                ("step", "time", "active_particles", "mass_kg", "coffee_amount", "variance", "water_in_coffee_cup")
+            )
+            for step in range(args.steps):
+                pos, quat = water_cup_pose((step + 1) * dt)
+                demo.scene.pbstf_solver.set_static_colliders_pose(pos, quat, colliders_idx=[1])
+                demo.water_cup.set_pos(pos)
+                demo.water_cup.set_quat(quat)
+                demo.scene.step()
+                is_checkpoint = step in (0, 500, 1750, 2500, 3250, 4250, 4990)
+                if demo.camera is not None and step % 10 == 0:
+                    rgb, *_ = demo.camera.render()
+                    if is_checkpoint:
+                        Image.fromarray(rgb).save(output / f"stage-{step:04d}.png")
+                if (step + 1) % 100 == 0 or step + 1 == args.steps or is_checkpoint:
+                    state = demo.scene.pbstf_solver.get_state(demo.scene.sim.cur_substep_local)
+                    concentrations = tensor_to_array(state.c)
+                    positions = tensor_to_array(state.pos)
+                    velocities = tensor_to_array(state.vel)
+                    if not all(np.isfinite(values).all() for values in (positions, velocities, concentrations)):
+                        raise RuntimeError("Liquid state contains non-finite values.")
+                    mass = tensor_to_array(demo.coffee.get_mass() + demo.water.get_mass()).sum()
+                    if abs(mass - initial_mass) > initial_mass * 2e-6:
+                        raise RuntimeError("Liquid mass changed during pouring.")
+                    demo.scene.pbstf_solver.check_errno()
+                    if args.is_recording and is_checkpoint:
+                        np.savez_compressed(
+                            output / f"state-{step:04d}.npz",
+                            pos=positions,
+                            vel=velocities,
+                            c=concentrations,
+                            cup_pos=pos,
+                            cup_quat=quat,
+                        )
+                    water_pos = positions[:, demo.water.particle_start : demo.water.particle_end] - COFFEE_CUP_POS
+                    is_in_cup = demo.cup_cavity.contains(water_pos.reshape((-1, 3)))
+                    row = (
+                        step + 1,
+                        (step + 1) * dt,
+                        tensor_to_array(state.active).sum(),
+                        mass,
+                        concentrations.sum(),
+                        concentrations.var(),
+                        is_in_cup.mean(),
+                    )
+                    writer.writerow(row)
+                    metrics.flush()
+    finally:
         if demo.camera is not None:
-            demo.camera.start_recording(save_to_filename=str(output / "pour.mp4"), fps=50)
-        try:
-            with (output / "metrics.csv").open("w", newline="", encoding="ascii") as metrics:
-                writer = csv.writer(metrics)
-                writer.writerow(
-                    ("step", "time", "active_particles", "mass_kg", "coffee_amount", "variance", "water_in_coffee_cup")
-                )
-                for step in range(args.steps):
-                    pos, quat = water_cup_pose((step + 1) * dt)
-                    demo.scene.pbstf_solver.set_static_colliders_pose(pos, quat, colliders_idx=[1])
-                    demo.water_cup.set_pos(pos)
-                    demo.water_cup.set_quat(quat)
-                    demo.scene.step()
-                    is_checkpoint = step in (0, 500, 1750, 2500, 3250, 4250, 4990)
-                    if demo.camera is not None and step % 10 == 0:
-                        rgb, *_ = demo.camera.render()
-                        if is_checkpoint:
-                            Image.fromarray(rgb).save(output / f"stage-{step:04d}.png")
-                    if (step + 1) % 100 == 0 or step + 1 == args.steps or is_checkpoint:
-                        state = demo.scene.pbstf_solver.get_state(demo.scene.sim.cur_substep_local)
-                        concentrations = tensor_to_array(state.c)
-                        positions = tensor_to_array(state.pos)
-                        velocities = tensor_to_array(state.vel)
-                        if not all(np.isfinite(values).all() for values in (positions, velocities, concentrations)):
-                            raise RuntimeError("Liquid state contains non-finite values.")
-                        mass = tensor_to_array(demo.coffee.get_mass() + demo.water.get_mass()).sum()
-                        if abs(mass - initial_mass) > initial_mass * 2e-6:
-                            raise RuntimeError("Liquid mass changed during pouring.")
-                        demo.scene.pbstf_solver.check_errno()
-                        if args.is_recording and is_checkpoint:
-                            np.savez_compressed(
-                                output / f"state-{step:04d}.npz",
-                                pos=positions,
-                                vel=velocities,
-                                c=concentrations,
-                                cup_pos=pos,
-                                cup_quat=quat,
-                            )
-                        water_pos = positions[:, demo.water.particle_start : demo.water.particle_end] - COFFEE_CUP_POS
-                        is_in_cup = water_pos[..., 0] ** 2 + water_pos[..., 2] ** 2 < CUP_RADIUS**2
-                        is_in_cup &= (water_pos[..., 1] > CUP_THICKNESS) & (
-                            water_pos[..., 1] < CUP_THICKNESS + CUP_HEIGHT
-                        )
-                        row = (
-                            step + 1,
-                            (step + 1) * dt,
-                            tensor_to_array(state.active).sum(),
-                            mass,
-                            concentrations.sum(),
-                            concentrations.var(),
-                            is_in_cup.mean(),
-                        )
-                        writer.writerow(row)
-                        metrics.flush()
-        finally:
-            if demo.camera is not None:
-                demo.camera.stop_recording()
+            demo.camera.stop_recording()
 
 
 if __name__ == "__main__":
