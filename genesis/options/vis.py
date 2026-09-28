@@ -158,8 +158,8 @@ class VisOptions(Options):
         The segmentation level used for segmentation mask rendering. Should be one of ['entity', 'link', 'geom'].
         Defaults to 'link'.
     render_particle_as : str
-        Particle shape: 'sphere' gives a smooth silhouette, 'tet' uses fewer triangles, and 'points' draws
-        concentration-colored PBD, PBSTF and IPBF liquid samples with fixed screen-space size. Defaults to 'sphere'.
+        Particle shape: 'sphere' gives a smooth silhouette and supports liquid concentration colors, 'tet' uses fewer
+        triangles, and 'points' draws concentration colors at a fixed screen-space size. Defaults to 'sphere'.
     particle_size_scale : float
         Scale applied to actual particle size for rendering. Defaults to 1.0.
     contact_force_scale : float = 0.02

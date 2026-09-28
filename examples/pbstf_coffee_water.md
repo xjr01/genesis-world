@@ -20,6 +20,7 @@ From the repository root, with the `genesis-world` environment active:
 
 ```powershell
 $env:PROCESSOR_ARCHITECTURE = 'AMD64'
+$env:PYTHONIOENCODING = 'utf-8'
 $env:PYTHONPATH = (Get-Location).Path
 $env:TEMP = Join-Path (Get-Location) 'tmp/multiflow/temp'
 $env:TMP = $env:TEMP
@@ -37,10 +38,22 @@ The example defaults to CUDA, scale 750, particle diameter `2/750` m and 5000 st
 `--steps` extends the final resting phase. Running without `--vis` is headless. `--record` writes a video, stage
 images and state arrays under `out/pbstf_coffee_water/`; the metrics CSV is always written there.
 
-The script generates two watertight open cup shells in a temporary asset directory. Their walls and gravity move
-the liquid. The motion settles for 1 s, lifts and translates the water cup, tilts it to 115 degrees, then returns
-it by 8.5 s. Each cup has space for the combined liquid volume. Scene construction, physical parameters, mesh
-generation and cup motion are contained in the example file.
+Particles use physical-radius spheres with the default size scale, matching `examples/teapot/pbstf_surface_tension.py`.
+Their colors follow each particle's concentration during mixing. Startup and runtime use standard Genesis INFO and
+frames-per-second output; numerical diagnostics are written to the metrics CSV. The viewer refresh rate is 500 Hz,
+matching the 0.002 s simulation timestep.
+
+The script generates two watertight open cup shells in a temporary asset directory. Dimensions are in meters:
+inner radius 0.04, inner height 0.10, and wall/bottom thickness 0.017. Each cup has an outer diameter of 11.4 cm,
+a total height of 11.7 cm and a nominal capacity of about 503 mL. Both liquids start 5 cm deep above the inner
+floor, halfway up the cavity. The initial cup centers are 18 cm apart. The reference mop sponge measures
+8 x 5.53 x 16 cm.
+
+The cup walls and gravity move the liquid. The motion settles for 1 s, lifts and translates the water cup,
+tilts it to 115 degrees while raising it to clear the receiving rim, then returns it by 8.5 s.
+The lift and pouring position scale with the cup height. The 17 mm shell approximates the typical wall thickness
+of the reference teapot at its configured mesh scale.
+Scene construction, physical parameters, mesh generation and cup motion are contained in the example file.
 
 The timestep (0.002 s), gravity, domain, 10 solver iterations, topology rebuild interval 10, neighbor capacities
 (128/64), and liquid density/compliance/viscosity/adhesion/friction settings match the current mop example. Initial
@@ -74,24 +87,33 @@ floor-wall corner. Tests check projected positions and stopped inward velocity a
 floor and underside, before and after tilting the container. The incoming shell implementation fails these
 velocity assertions. Exact binary contact coordinates and timestep keep the checks robust to finite differencing.
 
-The default recorded pour completed all 5000 steps:
+The default recorded pour with the 17 mm shell completed all 5000 steps:
 
 | Observable | Result |
 | --- | --- |
-| Active particles | 5056 throughout |
-| Liquid mass | 0.10451473 kg throughout |
-| Concentration sum | 2528, within 0.001 |
-| Concentration variance | 0.25 initially, 0.023943026 finally |
-| Initial water particles in coffee cup | 82.87% finally |
+| Active particles | 25270 throughout |
+| Liquid mass | 0.47172147 kg throughout |
+| Concentration sum | 12635, within 0.002 |
+| Concentration variance | 0.25 initially, 0.008263529 finally |
+| Initial water particles in coffee cup | 80.06% finally |
 | State values | Finite; sampled concentrations remain in [0, 1] |
 | Cup-wall intersections | Zero particle centers inside either shell at seven checkpoints |
-| Minimum sampled wall distance | 1.296 mm; particle radius is 1.333 mm |
+| Minimum sampled wall distance | 1.211 mm; particle radius is 1.333 mm |
 
-The settled, pouring and returned-cup images were visually checked. Residual liquid remains attached to the water
-cup under the mop adhesion parameters. The final mixture continues evolving when `--steps` exceeds 5000.
+The settled, pouring and returned-cup images were visually checked. Both cups start half full; at the settled
+checkpoint, all 12635 particles of each liquid remain inside their respective cups. The final frame shows overflow
+and liquid attached to the cup walls. The independent 80% retained-water check passes at 80.06%. The 4 mm shell run
+measured 75.77% and failed the same assertion. The final mixture continues evolving when `--steps` exceeds 5000.
+The wall-distance checks measure endpoint positions at seven checkpoints; continuous particle crossings require
+trajectory checks. The closest sampled center-to-wall distance also permits slight sphere overlap with the mesh.
 
 Full logs and numerical wall checks are under `tmp/multiflow/logs/`. The baseline log is `baseline-isolated.log`,
-the full pour log is `coffee-final.log`, and its independent mesh-distance check is `pour-validation.log`.
+the full pour log is `thick-cups.log`, and its independent mesh-distance check is `thick-cups-validation.log`.
+The current recording and checkpoints are under `tmp/multiflow/thick-cups/out/pbstf_coffee_water/`.
+The geometry check in `thick-cups-geometry.log` samples 1001 cup poses within the simulation domain, with a minimum
+cup-vertex clearance of 7.16 mm between the two shells. The initial depth remains 0.05 m above each inner floor.
+The 4 mm shell's public particle-getter and surface-render checks are recorded in `lifesize-initial-final.log`;
+the corresponding image is `tmp/multiflow/lifesize-centered/initial-surface.png`.
 
 Concentration transport tests cover all three liquid solvers, diffusion strengths 0 and 0.005, and `n_envs=0,2`.
 They check initialization, exact label retention with diffusion off, scalar conservation, reduced variance,
@@ -99,9 +121,11 @@ reordering, serialized state restoration and selective environment reset. The em
 on reused slots. Disabling that update in an isolated test process makes the assertion fail with concentration
 0.1 instead of 0.75. The correct implementation passes both environment counts.
 
-The reconstructed-surface and point-color tests check each liquid solver separately for both environment counts. The PBD reconstruction
-radius regression passes, and the FEM/PBD texture test matches its downloaded reference image. RayTracer validation
-is skipped because this environment lacks LuisaRenderPy. A default-resolution `--surface --record --steps 2` run also
+The concentration rendering test passes all six combinations of points, spheres and reconstructed surfaces with
+both environment counts (`spheres-after.log`). It checks colors within individual liquid entities as well as
+between entities. The PBD reconstruction radius regression passes, and the FEM/PBD texture test matches its
+downloaded reference image. RayTracer validation is skipped because this environment lacks LuisaRenderPy.
+A default-resolution `--surface --record --steps 2` run also
 passes, with its image inspected under `tmp/multiflow/surface-smoke/out/pbstf_coffee_water/`.
 
 Reproduce the particle and rendering checks with the environment above:

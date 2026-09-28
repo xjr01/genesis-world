@@ -791,7 +791,7 @@ class RasterizerContext:
                                 concentrations[env_slot, entity.particle_start : entity.particle_end]
                             )
                             mesh = pyrender.Mesh.from_points(entity.init_particles, colors=colors)
-                        elif solver is self.sim.pbd_solver:
+                        elif solver is self.sim.pbd_solver and self.render_particle_as != "sphere":
                             continue
                         else:
                             sphere = mu.create_sphere(solver.particle_radius * self.particle_size_scale, subdivisions=1)
@@ -800,7 +800,12 @@ class RasterizerContext:
                             )
                             poses = np.tile(np.eye(4), (entity.n_particles, 1, 1))
                             poses[:, :3, 3] = entity.init_particles
-                            mesh = pyrender.Mesh.from_trimesh(sphere, smooth=True, poses=poses)
+                            colors = None
+                            if entity.material.c_init is not None or entity.material.c_init_z_mid is not None:
+                                colors = pu.concentration_colors(
+                                    concentrations[env_slot, entity.particle_start : entity.particle_end]
+                                )
+                            mesh = pyrender.Mesh.from_trimesh(sphere, smooth=True, poses=poses, instance_colors=colors)
                         self.add_static_node(entity, mesh, i_b=idx)
 
     def update_multifluid(self):
@@ -859,10 +864,14 @@ class RasterizerContext:
                     if self.render_particle_as == "points":
                         self.jit.update_buffer(node, "pos", particles_pos[env_slot, span].astype(np.float32))
                         self.jit.update_buffer(node, "vertex", pu.concentration_colors(concentrations[env_slot, span]))
-                    elif solver is not self.sim.pbd_solver:
+                    elif solver is not self.sim.pbd_solver or self.render_particle_as == "sphere":
                         poses = np.tile(np.eye(4), (entity.n_particles, 1, 1))
                         poses[:, :3, 3] = particles_pos[env_slot, span]
                         self.jit.update_buffer(node, "model", poses.transpose((0, 2, 1)))
+                        if node.mesh.primitives[0].is_color_instanced:
+                            self.jit.update_buffer(
+                                node, "instance_color", pu.concentration_colors(concentrations[env_slot, span])
+                            )
 
     def on_pbstf(self):
         for solver in (self.sim.ipbstf_solver,):
@@ -918,7 +927,7 @@ class RasterizerContext:
                 )
             for pbd_entity in self.sim.pbd_solver.entities:
                 if isinstance(pbd_entity.material, gs.materials.PBD.Liquid) and (
-                    pbd_entity.surface.vis_mode == "recon" or self.render_particle_as == "points"
+                    pbd_entity.surface.vis_mode == "recon" or self.render_particle_as in ("points", "sphere")
                 ):
                     continue
                 if pbd_entity.surface.vis_mode == "tetrahedral":
@@ -1000,7 +1009,7 @@ class RasterizerContext:
             )
             for pbd_entity in self.sim.pbd_solver.entities:
                 if isinstance(pbd_entity.material, gs.materials.PBD.Liquid) and (
-                    pbd_entity.surface.vis_mode == "recon" or self.render_particle_as == "points"
+                    pbd_entity.surface.vis_mode == "recon" or self.render_particle_as in ("points", "sphere")
                 ):
                     continue
                 for env_slot, idx in enumerate(self.rendered_envs_idx):

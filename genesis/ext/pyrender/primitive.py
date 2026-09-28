@@ -63,6 +63,8 @@ class Primitive(object):
         Morph target indices.
     poses : (x,4,4), float
         Array of 4x4 transformation matrices for instancing this object.
+    is_color_instanced : bool
+        Interpret color_0 as one color per pose. Defaults to False for per-vertex colors.
     """
 
     def __init__(
@@ -87,6 +89,7 @@ class Primitive(object):
         is_floor=False,
         env_shared=True,
         active_envs=None,
+        is_color_instanced=False,
     ):
         if mode is None:
             mode = GLTF.TRIANGLES
@@ -96,6 +99,8 @@ class Primitive(object):
         self.tangents = tangents
         self.texcoord_0 = texcoord_0
         self.texcoord_1 = texcoord_1
+        self.poses = poses
+        self.is_color_instanced = is_color_instanced
         self.color_0 = color_0
         self.joints_0 = joints_0
         self.weights_0 = weights_0
@@ -103,7 +108,6 @@ class Primitive(object):
         self.material = material
         self.mode = mode
         self.targets = targets
-        self.poses = poses
         self.vertex_mapping = vertex_mapping
         self.double_sided = double_sided
         self.is_floor = is_floor
@@ -190,13 +194,16 @@ class Primitive(object):
 
     @property
     def color_0(self):
-        """(n,4) float : RGBA vertex colors."""
+        """(n,4) float : RGBA colors per vertex or per pose when is_color_instanced is True."""
         return self._color_0
 
     @color_0.setter
     def color_0(self, value):
         if value is not None:
-            value = format_color_array(value, shape=(len(self.positions), 4))
+            if self.is_color_instanced and self.poses is None:
+                raise ValueError("Instanced colors require poses.")
+            n_colors = len(self.poses) if self.is_color_instanced else len(self.positions)
+            value = format_color_array(value, shape=(n_colors, 4))
         self._is_transparent = None
         self._color_0 = value
 
@@ -421,8 +428,12 @@ class Primitive(object):
 
         # Color
         if self.color_0 is not None:
-            vertex_data = np.hstack((vertex_data, self.color_0)) if vertex_data is not None else self.color_0
-            attr_sizes.append(4)
+            if self.is_color_instanced:
+                color_attr_idx = len(attr_sizes)
+                attr_sizes.append(0)
+            else:
+                vertex_data = np.hstack((vertex_data, self.color_0)) if vertex_data is not None else self.color_0
+                attr_sizes.append(4)
 
         # TODO JOINTS AND WEIGHTS
         # PASS
@@ -444,6 +455,16 @@ class Primitive(object):
                     )
                     glEnableVertexAttribArray(i)
                     offset += sz
+
+        if self.is_color_instanced and self.color_0 is not None:
+            color_buffer = glGenBuffers(1)
+            self._buffers["instance_color"] = color_buffer
+            glBindBuffer(GL_ARRAY_BUFFER, color_buffer)
+            color_data = np.ascontiguousarray(self.color_0, dtype=np.float32)
+            glBufferData(GL_ARRAY_BUFFER, FLOAT_SZ * color_data.size, color_data, GL_STREAM_DRAW)
+            glVertexAttribPointer(color_attr_idx, 4, GL_FLOAT, GL_FALSE, FLOAT_SZ * 4, ctypes.c_void_p(0))
+            glEnableVertexAttribArray(color_attr_idx)
+            glVertexAttribDivisor(color_attr_idx, 1)
 
         #######################################################################
         # Fill model matrix buffer

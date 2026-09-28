@@ -64,8 +64,10 @@ def test_pbd_reconstruction_uses_pbd_particle_radius(monkeypatch, renderer):
 @pytest.mark.parametrize("backend", [gs.cuda])
 @pytest.mark.parametrize("renderer_type", [RENDERER_TYPE.RASTERIZER])
 @pytest.mark.parametrize("n_envs", [0, 2])
-@pytest.mark.parametrize("vis_mode", ["particle", "recon"])
-def test_concentration_colors_and_merged_surface(n_envs, vis_mode, renderer, show_viewer):
+@pytest.mark.parametrize(
+    "vis_mode, render_particle_as", [("particle", "points"), ("particle", "sphere"), ("recon", "sphere")]
+)
+def test_concentration_colors_and_merged_surface(n_envs, vis_mode, render_particle_as, renderer, show_viewer):
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
             gravity=(0.0, 0.0, 0.0),
@@ -89,7 +91,7 @@ def test_concentration_colors_and_merged_surface(n_envs, vis_mode, renderer, sho
         vis_options=gs.options.VisOptions(
             background_color=(0.0, 0.0, 0.0),
             segmentation_level="entity",
-            render_particle_as="points",
+            render_particle_as=render_particle_as,
         ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(0.0, -0.65, 0.45),
@@ -135,6 +137,12 @@ def test_concentration_colors_and_merged_surface(n_envs, vis_mode, renderer, sho
         entity.set_particles_concentration(1.0)
     scene.visualizer.update()
     coffee_rgb, *_ = camera.render()
+    split_rgb = None
+    if vis_mode == "particle":
+        for entity in liquids:
+            entity.set_particles_concentration(entity.get_particles_pos()[..., 2] > 0.1)
+        scene.visualizer.update()
+        split_rgb, *_ = camera.render()
     difference = np.abs(water_rgb / 255.0 - coffee_rgb / 255.0).max(axis=-1)
     for material_type in material_types:
         entity_indices = [entity.idx + 1 for entity in liquids if isinstance(entity.material, material_type)]
@@ -144,6 +152,9 @@ def test_concentration_colors_and_merged_surface(n_envs, vis_mode, renderer, sho
         coffee_color = coffee_rgb[is_liquid].mean(axis=0)
         assert water_color.min() > coffee_color.max()
         assert coffee_color[0] > coffee_color[1] > coffee_color[2]
+        if split_rgb is not None:
+            assert (is_liquid & (split_rgb == water_rgb).all(axis=-1)).sum() > 8
+            assert (is_liquid & (split_rgb == coffee_rgb).all(axis=-1)).sum() > 8
 
 
 @pytest.mark.slow  # ~200s
