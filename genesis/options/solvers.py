@@ -764,15 +764,25 @@ class SPHOptions(Options):
 
 
 class PBSTFStaticColliderOptions(Options):
-    """Base pose options for one-way PBSTF colliders.
+    """Pose and wall interaction options for one-way position-based surface tension flow (PBSTF) colliders.
 
     The pose can change after scene construction through
     :meth:`PBSTFSolver.set_static_colliders_pose`. The collider remains one-way: it affects the liquid and receives no
     force or velocity response from it.
+
+    ``is_collider_adhesion_friction_enabled`` enables adhesion and friction for this collider in PBSTF. Enabling them
+    promotes wetting and reduces sliding at extra contact-query cost; disabling them keeps geometric collision alone.
+    These parameters are fixed at construction and shared across environments. Adhesion acts on unabsorbed surface
+    particles near the wall: lower ``collider_adhesion_compliance`` strengthens attachment but makes detachment harder.
+    ``collider_friction`` damps their relative tangential motion within one particle diameter of the wall, reducing
+    sliding at the cost of kinetic energy; zero preserves tangential speed and one removes it.
     """
 
     pos: Vec3FType = (0.0, 0.0, 0.0)
     quat: UnitVec4FType = (1.0, 0.0, 0.0, 0.0)
+    is_collider_adhesion_friction_enabled: StrictBool = False
+    collider_adhesion_compliance: NonNegativeFloat = 10.0
+    collider_friction: UnitInterval = 0.1
 
 
 class PBSTFBoxStaticColliderOptions(PBSTFStaticColliderOptions):

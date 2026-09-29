@@ -166,9 +166,6 @@ def _liquid_material(
     interior_distance_compliance=180.0,
     surface_viscosity=0.3,
     interior_viscosity=0.3,
-    is_collider_adhesion_friction_enabled=False,
-    collider_adhesion_compliance=10.0,
-    collider_friction=0.1,
 ):
     return gs.materials.PBSTF.Liquid(
         sampler=sampler,
@@ -179,9 +176,6 @@ def _liquid_material(
         interior_distance_compliance=interior_distance_compliance,
         surface_viscosity=surface_viscosity,
         interior_viscosity=interior_viscosity,
-        is_collider_adhesion_friction_enabled=is_collider_adhesion_friction_enabled,
-        collider_adhesion_compliance=collider_adhesion_compliance,
-        collider_friction=collider_friction,
     )
 
 
@@ -216,9 +210,6 @@ def _case_liquid_material(case):
             interior_distance_compliance=180.0,
             surface_viscosity=0.2,
             interior_viscosity=0.05,
-            is_collider_adhesion_friction_enabled=True,
-            collider_adhesion_compliance=20.0,
-            collider_friction=0.01,
         )
     if case in (CASE_MOP, CASE_SWEEP):
         return _liquid_material(
@@ -229,9 +220,6 @@ def _case_liquid_material(case):
             interior_distance_compliance=180.0,
             surface_viscosity=0.5,
             interior_viscosity=0.5,
-            is_collider_adhesion_friction_enabled=True,
-            collider_adhesion_compliance=50.0,
-            collider_friction=0.5,
         )
     return _liquid_material()
 
@@ -361,6 +349,9 @@ def case_settings(case):
             wipe_collider = gs.options.PBSTFAbsorbentBoxStaticColliderOptions(
                 pos=wipe.start_pos,
                 quat=wipe.quat,
+                is_collider_adhesion_friction_enabled=True,
+                collider_adhesion_compliance=50.0,
+                collider_friction=0.5,
                 lower=wipe.collider_lower,
                 upper=wipe.collider_upper,
                 absorption_rate=4000.0,
@@ -371,6 +362,9 @@ def case_settings(case):
             wipe_collider = gs.options.PBSTFBoxStaticColliderOptions(
                 pos=wipe.start_pos,
                 quat=wipe.quat,
+                is_collider_adhesion_friction_enabled=True,
+                collider_adhesion_compliance=50.0,
+                collider_friction=0.5,
                 lower=wipe.collider_lower,
                 upper=wipe.collider_upper,
             )
@@ -387,6 +381,9 @@ def case_settings(case):
                 gs.options.PBSTFBoxStaticColliderOptions(
                     pos=wipe.table_pos,
                     quat=wipe.quat,
+                    is_collider_adhesion_friction_enabled=True,
+                    collider_adhesion_compliance=50.0,
+                    collider_friction=0.5,
                     lower=tuple(-0.5 * size for size in wipe.table_size),
                     upper=tuple(0.5 * size for size in wipe.table_size),
                 ),
@@ -441,11 +438,14 @@ def case_settings(case):
             ground_height=teapot.manipulator.kuka_base_pos[1],
             static_colliders=(
                 gs.options.PBSTFMeshStaticColliderOptions(
+                    pos=teapot.offset,
+                    quat=teapot.quat,
+                    is_collider_adhesion_friction_enabled=True,
+                    collider_adhesion_compliance=20.0,
+                    collider_friction=0.01,
                     file=teapot.asset,
                     scale=teapot.mesh_scale,
                     sdf_res=150,
-                    pos=teapot.offset,
-                    quat=teapot.quat,
                 ),
             ),
             max_solver_iterations=5,

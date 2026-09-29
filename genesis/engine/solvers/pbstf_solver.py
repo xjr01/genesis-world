@@ -117,6 +117,11 @@ class PBSTFSolver(Solver):
             create_static_collider(collider_options) for collider_options in options.static_colliders
         )
         self._n_static_colliders = len(self._static_colliders)
+        self._adhesion_friction_static_colliders_idx = tuple(
+            collider_idx
+            for collider_idx, collider in enumerate(self._static_colliders)
+            if collider.is_collider_adhesion_friction_enabled
+        )
         self._absorbent_static_colliders_idx = tuple(
             collider_idx
             for collider_idx, collider in enumerate(self._static_colliders)
@@ -192,10 +197,6 @@ class PBSTFSolver(Solver):
                 or material.interior_distance_compliance != self._material.interior_distance_compliance
                 or material.surface_viscosity != self._material.surface_viscosity
                 or material.interior_viscosity != self._material.interior_viscosity
-                or material.is_collider_adhesion_friction_enabled
-                != self._material.is_collider_adhesion_friction_enabled
-                or material.collider_adhesion_compliance != self._material.collider_adhesion_compliance
-                or material.collider_friction != self._material.collider_friction
             ):
                 gs.raise_exception(
                     "All entities in one PBSTFSolver must use identical PBSTF liquid properties. "
@@ -1660,7 +1661,7 @@ class PBSTFSolver(Solver):
             ):
                 pos = self.particles_reordered[i, i_b].pos
                 mass = self.particles_info_reordered[i, i_b].mass
-                for collider_idx in qd.static(range(self._n_static_colliders)):
+                for collider_idx in qd.static(self._adhesion_friction_static_colliders_idx):
                     anchor, normal, _, surface_distance = query_static_collider_contact(
                         collider_idx,
                         i_b,
@@ -1674,7 +1675,10 @@ class PBSTFSolver(Solver):
                         anchor_delta = pos - anchor
                         if anchor_delta.dot(anchor_delta) <= self._particle_radius * self._particle_radius:
                             constraint = anchor_delta.dot(normal)
-                            denominator = self._material.collider_adhesion_compliance / self._default_mass + 1.0 / mass
+                            denominator = (
+                                self._static_colliders[collider_idx].collider_adhesion_compliance / self._default_mass
+                                + 1.0 / mass
+                            )
                             if denominator > gs.EPS:
                                 self.particles_reordered[i, i_b].dpos += -constraint / denominator / mass * normal
 
@@ -1751,11 +1755,11 @@ class PBSTFSolver(Solver):
         for i, i_b in qd.ndrange(self._n_particles, self._B):
             if self.particles_ng_reordered[i, i_b].active and not self._is_particle_absorbed_reordered(i, i_b):
                 self.particles_reordered[i, i_b].vel += self.particles_reordered[i, i_b].dpos
-                if qd.static(self._material.is_collider_adhesion_friction_enabled):
+                if qd.static(len(self._adhesion_friction_static_colliders_idx) > 0):
                     if self.particles_reordered[i, i_b].surface:
                         pos = self.particles_reordered[i, i_b].pos
                         vel = self.particles_reordered[i, i_b].vel
-                        for collider_idx in qd.static(range(self._n_static_colliders)):
+                        for collider_idx in qd.static(self._adhesion_friction_static_colliders_idx):
                             _, normal, _, surface_distance = query_static_collider(
                                 collider_idx,
                                 i_b,
@@ -1773,7 +1777,8 @@ class PBSTFSolver(Solver):
                                 vel = (
                                     collider_vel
                                     + relative_vel_normal
-                                    + (1.0 - self._material.collider_friction) * relative_vel_tangent
+                                    + (1.0 - self._static_colliders[collider_idx].collider_friction)
+                                    * relative_vel_tangent
                                 )
                         self.particles_reordered[i, i_b].vel = vel
                 pos = self.boundary.impose_pos(
@@ -1874,7 +1879,7 @@ class PBSTFSolver(Solver):
             self._kernel_apply_surface_constraints()
             if iteration % 2 == 0:
                 self._kernel_apply_distance_constraints()
-            if self._material.is_collider_adhesion_friction_enabled:
+            if self._adhesion_friction_static_colliders_idx:
                 self._kernel_apply_static_collider_adhesion()
             self._kernel_apply_position_delta()
             if self._n_absorbent_static_colliders > 0:

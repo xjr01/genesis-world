@@ -65,7 +65,7 @@ def water_cup_pose(time):
 
 
 def build_scene(scale=750, is_viewer_shown=False, is_recording=False, is_surface=False):
-    """Build two glasses filled to half the cavity height, with asset coordinates in meters."""
+    """Build two half-filled glasses on a fixed table, with asset coordinates in meters."""
     if scale <= 0:
         raise ValueError("Particle scale must be positive.")
     dt = 0.002
@@ -83,14 +83,26 @@ def build_scene(scale=750, is_viewer_shown=False, is_recording=False, is_surface
     cup_positions = (COFFEE_CUP_POS, WATER_CUP_POS)
     camera_pos = (0.30, 0.35, 0.60)
     camera_lookat = (0.0, 0.05, 0.0)
-    colliders = [
+    table_collider = gs.options.PBSTFBoxStaticColliderOptions(
+        is_collider_adhesion_friction_enabled=True,
+        collider_adhesion_compliance=50.0,
+        collider_friction=0.5,
+        lower=(-0.4, -0.065, -4.0 / 15.0),
+        upper=(0.4, -0.045, 4.0 / 15.0),
+    )
+    # Earlier colliders preserve the supporting surface at incompatible contacts.
+    colliders = [table_collider]
+    colliders.extend(
         gs.options.PBSTFMeshStaticColliderOptions(
             pos=pos,
+            is_collider_adhesion_friction_enabled=True,
+            collider_adhesion_compliance=50.0,
+            collider_friction=0.01,
             file=str(cup_path),
             sdf_res=128,
         )
         for pos in cup_positions
-    ]
+    )
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
             dt=dt,
@@ -120,6 +132,21 @@ def build_scene(scale=750, is_viewer_shown=False, is_recording=False, is_surface
             camera_fov=40,
         ),
         show_viewer=is_viewer_shown,
+    )
+    scene.add_entity(
+        morph=gs.morphs.Box(
+            collision=False,
+            fixed=True,
+            lower=table_collider.lower,
+            upper=table_collider.upper,
+        ),
+        material=gs.materials.Rigid(
+            needs_coup=False,
+        ),
+        surface=gs.surfaces.Default(
+            color=(0.36, 0.24, 0.14),
+        ),
+        name="table",
     )
     liquids = []
     cups = []
@@ -157,9 +184,6 @@ def build_scene(scale=750, is_viewer_shown=False, is_recording=False, is_surface
                     interior_distance_compliance=180.0,
                     surface_viscosity=0.5,
                     interior_viscosity=0.5,
-                    is_collider_adhesion_friction_enabled=True,
-                    collider_adhesion_compliance=50.0,
-                    collider_friction=0.5,
                     c_init=concentration,
                 ),
                 surface=gs.surfaces.Default(
@@ -208,7 +232,7 @@ def main():
             )
             for step in range(args.steps):
                 pos, quat = water_cup_pose((step + 1) * dt)
-                demo.scene.pbstf_solver.set_static_colliders_pose(pos, quat, colliders_idx=[1])
+                demo.scene.pbstf_solver.set_static_colliders_pose(pos, quat, colliders_idx=2)
                 demo.water_cup.set_pos(pos)
                 demo.water_cup.set_quat(quat)
                 demo.scene.step()

@@ -73,13 +73,25 @@ The liquid material parameters are:
 | interior-distance compliance | `180.0` | `180.0` |
 | surface viscosity | `0.2` | `0.5` |
 | interior viscosity | `0.05` | `0.5` |
+
+Each static collider has its own wall interaction parameters, configured at construction through
+`PBSTFStaticColliderOptions` and shared across environments. The teapot mesh, and each table and tool collider in
+`sweep` and `mop`, use these values:
+
+| Setting | `teapot` | `sweep` and `mop` |
+| --- | ---: | ---: |
 | collider adhesion and friction | enabled | enabled |
-| collider-adhesion compliance | `20.0` | `30.0` |
+| collider-adhesion compliance | `20.0` | `50.0` |
 | collider friction | `0.01` | `0.5` |
 
 Compliance values trade enforcement strength for softness: lower values enforce the corresponding condition more
 strongly. Higher viscosity damps relative particle motion more strongly. Collider friction only affects unabsorbed
 particles because absorbed particles follow the absorbent collider directly.
+
+Set `is_collider_adhesion_friction_enabled=True` on a collider to enable its wall effects. Lower
+`collider_adhesion_compliance` strengthens wetting but makes detachment harder. Higher `collider_friction` reduces
+relative tangential motion at the cost of kinetic energy: zero preserves sliding and one removes it. The defaults are
+`False`, `10.0`, and `0.1`, respectively; a disabled collider still provides geometric collision.
 
 ## Teapot case
 
@@ -220,11 +232,14 @@ The default mop collider is configured in `case_settings()` as follows:
 wipe_collider = gs.options.PBSTFAbsorbentBoxStaticColliderOptions(
     pos=wipe.start_pos,
     quat=wipe.quat,
+    is_collider_adhesion_friction_enabled=True,
+    collider_adhesion_compliance=50.0,
+    collider_friction=0.5,
     lower=wipe.collider_lower,
     upper=wipe.collider_upper,
-    absorption_rate=2000.0,
+    absorption_rate=4000.0,
     absorption_capacity_fraction=1.0,
-    pbd_entity_name="sponge",
+    pbd_entity_name=wipe.collider_entity_name,
 )
 ```
 

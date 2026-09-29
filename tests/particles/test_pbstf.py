@@ -657,8 +657,9 @@ def test_static_collider_pose_and_absorption(asset_tmp_path, n_envs, is_deformab
 @pytest.mark.parametrize("backend", [gs.cuda])
 @pytest.mark.parametrize("n_envs", [0, 2])
 def test_static_collider_adhesion_and_friction(asset_tmp_path, n_envs, show_viewer):
-    mesh_path = asset_tmp_path / "pbstf_adhesion_remote_box.obj"
-    trimesh.creation.box().export(mesh_path)
+    mesh_path = asset_tmp_path / "pbstf_adhesion_box.obj"
+    # Wide faces keep the adhesion band inside the signed distance field grid.
+    trimesh.creation.box(extents=(2.0, 1.0, 2.0)).export(mesh_path)
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
             dt=1e-3,
@@ -666,31 +667,56 @@ def test_static_collider_adhesion_and_friction(asset_tmp_path, n_envs, show_view
         ),
         pbstf_options=gs.options.PBSTFOptions(
             particle_size=0.2,
-            lower_bound=(-3.0, -3.0, -3.0),
-            upper_bound=(3.0, 3.0, 3.0),
             max_solver_iterations=1,
             max_surface_neighbors=16,
             static_colliders=[
                 gs.options.PBSTFConeStaticColliderOptions(
+                    is_collider_adhesion_friction_enabled=True,
+                    collider_friction=0.25,
                     center=(0.0, 0.0, 0.0),
                     height=(0.0, 2.0, 0.0),
                     radius=2.0,
                 ),
                 gs.options.PBSTFMeshStaticColliderOptions(
                     pos=(3.0, 0.0, 0.0),
+                    is_collider_adhesion_friction_enabled=True,
+                    collider_adhesion_compliance=30.0,
+                    collider_friction=0.0,
                     file=str(mesh_path),
                     sdf_res=16,
                 ),
                 gs.options.PBSTFBoxStaticColliderOptions(
                     pos=(1.5, 0.0, 0.0),
+                    is_collider_adhesion_friction_enabled=True,
+                    collider_adhesion_compliance=20.0,
+                    collider_friction=0.5,
                     lower=(-0.4, -0.5, -0.4),
                     upper=(0.4, -0.05, 0.4),
                 ),
+                gs.options.PBSTFBoxStaticColliderOptions(
+                    pos=(-3.0, 0.0, 0.0),
+                    collider_adhesion_compliance=0.0,
+                    collider_friction=1.0,
+                    lower=(-0.4, -0.5, -0.4),
+                    upper=(0.4, -0.05, 0.4),
+                ),
+                gs.options.PBSTFAbsorbentBoxStaticColliderOptions(
+                    pos=(0.0, 0.0, 3.0),
+                    is_collider_adhesion_friction_enabled=True,
+                    collider_adhesion_compliance=0.0,
+                    collider_friction=1.0,
+                    lower=(-0.4, -0.5, -0.4),
+                    upper=(0.4, -0.05, 0.4),
+                    absorption_rate=1.0,
+                    absorption_capacity_fraction=1.0,
+                ),
             ],
+            lower_bound=(-4.5, -3.0, -3.0),
+            upper_bound=(4.5, 3.0, 4.5),
         ),
         viewer_options=gs.options.ViewerOptions(
-            camera_pos=(4.0, -5.0, 4.0),
-            camera_lookat=(-0.5, 0.0, 0.0),
+            camera_pos=(7.0, -8.0, 7.0),
+            camera_lookat=(0.0, 0.0, 1.0),
         ),
         show_viewer=show_viewer,
     )
@@ -701,17 +727,21 @@ def test_static_collider_adhesion_and_friction(asset_tmp_path, n_envs, show_view
                 (0.0, -0.15, 0.0),
                 (1.5, -0.1, 0.0),
                 (-0.5, -0.25, 0.0),
+                (3.0, -0.65, 0.0),
+                (1.5, -0.65, 0.0),
+                (-3.0, -0.65, 0.0),
+                (-3.0, -0.55, 0.0),
+                (0.0, -0.65, 3.0),
             ),
         ),
         material=gs.materials.PBSTF.Liquid(
             sampler="regular",
-            is_collider_adhesion_friction_enabled=True,
-            collider_adhesion_compliance=10.0,
-            collider_friction=0.25,
         ),
     )
     scene.build(n_envs=n_envs)
     solver = scene.pbstf_solver
+    colliders = scene.pbstf_options.static_colliders
+    position_initial = tensor_to_array(liquid.get_particles_pos())
 
     solver._kernel_reorder_particles(0)
     solver.particles_reordered.dpos.fill(0.0)
@@ -722,11 +752,24 @@ def test_static_collider_adhesion_and_friction(asset_tmp_path, n_envs, show_view
         qd_to_numpy(solver.particles_reordered.dpos, transpose=True), reordered_idx[..., None], axis=1
     )
     mass = np.take_along_axis(qd_to_numpy(solver.particles_info_reordered.mass, transpose=True), reordered_idx, axis=1)
-    denominator = liquid.material.collider_adhesion_compliance / solver._default_mass + 1.0 / mass
+    denominator = colliders[0].collider_adhesion_compliance / solver._default_mass + 1.0 / mass
     expected_adhesion_delta = np.zeros_like(adhesion_delta)
     expected_adhesion_delta[..., :2, 1] = np.array((-0.05, 0.05)) / denominator[..., :2] / mass[..., :2]
+    for particle_idx, collider_idx in ((4, 1), (5, 2), (8, 4)):
+        denominator = (
+            colliders[collider_idx].collider_adhesion_compliance / solver._default_mass + 1.0 / mass[..., particle_idx]
+        )
+        expected_adhesion_delta[..., particle_idx, 1] = 0.05 / denominator / mass[..., particle_idx]
     assert_allclose(adhesion_delta, expected_adhesion_delta, atol=1e-6)
 
+    solver._kernel_apply_position_delta()
+    solver._kernel_copy_from_reordered(0)
+    expected_position = position_initial + expected_adhesion_delta
+    expected_position[..., 0, 1] = -0.1
+    expected_position[..., 7, 1] = -0.6
+    assert_allclose(tensor_to_array(liquid.get_particles_pos()), expected_position, atol=1e-6)
+
+    liquid.set_particles_pos(position_initial)
     liquid.set_particles_vel((1.0, 1.0, 0.0))
     solver._kernel_reorder_particles(0)
     solver.particles_reordered.dpos.fill(0.0)
@@ -735,12 +778,12 @@ def test_static_collider_adhesion_and_friction(asset_tmp_path, n_envs, show_view
     solver._kernel_copy_from_reordered(0)
     velocity = tensor_to_array(liquid.get_particles_vel())
     position = tensor_to_array(liquid.get_particles_pos())
-    assert_allclose(
-        velocity,
-        (((0.75, 1.0, 0.0), (0.75, 1.0, 0.0), (0.5625, 1.0, 0.0), (1.0, 1.0, 0.0)),) * max(n_envs, 1),
-        atol=1e-6,
-    )
+    expected_velocity = np.zeros_like(velocity)
+    expected_velocity[..., 0] = (0.75, 0.75, 0.375, 1.0, 1.0, 0.5, 1.0, 1.0, 0.0)
+    expected_velocity[..., 1] = 1.0
+    assert_allclose(velocity, expected_velocity, atol=1e-6)
     assert_allclose(position[..., 2, 1], -0.1, atol=1e-6)
+    assert_allclose(position[..., 7, 1], -0.6, atol=1e-6)
 
     liquid.set_particles_pos((2.5, -2.5, 0.0), particles_idx_local=2)
     liquid.set_particles_vel((0.0, 0.0, 0.0))
@@ -755,11 +798,9 @@ def test_static_collider_adhesion_and_friction(asset_tmp_path, n_envs, show_view
     solver._kernel_apply_viscosity()
     solver._kernel_copy_from_reordered(0)
     velocity = tensor_to_array(liquid.get_particles_vel())
-    assert_allclose(
-        velocity,
-        (((0.25, 0.0, 0.0), (0.25, 0.0, 0.0), (0.0, 0.0, 0.0), (0.0, 0.0, 0.0)),) * max(n_envs, 1),
-        atol=1e-6,
-    )
+    expected_velocity.fill(0.0)
+    expected_velocity[..., :2, 0] = 0.25
+    assert_allclose(velocity, expected_velocity, atol=1e-6)
 
 
 @pytest.mark.required
@@ -857,6 +898,15 @@ def test_case_settings():
 
     mop_settings = case_settings(CASE_MOP)
     sweep_settings = case_settings(CASE_SWEEP)
+    for settings in (mop_settings, sweep_settings):
+        for collider in settings.static_colliders:
+            assert collider.is_collider_adhesion_friction_enabled
+            assert_equal(collider.collider_adhesion_compliance, 50.0)
+            assert_equal(collider.collider_friction, 0.5)
+    teapot_collider = case_settings(CASE_TEAPOT).static_colliders[0]
+    assert teapot_collider.is_collider_adhesion_friction_enabled
+    assert_equal(teapot_collider.collider_adhesion_compliance, 20.0)
+    assert_equal(teapot_collider.collider_friction, 0.01)
     mop = get_wipe_settings(mop_settings)
     sweep = get_wipe_settings(sweep_settings)
     assert CASE_MOP != CASE_SWEEP
@@ -1084,7 +1134,8 @@ def test_mop_sponge_full_simulation_and_collision(n_envs, show_viewer):
     assert_equal(liquid_entity.material.surface_tension_compliance, 1.0 / 225.0)
     assert_equal(liquid_entity.material.surface_distance_compliance, 40.0)
     assert_equal(liquid_entity.material.interior_distance_compliance, 180.0)
-    assert_equal(liquid_entity.material.collider_adhesion_compliance, 50.0)
+    for collider in scene.pbstf_options.static_colliders:
+        assert_equal(collider.collider_adhesion_compliance, 50.0)
     sponge_x = sponge_init_positions[:, 0]
     sponge_y = sponge_init_positions[:, 1]
     finger_contact_mask = np.isclose(sponge_y, sponge_y.max())
@@ -1648,8 +1699,9 @@ def test_sweep_box_pushes_water(show_viewer):
     assert liquid.n_particles == 840
     assert_equal(liquid.material.density_compliance, 33750.0)
     assert_equal(liquid.material.surface_tension_compliance, 1.0 / 225.0)
-    assert_equal(liquid.material.collider_adhesion_compliance, 50.0)
-    assert liquid.material.collider_friction == 0.5
+    for collider in scene.pbstf_options.static_colliders:
+        assert_equal(collider.collider_adhesion_compliance, 50.0)
+        assert_equal(collider.collider_friction, 0.5)
     with pytest.raises(gs.GenesisException, match="not absorbent"):
         scene.pbstf_solver.get_static_collider_wetness(1)
 

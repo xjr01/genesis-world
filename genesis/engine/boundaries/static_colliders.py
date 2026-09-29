@@ -41,9 +41,14 @@ class StaticCollider(ABC):
 
     kind: int
 
-    def __init__(self, pos, quat):
+    def __init__(
+        self, pos, quat, is_collider_adhesion_friction_enabled, collider_adhesion_compliance, collider_friction
+    ):
         self.pos = np.array(pos)
         self.quat = np.array(quat)
+        self.is_collider_adhesion_friction_enabled = is_collider_adhesion_friction_enabled
+        self.collider_adhesion_compliance = collider_adhesion_compliance
+        self.collider_friction = collider_friction
         self.is_deformable = False
 
     @classmethod
@@ -58,8 +63,19 @@ class BoxStaticCollider(StaticCollider):
     kind = _COLLIDER_BOX
     type = "box"
 
-    def __init__(self, lower, upper, pos=(0.0, 0.0, 0.0), quat=(1.0, 0.0, 0.0, 0.0)):
-        super().__init__(pos, quat)
+    def __init__(
+        self,
+        lower,
+        upper,
+        pos=(0.0, 0.0, 0.0),
+        quat=(1.0, 0.0, 0.0, 0.0),
+        is_collider_adhesion_friction_enabled=False,
+        collider_adhesion_compliance=10.0,
+        collider_friction=0.1,
+    ):
+        super().__init__(
+            pos, quat, is_collider_adhesion_friction_enabled, collider_adhesion_compliance, collider_friction
+        )
         self.lower = np.array(lower)
         self.upper = np.array(upper)
 
@@ -80,6 +96,9 @@ class BoxStaticCollider(StaticCollider):
             upper=options.upper,
             pos=options.pos,
             quat=options.quat,
+            is_collider_adhesion_friction_enabled=options.is_collider_adhesion_friction_enabled,
+            collider_adhesion_compliance=options.collider_adhesion_compliance,
+            collider_friction=options.collider_friction,
         )
 
 
@@ -121,8 +140,20 @@ class AbsorbentBoxStaticCollider(BoxStaticCollider, AbsorbentStaticCollider):
         sdf_res=None,
         pos=(0.0, 0.0, 0.0),
         quat=(1.0, 0.0, 0.0, 0.0),
+        is_collider_adhesion_friction_enabled=False,
+        collider_adhesion_compliance=10.0,
+        collider_friction=0.1,
     ):
-        BoxStaticCollider.__init__(self, lower=lower, upper=upper, pos=pos, quat=quat)
+        BoxStaticCollider.__init__(
+            self,
+            lower=lower,
+            upper=upper,
+            pos=pos,
+            quat=quat,
+            is_collider_adhesion_friction_enabled=is_collider_adhesion_friction_enabled,
+            collider_adhesion_compliance=collider_adhesion_compliance,
+            collider_friction=collider_friction,
+        )
         AbsorbentStaticCollider.__init__(
             self,
             absorption_rate=absorption_rate,
@@ -165,6 +196,9 @@ class AbsorbentBoxStaticCollider(BoxStaticCollider, AbsorbentStaticCollider):
             sdf_res=options.sdf_res,
             pos=options.pos,
             quat=options.quat,
+            is_collider_adhesion_friction_enabled=options.is_collider_adhesion_friction_enabled,
+            collider_adhesion_compliance=options.collider_adhesion_compliance,
+            collider_friction=options.collider_friction,
         )
 
 
@@ -174,8 +208,20 @@ class ConeStaticCollider(StaticCollider):
     kind = _COLLIDER_CONE
     type = "cone"
 
-    def __init__(self, center, height, radius, pos=(0.0, 0.0, 0.0), quat=(1.0, 0.0, 0.0, 0.0)):
-        super().__init__(pos, quat)
+    def __init__(
+        self,
+        center,
+        height,
+        radius,
+        pos=(0.0, 0.0, 0.0),
+        quat=(1.0, 0.0, 0.0, 0.0),
+        is_collider_adhesion_friction_enabled=False,
+        collider_adhesion_compliance=10.0,
+        collider_friction=0.1,
+    ):
+        super().__init__(
+            pos, quat, is_collider_adhesion_friction_enabled, collider_adhesion_compliance, collider_friction
+        )
         self.center = np.array(center)
         self.height = np.array(height)
         self.radius = radius
@@ -200,6 +246,9 @@ class ConeStaticCollider(StaticCollider):
             radius=options.radius,
             pos=options.pos,
             quat=options.quat,
+            is_collider_adhesion_friction_enabled=options.is_collider_adhesion_friction_enabled,
+            collider_adhesion_compliance=options.collider_adhesion_compliance,
+            collider_friction=options.collider_friction,
         )
 
 
@@ -209,8 +258,20 @@ class MeshStaticCollider(StaticCollider):
     kind = _COLLIDER_MESH
     type = "mesh"
 
-    def __init__(self, file, scale, sdf_res, pos=(0.0, 0.0, 0.0), quat=(1.0, 0.0, 0.0, 0.0)):
-        super().__init__(pos, quat)
+    def __init__(
+        self,
+        file,
+        scale,
+        sdf_res,
+        pos=(0.0, 0.0, 0.0),
+        quat=(1.0, 0.0, 0.0, 0.0),
+        is_collider_adhesion_friction_enabled=False,
+        collider_adhesion_compliance=10.0,
+        collider_friction=0.1,
+    ):
+        super().__init__(
+            pos, quat, is_collider_adhesion_friction_enabled, collider_adhesion_compliance, collider_friction
+        )
         self.file = file
         self.scale = scale
         self.sdf_res = sdf_res
@@ -246,6 +307,9 @@ class MeshStaticCollider(StaticCollider):
             sdf_res=options.sdf_res,
             pos=options.pos,
             quat=options.quat,
+            is_collider_adhesion_friction_enabled=options.is_collider_adhesion_friction_enabled,
+            collider_adhesion_compliance=options.collider_adhesion_compliance,
+            collider_friction=options.collider_friction,
         )
 
 
