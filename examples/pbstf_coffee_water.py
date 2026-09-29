@@ -26,6 +26,8 @@ CUP_ASSET = "meshes/drinking_glass/12-oz-glass.obj"
 CUP_CAVITY_ASSET = "meshes/drinking_glass/12-oz-glass-cavity.obj"
 COFFEE_CUP_POS = (-0.09, -0.045, 0.0)
 WATER_CUP_POS = (0.09, -0.045, 0.0)
+COFFEE_FILL_FRACTION = 0.5
+WATER_FILL_FRACTION = 1.0
 
 
 @dataclass
@@ -41,17 +43,17 @@ class CoffeeWaterScene:
 def water_cup_pose(time):
     """Return the water cup pose through settling, lifting, pouring and returning, in seconds."""
     pour_x = COFFEE_CUP_POS[0] + 0.12
-    lift_y = COFFEE_CUP_POS[1] + 0.16
-    pour_y = COFFEE_CUP_POS[1] + 0.225
-    times = np.array((0.0, 1.0, 2.0, 2.5, 5.5, 6.5, 7.5, 8.5))
+    lift_y = COFFEE_CUP_POS[1] + 0.05
+    pour_y = COFFEE_CUP_POS[1] + 0.07
+    times = np.array((0.0, 1.0, 2.0, 2.5, 3.0, 4.0, 5.0, 6.0))
     poses = np.array(
         [
             (WATER_CUP_POS[0], WATER_CUP_POS[1], 0.0),
             (WATER_CUP_POS[0], WATER_CUP_POS[1], 0.0),
             (WATER_CUP_POS[0], lift_y, 0.0),
             (pour_x, lift_y, 0.0),
-            (pour_x, pour_y, 115.0),
-            (pour_x, pour_y, 115.0),
+            (pour_x, pour_y, 40.0),
+            (pour_x, pour_y, 30.0),
             (pour_x, lift_y, 0.0),
             (WATER_CUP_POS[0], WATER_CUP_POS[1], 0.0),
         ]
@@ -65,7 +67,7 @@ def water_cup_pose(time):
 
 
 def build_scene(scale=750, is_viewer_shown=False, is_recording=False, is_surface=False):
-    """Build two half-filled glasses on a fixed table, with asset coordinates in meters."""
+    """Build glasses filled to their configured fractions of cavity height on a fixed table, using meter coordinates."""
     if scale <= 0:
         raise ValueError("Particle scale must be positive.")
     dt = 0.002
@@ -73,13 +75,7 @@ def build_scene(scale=750, is_viewer_shown=False, is_recording=False, is_surface
     cup_path = Path(gs.utils.get_assets_dir()) / CUP_ASSET
     cup = mesh_utils.load_mesh(cup_path)
     cup_cavity = mesh_utils.load_mesh(Path(gs.utils.get_assets_dir()) / CUP_CAVITY_ASSET)
-    liquid_top = cup_cavity.bounds[:, 1].mean()
-    particles = particle_utils.mesh_cavity_to_particles(
-        cup,
-        p_size=particle_size,
-        seed=(0.0, liquid_top - 0.5 * particle_size, 0.0),
-        max_height=liquid_top - 0.5 * particle_size,
-    )
+    bottom, rim = cup_cavity.bounds[:, 1]
     cup_positions = (COFFEE_CUP_POS, WATER_CUP_POS)
     camera_pos = (0.30, 0.35, 0.60)
     camera_lookat = (0.0, 0.05, 0.0)
@@ -97,7 +93,7 @@ def build_scene(scale=750, is_viewer_shown=False, is_recording=False, is_surface
             pos=pos,
             is_collider_adhesion_friction_enabled=True,
             collider_adhesion_compliance=50.0,
-            collider_friction=0.01,
+            collider_friction=0.1,
             file=str(cup_path),
             sdf_res=128,
         )
@@ -115,7 +111,7 @@ def build_scene(scale=750, is_viewer_shown=False, is_recording=False, is_surface
         pbstf_options=gs.options.PBSTFOptions(
             diffusion_coeff=0.005,
             particle_size=particle_size,
-            max_solver_iterations=10,
+            max_solver_iterations=20,
             topology_rebuild_interval=10,
             max_surface_neighbors=128,
             max_localmesh_neighbors=64,
@@ -150,7 +146,16 @@ def build_scene(scale=750, is_viewer_shown=False, is_recording=False, is_surface
     )
     liquids = []
     cups = []
-    for pos, concentration, name in zip(cup_positions, (1.0, 0.0), ("coffee", "water")):
+    for pos, fill_fraction, concentration, name in zip(
+        cup_positions, (COFFEE_FILL_FRACTION, WATER_FILL_FRACTION), (1.0, 0.0), ("coffee", "water")
+    ):
+        liquid_top = bottom + fill_fraction * (rim - bottom)
+        particles = particle_utils.mesh_cavity_to_particles(
+            cup,
+            p_size=particle_size,
+            seed=(0.0, liquid_top - 0.5 * particle_size, 0.0),
+            max_height=liquid_top - 0.5 * particle_size,
+        )
         cups.append(
             scene.add_entity(
                 morph=gs.morphs.Mesh(
