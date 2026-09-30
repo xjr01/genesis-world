@@ -1,9 +1,53 @@
 import numpy as np
 import pytest
 
-import genesis as gs
+from examples import pbstf_coffee_water
 
-from ..utils import assert_allclose, get_hf_dataset
+import genesis as gs
+import genesis.utils.geom as geom_utils
+from genesis.utils.misc import tensor_to_array
+
+from ..utils import assert_allclose, assert_equal, get_hf_dataset
+
+
+@pytest.mark.required
+@pytest.mark.parametrize("backend", [gs.cuda])
+def test_dual_arm_manipulation(show_viewer):
+    demo = pbstf_coffee_water.build_scene(is_viewer_shown=show_viewer, is_motion_only=True)
+    lower, upper = map(tensor_to_array, demo.robot.get_dofs_limit())
+    rod_vertices = tensor_to_array(demo.rod.get_verts()) - pbstf_coffee_water.ROD_PARK
+    rim = demo.cup_cavity.bounds[1, 1]
+    phases = set()
+    stir_positions = []
+    max_error = 0.0
+    for time in np.linspace(0.0, pbstf_coffee_water.MOTION_END, 1401):
+        target, error = pbstf_coffee_water.update_motion(demo, time)
+        pbstf_coffee_water.check_contacts(demo, time)
+        qpos = tensor_to_array(demo.robot.get_qpos())
+        assert ((lower <= qpos) & (qpos <= upper)).all()
+        max_error = max(error, max_error)
+        phases.add(target.phase)
+        for link, pose in zip(demo.hands_link, (target.right, target.left)):
+            quat = tensor_to_array(link.get_quat())
+            pos = tensor_to_array(link.get_pos()) + geom_utils.transform_by_quat(pbstf_coffee_water.TOOL_CENTER, quat)
+            assert_allclose(pos, pose.pos, atol=2e-4)
+            assert np.linalg.norm(quat - np.sign(quat @ pose.quat) * pose.quat) < 2e-4
+        if 17.0 <= time <= 25.0:
+            vertices = rod_vertices + target.rod_pos - pbstf_coffee_water.COFFEE_CUP_POS
+            is_below_rim = vertices[:, 1] < rim
+            if is_below_rim.any():
+                assert demo.cup_cavity.contains(vertices[is_below_rim]).all()
+        if 18.0 <= time <= 24.0:
+            stir_positions.append(target.rod_pos)
+        if show_viewer:
+            demo.scene.visualizer.update()
+    assert max_error < 2e-4
+    assert_equal(sorted(phases), list(pbstf_coffee_water.Phase))
+    stir_positions = np.stack(stir_positions) - pbstf_coffee_water.COFFEE_CUP_POS
+    angles = np.unwrap(np.arctan2(stir_positions[:, 2], stir_positions[:, 0]))
+    assert_allclose(angles[-1] - angles[0], 6.0 * np.pi, atol=1e-6)
+    assert_allclose(demo.rod.get_pos(), pbstf_coffee_water.ROD_PARK, atol=1e-6)
+    assert_allclose(demo.water_cup.get_pos(), pbstf_coffee_water.WATER_CUP_POS, atol=1e-6)
 
 
 @pytest.mark.slow("gpu")  # gpu ~250s
