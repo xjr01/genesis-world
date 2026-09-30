@@ -229,6 +229,22 @@ def test_unified_elastic_projection(n_envs, show_viewer, asset_tmp_path):
             assert_allclose(positions[1:], previous[1:], atol=2e-7)
 
     scene.reset(initial_state)
+    momenta = []
+    for entity in entities:
+        positions = entity.init_particles
+        relative = positions - positions.mean(axis=0)
+        velocities = np.cross((-2.0, 1.0, 3.0), relative) + (0.02, -0.03, 0.04) + relative * (0.3, -0.2, 0.1)
+        entity.set_particles_vel(velocities)
+        momenta.append((velocities.mean(axis=0), np.cross(relative, velocities).mean(axis=0)))
+    scene.step()
+    for entity, (linear, angular) in zip(entities, momenta):
+        positions = tensor_to_array(entity.get_particles_pos())
+        velocities = tensor_to_array(entity.get_particles_vel())
+        relative = positions - positions.mean(axis=-2, keepdims=True)
+        assert_allclose(velocities.mean(axis=-2), linear, atol=2e-6)
+        assert_allclose(np.cross(relative, velocities).mean(axis=-2), angular, atol=1e-7)
+
+    scene.reset(initial_state)
     entity = next(
         entity
         for entity in entities

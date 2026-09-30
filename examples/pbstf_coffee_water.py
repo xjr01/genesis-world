@@ -278,7 +278,6 @@ def water_cup_pose(time):
 
 def check_contacts(demo, time):
     """Reject rigid penetration while allowing the right fingers to compress the motion-preview sponge."""
-    demo.robot.detect_collision()
     contacts = demo.robot.get_contacts()
     is_forbidden = contacts["penetration"] > 2e-4
     if demo.is_motion_only:
@@ -400,7 +399,6 @@ def build_scene(
             upper_bound=(0.4, 8.0 / 15.0, 4.0 / 15.0),
         ),
         viewer_options=gs.options.ViewerOptions(
-            refresh_rate=round(1.0 / dt),
             camera_pos=camera_pos,
             camera_lookat=camera_lookat,
             camera_up=(0.0, 1.0, 0.0),
@@ -639,8 +637,8 @@ def main():
             for step in range(steps):
                 time = (step + 1) * dt
                 target, ik_error = update_motion(demo, time)
-                check_contacts(demo, time)
                 demo.scene.step()
+                check_contacts(demo, time)
                 is_checkpoint = target.phase != previous_phase or step + 1 == steps or step in checkpoint_steps
                 if is_checkpoint:
                     gs.logger.info(f"{time:.3f}s: {target.phase.name.lower()}")

@@ -1378,7 +1378,8 @@ def test_concentration_transport(n_envs, diffusion_coeff, show_viewer):
         pbstf_options=gs.options.PBSTFOptions(
             diffusion_coeff=diffusion_coeff,
             particle_size=0.06,
-            max_solver_iterations=2,
+            max_solver_iterations=5,
+            topology_rebuild_interval=3,
             lower_bound=(-0.5, -0.5, 0.0),
             upper_bound=(0.5, 2.0, 0.8),
         ),

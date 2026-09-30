@@ -2,7 +2,7 @@ import quadrants as qd
 
 import genesis as gs
 from genesis.engine.boundaries import query_static_collider
-import genesis.utils.geom as gu
+from genesis.utils import geom
 
 
 @qd.func
@@ -21,7 +21,7 @@ def unbind_particle(
     voxel_wetness: qd.template(),
 ):
     voxel_idx = absorption_particles[particle_idx, env_idx].voxel_idx
-    if 0 <= voxel_idx and voxel_idx < n_voxels:
+    if 0 <= voxel_idx < n_voxels:
         qd.atomic_add(voxel_occupancy[voxel_idx, env_idx], -1)
         capacity = voxel_capacity[voxel_idx]
         if capacity > 0:
@@ -246,7 +246,7 @@ def kernel_update_absorbed_particles(
             local_pos += beta * (target_local_pos - local_pos)
             progress += beta * (1.0 - progress)
             pos_prev = particles[particle_idx, env_idx].pos
-            pos = gu.qd_transform_by_trans_quat(
+            pos = geom.qd_transform_by_trans_quat(
                 local_pos,
                 colliders_pos[collider_idx, env_idx],
                 colliders_quat[collider_idx, env_idx],
@@ -277,8 +277,8 @@ def kernel_update_absorbed_particles(
                 errno[env_idx] = error_code
 
 
-@qd.kernel
-def kernel_capture_particles(
+@qd.func
+def func_capture_particles(
     n_particles: qd.i32,
     collider_idx: qd.i32,
     absorption_idx: qd.i32,
@@ -314,7 +314,7 @@ def kernel_capture_particles(
             )
             if is_inside or surface_distance <= particle_radius + gs.EPS:
                 collider_quat = colliders_quat[collider_idx, env_idx]
-                local_pos = gu.qd_inv_transform_by_trans_quat(
+                local_pos = geom.qd_inv_transform_by_trans_quat(
                     pos,
                     colliders_pos[collider_idx, env_idx],
                     collider_quat,
@@ -404,7 +404,7 @@ def kernel_capture_particles(
                                     beta = 1.0 - qd.exp(-absorption_rate * substep_dt / (voxel_distance + 1))
                                     local_pos += beta * (target_local_pos - local_pos)
                                     progress = beta
-                                    absorbed_pos = gu.qd_transform_by_trans_quat(
+                                    absorbed_pos = geom.qd_transform_by_trans_quat(
                                         local_pos,
                                         colliders_pos[collider_idx, env_idx],
                                         collider_quat,
@@ -467,7 +467,7 @@ def kernel_rebuild_voxels(
             voxel_idx = absorption_particles[particle_idx, env_idx].voxel_idx
             voxel_distance = absorption_particles[particle_idx, env_idx].voxel_distance
             progress = absorption_particles[particle_idx, env_idx].progress
-            is_valid = 0 <= voxel_idx and voxel_idx < n_voxels and voxel_distance >= 0
+            is_valid = 0 <= voxel_idx < n_voxels and voxel_distance >= 0
             is_valid = is_valid and not qd.math.isnan(progress) and not qd.math.isinf(progress)
             local_pos = absorption_particles[particle_idx, env_idx].local_pos
             target_local_pos = absorption_particles[particle_idx, env_idx].target_local_pos

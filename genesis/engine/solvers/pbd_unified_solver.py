@@ -7,7 +7,7 @@ import quadrants as qd
 
 import genesis as gs
 from genesis.engine.boundaries import CubeBoundary
-from genesis.engine.boundaries.rigid_surface import build_rigid_surface
+from genesis.engine.boundaries.rigid_surface import RigidSurface, build_rigid_surface
 from genesis.engine.entities.pbd_entity import PBD2DEntity, PBD3DEntity
 from genesis.engine.states.solvers import PBDSolverState
 from genesis.utils import array_class, geom, sdf
@@ -24,28 +24,6 @@ class PBDConstraintResiduals:
     stretch: torch.Tensor
     bending: torch.Tensor
     volume: torch.Tensor
-
-
-@dataclass(frozen=True)
-class PBDMomentum:
-    """Total mass, center of mass, and linear/angular momenta for each particle batch."""
-
-    mass: torch.Tensor
-    center: torch.Tensor
-    linear: torch.Tensor
-    angular: torch.Tensor
-
-
-def compute_particle_momentum(positions, velocities, masses):
-    """Compute batch momenta about the center of mass, with zero masses marking inactive particles."""
-    mass = masses.sum(dim=-1, keepdim=True)
-    denominator = torch.where(mass > 0.0, mass, 1.0)
-    center = (masses[..., None] * positions).sum(dim=-2) / denominator
-    linear = (masses[..., None] * velocities).sum(dim=-2)
-    # Centering velocities suppresses angular roundoff from uniform translation.
-    relative_velocities = velocities - (linear / denominator)[:, None, :]
-    angular = (masses[..., None] * torch.linalg.cross(positions - center[:, None, :], relative_velocities)).sum(dim=-2)
-    return PBDMomentum(mass, center, linear, angular)
 
 
 class PBDUnifiedSolverState(PBDSolverState):
@@ -125,8 +103,8 @@ def kernel_predict(
         particles[i_p, i_b].pos_iter = particles[i_p, i_b].pos
 
 
-@qd.kernel
-def kernel_accumulate_stretch(
+@qd.func
+def func_accumulate_stretch(
     dt: float,
     particles: V_ANNOTATION,
     particles_ng: V_ANNOTATION,
@@ -155,8 +133,8 @@ def kernel_accumulate_stretch(
                 particles[i2, i_b].dpos -= w2 * correction
 
 
-@qd.kernel
-def kernel_accumulate_volume(
+@qd.func
+def func_accumulate_volume(
     dt: float,
     particles: V_ANNOTATION,
     particles_ng: V_ANNOTATION,
@@ -194,8 +172,8 @@ def kernel_accumulate_volume(
                     particles[vertices[i_v], i_b].dpos += multiplier * weights[i_v] * gradients[:, i_v]
 
 
-@qd.kernel
-def kernel_accumulate_bending(
+@qd.func
+def func_accumulate_bending(
     dt: float,
     particles: V_ANNOTATION,
     particles_ng: V_ANNOTATION,
@@ -229,8 +207,8 @@ def kernel_accumulate_bending(
                 qd.atomic_or(errno[i_b], ErrorCode.INVALID_PBD_STATE)
 
 
-@qd.kernel
-def kernel_apply_delta(acceleration: float, particles: V_ANNOTATION, particles_ng: V_ANNOTATION, errno: qd.Tensor):
+@qd.func
+def func_apply_delta(acceleration: float, particles: V_ANNOTATION, particles_ng: V_ANNOTATION, errno: qd.Tensor):
     for i_p, i_b in qd.ndrange(particles.shape[0], particles.shape[1]):
         if particles_ng[i_p, i_b].active and particles[i_p, i_b].free:
             previous = particles[i_p, i_b].pos_iter
@@ -242,11 +220,12 @@ def kernel_apply_delta(acceleration: float, particles: V_ANNOTATION, particles_n
                 qd.atomic_or(errno[i_b], ErrorCode.INVALID_PBD_STATE)
             else:
                 particles[i_p, i_b].pos = pos
+        particles[i_p, i_b].contact_pos = particles[i_p, i_b].pos
         particles[i_p, i_b].dpos.fill(0.0)
 
 
-@qd.kernel
-def kernel_project_vertices(
+@qd.func
+def func_project_vertices(
     particles: V_ANNOTATION,
     particles_ng: V_ANNOTATION,
     bvh_nodes: V_ANNOTATION,
@@ -282,30 +261,15 @@ def kernel_project_vertices(
                 particles[i_p, i_b].pos = projected
 
 
-@qd.kernel
-def kernel_project_boundary(boundary: V_ANNOTATION, particles: V_ANNOTATION, particles_ng: V_ANNOTATION):
+@qd.func
+def func_project_boundary(boundary: V_ANNOTATION, particles: V_ANNOTATION, particles_ng: V_ANNOTATION):
     for i_p, i_b in qd.ndrange(particles.shape[0], particles.shape[1]):
         if particles_ng[i_p, i_b].active and particles[i_p, i_b].free:
             particles[i_p, i_b].pos = boundary.impose_pos(particles[i_p, i_b].pos)
 
 
-@qd.kernel
-def kernel_update_velocity(
-    velocities: qd.types.ndarray(), particles: V_ANNOTATION, particles_ng: V_ANNOTATION, errno: qd.Tensor
-):
-    for i_p, i_b in qd.ndrange(particles.shape[0], particles.shape[1]):
-        if particles_ng[i_p, i_b].active:
-            velocity = gs.qd_vec3([velocities[i_b, i_p, i_axis] for i_axis in qd.static(range(3))])
-            if qd.math.isnan(velocity).any() or qd.math.isinf(velocity).any():
-                qd.atomic_or(errno[i_b], ErrorCode.INVALID_PBD_STATE)
-            else:
-                particles[i_p, i_b].vel = velocity
-
-
-@qd.kernel
-def kernel_check_volume(
-    particles: V_ANNOTATION, particles_ng: V_ANNOTATION, elems_info: V_ANNOTATION, errno: qd.Tensor
-):
+@qd.func
+def func_check_volume(particles: V_ANNOTATION, particles_ng: V_ANNOTATION, elems_info: V_ANNOTATION, errno: qd.Tensor):
     for i_c, i_b in qd.ndrange(elems_info.shape[0], particles.shape[1]):
         info = elems_info[i_c]
         if (
@@ -327,6 +291,212 @@ def kernel_check_volume(
                 or particles[info.v4, i_b].free
             ):
                 qd.atomic_or(errno[i_b], ErrorCode.INVALID_PBD_VOLUME)
+
+
+@qd.func
+def func_compute_momentum(solver: V_ANNOTATION, is_initial: qd.template(), is_contact: qd.template()):
+    for i_e, i_b in qd.ndrange(solver.n_entities, solver._B):
+        solver._momentum[i_e, i_b].center = qd.Vector.zero(gs.qd_float, 3)
+        solver._momentum[i_e, i_b].linear = qd.Vector.zero(gs.qd_float, 3)
+        solver._momentum[i_e, i_b].angular = qd.Vector.zero(gs.qd_float, 3)
+        if qd.static(is_initial):
+            solver._momentum[i_e, i_b].mass = 0.0
+            solver._momentum[i_e, i_b].is_free = True
+        if qd.static(not is_initial and not is_contact):
+            solver._momentum[i_e, i_b].covariance = qd.Matrix.zero(gs.qd_float, 3, 3)
+
+    for i_p, i_b in qd.ndrange(solver.n_particles, solver._B):
+        if solver.particles_ng[i_p, i_b].active:
+            i_e = solver.particles_info[i_p].entity_idx
+            mass = solver.particles_info[i_p].mass
+            pos = solver.particles[i_p, i_b].pos
+            vel = (pos - solver.particles[i_p, i_b].ipos) / solver.substep_dt
+            if qd.static(is_initial):
+                pos = solver.particles[i_p, i_b].ipos
+                vel = solver.particles[i_p, i_b].vel
+                qd.atomic_add(solver._momentum[i_e, i_b].mass, mass)
+                if not solver.particles[i_p, i_b].free:
+                    solver._momentum[i_e, i_b].is_free = False
+            if qd.static(is_contact):
+                pos = solver.particles[i_p, i_b].contact_pos
+                # Extrapolation repeats contact corrections with geometrically decreasing weights.
+                acceleration = solver._options.constraint_acceleration
+                weight = (1.0 - acceleration ** solver._graph_counter[()]) / (1.0 - acceleration)
+                vel = weight * (solver.particles[i_p, i_b].pos - pos) / solver.substep_dt
+            solver.particles[i_p, i_b].momentum_vel = vel
+            origin = solver.particles[solver._entities_particle_start[i_e], i_b].ipos
+            qd.atomic_add(solver._momentum[i_e, i_b].center, mass * (pos - origin))
+            qd.atomic_add(solver._momentum[i_e, i_b].linear, mass * vel)
+
+    for i_e, i_b in qd.ndrange(solver.n_entities, solver._B):
+        mass = solver._momentum[i_e, i_b].mass
+        denominator = mass if mass > 0.0 else 1.0
+        origin = solver.particles[solver._entities_particle_start[i_e], i_b].ipos
+        solver._momentum[i_e, i_b].center = origin + solver._momentum[i_e, i_b].center / denominator
+
+    for i_p, i_b in qd.ndrange(solver.n_particles, solver._B):
+        if solver.particles_ng[i_p, i_b].active:
+            i_e = solver.particles_info[i_p].entity_idx
+            mass = solver.particles_info[i_p].mass
+            total_mass = solver._momentum[i_e, i_b].mass
+            denominator = total_mass if total_mass > 0.0 else 1.0
+            pos = solver.particles[i_p, i_b].pos
+            if qd.static(is_initial):
+                pos = solver.particles[i_p, i_b].ipos
+            if qd.static(is_contact):
+                pos = solver.particles[i_p, i_b].contact_pos
+            relative = pos - solver._momentum[i_e, i_b].center
+            # Centering velocity suppresses angular roundoff from uniform translation.
+            vel = solver.particles[i_p, i_b].momentum_vel - solver._momentum[i_e, i_b].linear / denominator
+            qd.atomic_add(solver._momentum[i_e, i_b].angular, mass * relative.cross(vel))
+            if qd.static(not is_initial and not is_contact):
+                qd.atomic_add(solver._momentum[i_e, i_b].covariance, mass * relative.outer_product(relative))
+
+    for i_e, i_b in qd.ndrange(solver.n_entities, solver._B):
+        if qd.static(is_initial):
+            solver._momentum[i_e, i_b].linear_target = solver._momentum[i_e, i_b].linear
+            solver._momentum[i_e, i_b].angular_target = solver._momentum[i_e, i_b].angular
+        elif qd.static(is_contact):
+            solver._momentum[i_e, i_b].linear_target += solver._momentum[i_e, i_b].linear
+            solver._momentum[i_e, i_b].angular_target += solver._momentum[i_e, i_b].angular
+        else:
+            mass = solver._momentum[i_e, i_b].mass
+            denominator = mass if mass > 0.0 else 1.0
+            solver._momentum[i_e, i_b].linear = (
+                solver._momentum[i_e, i_b].linear_target - solver._momentum[i_e, i_b].linear
+            ) / denominator
+            covariance = solver._momentum[i_e, i_b].covariance
+            trace = covariance.trace()
+            scale = trace if trace > 0.0 else 1.0
+            inertia = (trace * qd.Matrix.identity(gs.qd_float, 3) - covariance) / scale
+            angular_error = (solver._momentum[i_e, i_b].angular_target - solver._momentum[i_e, i_b].angular) / scale
+            cofactors = qd.Matrix.rows(
+                [
+                    inertia[1, :].cross(inertia[2, :]),
+                    inertia[2, :].cross(inertia[0, :]),
+                    inertia[0, :].cross(inertia[1, :]),
+                ]
+            )
+            determinant = inertia[0, :].dot(cofactors[0, :])
+            angular = inertia @ angular_error
+            # A line's normalized inertia equals its pseudoinverse.
+            if determinant > gs.EPS:
+                angular = cofactors.transpose() @ angular_error / determinant
+            solver._momentum[i_e, i_b].angular = angular
+
+
+@qd.func
+def func_project_elastic_constraints(solver: V_ANNOTATION):
+    if qd.static(solver.n_edges > 0):
+        func_accumulate_stretch(
+            solver.substep_dt, solver.particles, solver.particles_ng, solver.particles_info, solver.edges_info
+        )
+    if qd.static(solver.n_inner_edges > 0):
+        func_accumulate_bending(
+            solver.substep_dt,
+            solver.particles,
+            solver.particles_ng,
+            solver.particles_info,
+            solver.inner_edges_info,
+            solver._errno,
+        )
+    if qd.static(solver.n_elems > 0):
+        func_accumulate_volume(
+            solver.substep_dt, solver.particles, solver.particles_ng, solver.particles_info, solver.elems_info
+        )
+    func_apply_delta(solver._options.constraint_acceleration, solver.particles, solver.particles_ng, solver._errno)
+
+
+@qd.kernel
+def kernel_project_elastic_constraints(solver: V_ANNOTATION):
+    func_project_elastic_constraints(solver)
+
+
+@qd.func
+def func_project_collision(
+    dyn_state: array_class.DynState,
+    dyn_info: array_class.DynInfo,
+    rigid_info: array_class.RigidInfo,
+    collider_info: array_class.ColliderInfo,
+    surface_info: array_class.RigidSurfaceInfo,
+    solver: V_ANNOTATION,
+):
+    if qd.static(not isinstance(solver._rigid_surface, RigidSurface)):
+        func_project_boundary(solver.boundary, solver.particles, solver.particles_ng)
+    else:
+        func_project_vertices(
+            solver.particles,
+            solver.particles_ng,
+            solver._rigid_surface.bvh.nodes,
+            solver._rigid_surface.bvh.morton_codes,
+            dyn_state,
+            dyn_info,
+            rigid_info,
+            collider_info,
+            surface_info,
+            solver.boundary,
+            solver._errno,
+        )
+
+
+@qd.kernel
+def kernel_project_collision(
+    dyn_state: array_class.DynState,
+    dyn_info: array_class.DynInfo,
+    rigid_info: array_class.RigidInfo,
+    collider_info: array_class.ColliderInfo,
+    surface_info: array_class.RigidSurfaceInfo,
+    solver: V_ANNOTATION,
+):
+    func_project_collision(dyn_state, dyn_info, rigid_info, collider_info, surface_info, solver)
+
+
+@qd.kernel(graph=True)
+def kernel_solve_constraints(
+    history: qd.types.ndarray(),
+    dyn_state: array_class.DynState,
+    dyn_info: array_class.DynInfo,
+    rigid_info: array_class.RigidInfo,
+    collider_info: array_class.ColliderInfo,
+    surface_info: array_class.RigidSurfaceInfo,
+    solver: V_ANNOTATION,
+):
+    func_compute_momentum(solver, is_initial=True, is_contact=False)
+    solver._graph_counter[()] = solver._options.max_solver_iterations
+    while qd.graph.do_while(solver._graph_counter):
+        if qd.static(solver._options.is_recording_constraint_history):
+            for i_p, i_b in qd.ndrange(solver.n_particles, solver._B):
+                i_iteration = solver._options.max_solver_iterations - solver._graph_counter[()]
+                for i_axis in qd.static(range(3)):
+                    history[i_iteration, 0, i_b, i_p, i_axis] = solver.particles[i_p, i_b].pos[i_axis]
+        func_project_elastic_constraints(solver)
+        if qd.static(solver._options.is_recording_constraint_history):
+            for i_p, i_b in qd.ndrange(solver.n_particles, solver._B):
+                i_iteration = solver._options.max_solver_iterations - solver._graph_counter[()]
+                for i_axis in qd.static(range(3)):
+                    history[i_iteration, 1, i_b, i_p, i_axis] = solver.particles[i_p, i_b].pos[i_axis]
+        func_project_collision(dyn_state, dyn_info, rigid_info, collider_info, surface_info, solver)
+        func_compute_momentum(solver, is_initial=False, is_contact=True)
+        if qd.static(solver._options.is_recording_constraint_history):
+            for i_p, i_b in qd.ndrange(solver.n_particles, solver._B):
+                i_iteration = solver._options.max_solver_iterations - solver._graph_counter[()]
+                for i_axis in qd.static(range(3)):
+                    history[i_iteration, 2, i_b, i_p, i_axis] = solver.particles[i_p, i_b].pos[i_axis]
+        solver._graph_counter[()] -= 1
+    if qd.static(solver.n_elems > 0):
+        func_check_volume(solver.particles, solver.particles_ng, solver.elems_info, solver._errno)
+    func_compute_momentum(solver, is_initial=False, is_contact=False)
+    for i_p, i_b in qd.ndrange(solver.n_particles, solver._B):
+        if solver.particles_ng[i_p, i_b].active:
+            i_e = solver.particles_info[i_p].entity_idx
+            vel = solver.particles[i_p, i_b].momentum_vel
+            if solver._momentum[i_e, i_b].is_free:
+                relative = solver.particles[i_p, i_b].pos - solver._momentum[i_e, i_b].center
+                vel += solver._momentum[i_e, i_b].linear + solver._momentum[i_e, i_b].angular.cross(relative)
+            if qd.math.isnan(vel).any() or qd.math.isinf(vel).any():
+                qd.atomic_or(solver._errno[i_b], ErrorCode.INVALID_PBD_STATE)
+            else:
+                solver.particles[i_p, i_b].vel = vel
 
 
 @qd.kernel
@@ -405,8 +575,12 @@ class PBDUnifiedSolver(Solver):
         self.vverts_uvs = None
         self.vfaces_indices = None
         self._rigid_surface = None
+        self._surface_info = None
         self._errno = None
         self._iteration_positions = None
+        self._momentum = None
+        self._entities_particle_start = None
+        self._graph_counter = None
         self._edges = None
         self._inner_edges = None
         self._elems = None
@@ -464,6 +638,8 @@ class PBDUnifiedSolver(Solver):
             pos=gs.qd_vec3,
             ipos=gs.qd_vec3,
             pos_iter=gs.qd_vec3,
+            contact_pos=gs.qd_vec3,
+            momentum_vel=gs.qd_vec3,
             dpos=gs.qd_vec3,
             vel=gs.qd_vec3,
         ).field(shape=(self.n_particles, self._B), layout=qd.Layout.SOA)
@@ -474,6 +650,7 @@ class PBDUnifiedSolver(Solver):
             mass=gs.qd_float,
             pos_rest=gs.qd_vec3,
             material_type=gs.qd_int,
+            entity_idx=gs.qd_int,
             mu_s=gs.qd_float,
             mu_k=gs.qd_float,
             air_resistance=gs.qd_float,
@@ -520,8 +697,26 @@ class PBDUnifiedSolver(Solver):
         self.vverts_uvs = qd.field(gs.qd_vec2, shape=(self.n_vverts,))
         self.vfaces_indices = qd.field(gs.qd_ivec3, shape=(self.n_vfaces,))
         self._errno = array_class.V(dtype=gs.qd_int, shape=(self._B,))
-        for entity in self.entities:
+        self._momentum = qd.types.struct(
+            mass=gs.qd_float,
+            center=gs.qd_vec3,
+            linear=gs.qd_vec3,
+            angular=gs.qd_vec3,
+            covariance=gs.qd_mat3,
+            linear_target=gs.qd_vec3,
+            angular_target=gs.qd_vec3,
+            is_free=gs.qd_bool,
+        ).field(shape=(self.n_entities, self._B), layout=qd.Layout.SOA)
+        self._entities_particle_start = qd.field(gs.qd_int, shape=(self.n_entities,))
+        self._entities_particle_start.from_numpy(
+            np.array([entity.particle_start for entity in self.entities], dtype=gs.np_int)
+        )
+        self._graph_counter = qd.ndarray(gs.qd_int, shape=())
+        particles_entity_idx = np.empty(self.n_particles, dtype=gs.np_int)
+        for i_e, entity in enumerate(self.entities):
             entity._add_to_solver()
+            particles_entity_idx[entity.particle_start : entity.particle_end] = i_e
+        self.particles_info.entity_idx.from_numpy(particles_entity_idx)
         if self.n_inner_edges:
             kernel_init_bending(self.particles_info, self.inner_edges_info, self._errno)
         self._edges = torch.as_tensor(
@@ -575,6 +770,11 @@ class PBDUnifiedSolver(Solver):
                 gs.raise_exception("PBD rigid collision requires surface triangles.")
             rigid.collider._sdf.activate()
             self._rigid_surface = build_rigid_surface(rigid, projection_geoms)
+        self._surface_info = (
+            self._rigid_surface.info
+            if self._rigid_surface is not None
+            else array_class.RigidSurfaceInfo(None, None, None, None)
+        )
         if self._options.is_recording_constraint_history:
             self._iteration_positions = torch.empty(
                 (self._options.max_solver_iterations, 3, self._B, self.n_particles, 3),
@@ -601,135 +801,32 @@ class PBDUnifiedSolver(Solver):
             self,
             self._errno,
         )
-        is_active = qd_to_torch(self.particles_ng.active, transpose=True)
-        is_free = qd_to_torch(self.particles.free, transpose=True)
-        masses = qd_to_torch(self.particles_info.mass, transpose=True)[None] * is_active
-        positions = qd_to_torch(self.particles.ipos, transpose=True)
-        velocities = qd_to_torch(self.particles.vel, transpose=True)
-        momenta = [
-            compute_particle_momentum(
-                positions[:, entity.particle_start : entity.particle_end],
-                velocities[:, entity.particle_start : entity.particle_end],
-                masses[:, entity.particle_start : entity.particle_end],
-            )
-            for entity in self.entities
-        ]
-        acceleration = self._options.constraint_acceleration
-        for i_iteration in range(self._options.max_solver_iterations):
-            if self._iteration_positions is not None:
-                self._iteration_positions[i_iteration, 0].copy_(qd_to_torch(self.particles.pos, transpose=True))
-            self.project_elastic_constraints()
-            if self._iteration_positions is not None:
-                self._iteration_positions[i_iteration, 1].copy_(qd_to_torch(self.particles.pos, transpose=True))
-            contact_positions = qd_to_torch(self.particles.pos, transpose=True, copy=True)
-            self.project_collision()
-            contact_velocities = (qd_to_torch(self.particles.pos, transpose=True) - contact_positions) / self.substep_dt
-            # Extrapolation repeats earlier corrections with geometrically decreasing weights.
-            contact_weight = (1.0 - acceleration ** (self._options.max_solver_iterations - i_iteration)) / (
-                1.0 - acceleration
-            )
-            contact_velocities *= contact_weight
-            for entity, momentum in zip(self.entities, momenta):
-                particles_idx = slice(entity.particle_start, entity.particle_end)
-                contact_momentum = compute_particle_momentum(
-                    contact_positions[:, particles_idx], contact_velocities[:, particles_idx], masses[:, particles_idx]
-                )
-                momentum.linear.add_(contact_momentum.linear)
-                momentum.angular.add_(contact_momentum.angular)
-            if self._iteration_positions is not None:
-                self._iteration_positions[i_iteration, 2].copy_(qd_to_torch(self.particles.pos, transpose=True))
-        if self.n_elems:
-            kernel_check_volume(self.particles, self.particles_ng, self.elems_info, self._errno)
-        self.check_errno()
-
-        positions = qd_to_torch(self.particles.pos, transpose=True)
-        velocities = (positions - qd_to_torch(self.particles.ipos, transpose=True)) / self.substep_dt
-        for entity, momentum in zip(self.entities, momenta):
-            particles_idx = slice(entity.particle_start, entity.particle_end)
-            current = compute_particle_momentum(
-                positions[:, particles_idx], velocities[:, particles_idx], masses[:, particles_idx]
-            )
-            relative = positions[:, particles_idx] - current.center[:, None, :]
-            covariance = relative.transpose(-1, -2) @ (masses[:, particles_idx, None] * relative)
-            inertia = (
-                covariance.diagonal(dim1=-2, dim2=-1).sum(dim=-1)[:, None, None]
-                * torch.eye(3, dtype=gs.tc_float, device=gs.device)
-                - covariance
-            )
-            # Algorithm 2 of Dahl and Bargteil's Global Momentum Preservation for Position-based Dynamics.
-            linear_correction = (momentum.linear - current.linear) / torch.where(current.mass > 0.0, current.mass, 1.0)
-            inertia_scale = covariance.diagonal(dim1=-2, dim2=-1).sum(dim=-1)
-            inertia_scale = torch.where(inertia_scale > 0.0, inertia_scale, 1.0)
-            inertia /= inertia_scale[:, None, None]
-            cofactors = torch.linalg.cross(inertia[:, (1, 2, 0), :], inertia[:, (2, 0, 1), :])
-            determinant = (inertia[:, 0, :] * cofactors[:, 0, :]).sum(dim=-1)
-            is_invertible = determinant > gs.EPS
-            angular_error = (momentum.angular - current.angular) / inertia_scale[:, None]
-            angular_correction = (cofactors.transpose(-1, -2) @ angular_error[..., None])[..., 0]
-            angular_correction /= torch.where(is_invertible, determinant, 1.0)[:, None]
-            # A line's normalized inertia is an orthogonal projection and equals its pseudoinverse.
-            angular_correction = torch.where(
-                is_invertible[:, None], angular_correction, (inertia @ angular_error[..., None])[..., 0]
-            )
-            velocity_correction = linear_correction[:, None, :] + torch.linalg.cross(
-                angular_correction[:, None, :], relative
-            )
-            # Prescribed particles exchange momentum with their anchors.
-            is_free_entity = (is_free[:, particles_idx] | ~is_active[:, particles_idx]).all(dim=-1)
-            velocities[:, particles_idx] += torch.where(is_free_entity[:, None, None], velocity_correction, 0.0)
-        if gs.use_zerocopy:
-            particles_vel = qd_to_torch(self.particles.vel, transpose=True, copy=False)
-            particles_vel.copy_(torch.where(is_active[..., None], velocities, particles_vel))
-            errno = qd_to_torch(self._errno, transpose=True, copy=False)
-            is_invalid = (is_active & ~torch.isfinite(velocities).all(dim=-1)).any(dim=-1)
-            errno.bitwise_or_(is_invalid * ErrorCode.INVALID_PBD_STATE)
-            if gs.backend == gs.metal:
-                torch.mps.synchronize()
-        else:
-            kernel_update_velocity(velocities.contiguous(), self.particles, self.particles_ng, self._errno)
-        self.check_errno()
-
-    def project_elastic_constraints(self):
-        """Apply one simultaneous stretch, bending, and volume correction at the current positions."""
-        self.particles.dpos.fill(0.0)
-        if self.n_edges:
-            kernel_accumulate_stretch(
-                self.substep_dt, self.particles, self.particles_ng, self.particles_info, self.edges_info
-            )
-        if self.n_inner_edges:
-            kernel_accumulate_bending(
-                self.substep_dt,
-                self.particles,
-                self.particles_ng,
-                self.particles_info,
-                self.inner_edges_info,
-                self._errno,
-            )
-        if self.n_elems:
-            kernel_accumulate_volume(
-                self.substep_dt, self.particles, self.particles_ng, self.particles_info, self.elems_info
-            )
-        kernel_apply_delta(self._options.constraint_acceleration, self.particles, self.particles_ng, self._errno)
-
-    def project_collision(self):
-        """Project free vertices through the domain boundary and each rigid geom once."""
-        if self._rigid_surface is None:
-            kernel_project_boundary(self.boundary, self.particles, self.particles_ng)
-            return
         rigid = self.scene.rigid_solver
-        surface = self._rigid_surface
-        kernel_project_vertices(
-            self.particles,
-            self.particles_ng,
-            surface.bvh.nodes,
-            surface.bvh.morton_codes,
+        kernel_solve_constraints(
+            self._iteration_positions if self._iteration_positions is not None else self._graph_counter,
             rigid.dyn_state,
             rigid.dyn_info,
             rigid.rigid_info,
             rigid.collider._collider_info,
-            surface.info,
-            self.boundary,
-            self._errno,
+            self._surface_info,
+            self,
+        )
+        self.check_errno()
+
+    def project_elastic_constraints(self):
+        """Apply one simultaneous stretch, bending, and volume correction at the current positions."""
+        kernel_project_elastic_constraints(self)
+
+    def project_collision(self):
+        """Project free vertices through the domain boundary and each rigid geom once."""
+        rigid = self.scene.rigid_solver
+        kernel_project_collision(
+            rigid.dyn_state,
+            rigid.dyn_info,
+            rigid.rigid_info,
+            rigid.collider._collider_info,
+            self._surface_info,
+            self,
         )
 
     def substep_post_coupling(self, f):
