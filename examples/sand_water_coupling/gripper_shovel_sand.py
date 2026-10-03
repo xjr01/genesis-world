@@ -1,6 +1,6 @@
 """
 Phase 7 gripper-arm shovel demo: a Franka Panda grips the shovel handle and follows it through
-the exact same scoop motion as the best wet-sand demo (examples/coupling/shovel_wet_sand.py,
+the exact same scoop motion as the best wet-sand demo (examples/sand_water_coupling/shovel_wet_sand.py,
 viscosity_coeff = 0.01 + contact release, n_wet_lifted ~ 5666).
 
 The shovel dynamics are replicated at the code level: the same scene parameters, the same

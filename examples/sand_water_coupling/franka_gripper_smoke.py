@@ -27,7 +27,7 @@ EXPERIMENTS_DIR = os.path.dirname(os.path.abspath(__file__))
 FRAMES_DIR = os.path.join(EXPERIMENTS_DIR, "frames")
 REC_DIR = os.path.join(EXPERIMENTS_DIR, "recordings", "phase5_shovel_wet")
 
-# --- shovel geometry (identical to examples/coupling/shovel_wet_sand.py) ---
+# --- shovel geometry (identical to examples/sand_water_coupling/shovel_wet_sand.py) ---
 BLADE_HALF = (0.15, 0.12, 0.01)
 HANDLE_LEN = 0.3
 HANDLE_HALF_THICK = 0.015
