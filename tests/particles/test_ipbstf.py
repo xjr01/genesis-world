@@ -8,6 +8,63 @@ from tests.utils import assert_allclose, assert_equal
 
 @pytest.mark.required
 @pytest.mark.parametrize("backend", [gs.cuda])
+def test_partial_reset_restores_particles_and_static_collider_pose(show_viewer):
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=0.01,
+            gravity=(0.0, 0.0, 0.0),
+        ),
+        ipbstf_options=gs.options.IPBSTFOptions(
+            particle_size=0.1,
+            static_colliders=[
+                gs.options.PBSTFBoxStaticColliderOptions(
+                    lower=(-0.2, -0.2, -0.2),
+                    upper=(0.2, 0.2, 0.2),
+                ),
+            ],
+            lower_bound=(-2.0, -2.0, -2.0),
+            upper_bound=(2.0, 2.0, 2.0),
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(2.0, 2.0, 2.0),
+            camera_lookat=(0.0, 0.0, 0.0),
+        ),
+        show_viewer=show_viewer,
+    )
+    liquid = scene.add_entity(
+        morph=gs.morphs.Particles(
+            positions=((0.5, 0.5, 0.5),),
+        ),
+        material=gs.materials.IPBSTF.Liquid(
+            sampler="staggered",
+        ),
+    )
+    scene.build(n_envs=2)
+    scene.ipbstf_solver.set_static_colliders_pose(
+        pos=(((0.0, 0.0, 0.0),), ((1.0, 0.0, 0.0),)),
+        quat=(1.0, 0.0, 0.0, 0.0),
+    )
+    snapshot = scene.get_state()
+
+    liquid.set_particles_pos((2.0, 2.0, 2.0))
+    scene.ipbstf_solver.set_static_colliders_pose(
+        pos=(((2.0, 0.0, 0.0),), ((2.0, 0.0, 0.0),)),
+        quat=(1.0, 0.0, 0.0, 0.0),
+    )
+    scene.reset(snapshot, envs_idx=(1,))
+    restored = scene.ipbstf_solver.get_state(0)
+
+    assert_allclose(tensor_to_array(liquid.get_state().pos[0]), ((2.0, 2.0, 2.0),), atol=1e-6)
+    assert_allclose(tensor_to_array(liquid.get_state().pos[1]), ((0.5, 0.5, 0.5),), atol=1e-6)
+    assert_allclose(
+        tensor_to_array(restored.static_colliders_pos[:, 0, :]),
+        ((2.0, 0.0, 0.0), (1.0, 0.0, 0.0)),
+        atol=1e-6,
+    )
+
+
+@pytest.mark.required
+@pytest.mark.parametrize("backend", [gs.cuda])
 @pytest.mark.parametrize("n_envs", [0, 2])
 def test_unilateral_density_energy(n_envs, show_viewer):
     scene = gs.Scene(

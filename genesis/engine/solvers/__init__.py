@@ -1,4 +1,6 @@
+from .dem_solver import DEMSolver
 from .fem_solver import FEMSolver
+from .flip_solver import FLIPSolver
 from .ipbf_solver import IPBFSolver
 from .ipbstf import IPBSTFSolver
 from .kinematic_solver import KinematicSolver

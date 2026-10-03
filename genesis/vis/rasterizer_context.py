@@ -167,6 +167,8 @@ class RasterizerContext:
         self.on_pbstf()
         self.on_multifluid()
         self.on_pbd()
+        self.on_dem()
+        self.on_flip()
         self.on_fem()
 
         # segmentation mapping
@@ -1065,6 +1067,96 @@ class RasterizerContext:
                         if normal_data is not None:
                             self.jit.update_buffer(node, "normal", normal_data)
 
+    def on_dem(self):
+        if self.sim.dem_solver.is_active:
+            for dem_entity in self.sim.dem_solver.entities:
+                for idx in self.rendered_envs_idx:
+                    if dem_entity.surface.vis_mode == "particle":
+                        if self.render_particle_as == "sphere":
+                            mesh = mu.create_sphere(
+                                self.sim.dem_solver.particle_radius * self.particle_size_scale, subdivisions=1
+                            )
+                            mesh.visual = mu.surface_uvs_to_trimesh_visual(
+                                dem_entity.surface, n_verts=len(mesh.vertices)
+                            )
+                            tfs = np.tile(np.eye(4), (dem_entity.n_particles, 1, 1))
+                            tfs[:, :3, 3] = dem_entity.init_particles
+                            self.add_static_node(
+                                dem_entity, pyrender.Mesh.from_trimesh(mesh, smooth=True, poses=tfs), i_b=idx
+                            )
+
+            # boundary
+            if self.visualize_pbd_boundary:
+                self.add_node(
+                    pyrender.Mesh.from_trimesh(
+                        mu.create_box(
+                            bounds=np.array(
+                                [self.sim.dem_solver.boundary.lower, self.sim.dem_solver.boundary.upper],
+                                dtype=np.float32,
+                            ),
+                            wireframe=True,
+                            color=(0.0, 1.0, 1.0, 1.0),
+                        ),
+                        smooth=True,
+                    )
+                )
+
+    def update_dem(self):
+        if self.sim.dem_solver.is_active:
+            particles_all = qd_to_numpy(self.sim.dem_solver.particles_render.pos) + self.scene.envs_offset
+            active_all = qd_to_numpy(self.sim.dem_solver.particles_render.active).astype(dtype=np.bool_, copy=False)
+            for dem_entity in self.sim.dem_solver.entities:
+                for idx in self.rendered_envs_idx:
+                    particles_env = particles_all[:, idx]
+                    active_env = active_all[:, idx]
+
+                    if dem_entity.surface.vis_mode == "particle":
+                        if self.render_particle_as == "sphere":
+                            tfs = np.tile(np.eye(4), (dem_entity.n_particles, 1, 1))
+                            tfs[:, :3, 3] = particles_env[dem_entity.particle_start : dem_entity.particle_end]
+                            # deleted (inactive) grains get a zero transform, making them invisible
+                            tfs[~active_env[dem_entity.particle_start : dem_entity.particle_end]] = 0.0
+
+                            node = self.static_nodes[(idx, dem_entity.uid)]
+                            self.jit.update_buffer(node, "model", tfs.transpose((0, 2, 1)))
+
+    def on_flip(self):
+        if self.sim.flip_solver.is_active:
+            for flip_entity in self.sim.flip_solver.entities:
+                for idx in self.rendered_envs_idx:
+                    if flip_entity.surface.vis_mode == "particle":
+                        if self.render_particle_as == "sphere":
+                            mesh = mu.create_sphere(
+                                self.sim.flip_solver.particle_radius * self.particle_size_scale, subdivisions=1
+                            )
+                            mesh.visual = mu.surface_uvs_to_trimesh_visual(
+                                flip_entity.surface, n_verts=len(mesh.vertices)
+                            )
+                            tfs = np.tile(np.eye(4), (flip_entity.n_particles, 1, 1))
+                            tfs[:, :3, 3] = flip_entity.init_particles
+                            self.add_static_node(
+                                flip_entity, pyrender.Mesh.from_trimesh(mesh, smooth=True, poses=tfs), i_b=idx
+                            )
+
+    def update_flip(self):
+        if self.sim.flip_solver.is_active:
+            particles_all = qd_to_numpy(self.sim.flip_solver.particles_render.pos) + self.scene.envs_offset
+            active_all = qd_to_numpy(self.sim.flip_solver.particles_render.active).astype(dtype=np.bool_, copy=False)
+            for flip_entity in self.sim.flip_solver.entities:
+                for idx in self.rendered_envs_idx:
+                    particles_env = particles_all[:, idx]
+                    active_env = active_all[:, idx]
+
+                    if flip_entity.surface.vis_mode == "particle":
+                        if self.render_particle_as == "sphere":
+                            tfs = np.tile(np.eye(4), (flip_entity.n_particles, 1, 1))
+                            tfs[:, :3, 3] = particles_env[flip_entity.particle_start : flip_entity.particle_end]
+                            # absorbed (inactive) particles get a zero transform, making them invisible
+                            tfs[~active_env[flip_entity.particle_start : flip_entity.particle_end]] = 0.0
+
+                            node = self.static_nodes[(idx, flip_entity.uid)]
+                            self.jit.update_buffer(node, "model", tfs.transpose((0, 2, 1)))
+
     def on_fem(self):
         if self.sim.fem_solver.is_active:
             has_visual = any(entity.surface.vis_mode == "visual" for entity in self.sim.fem_solver.entities)
@@ -1398,6 +1490,8 @@ class RasterizerContext:
         self.update_pbstf()
         self.update_multifluid()
         self.update_pbd()
+        self.update_dem()
+        self.update_flip()
         self.update_fem()
         self.update_sensors()
 

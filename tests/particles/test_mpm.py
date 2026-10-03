@@ -104,6 +104,7 @@ def test_perf_dispatch(variant, show_viewer):
             size=(0.08, 0.08, 0.08),
         ),
         material=gs.materials.MPM.Liquid(
+            particle_size=0.005,
             viscous=liquid_viscous,
         ),
     )
@@ -111,6 +112,10 @@ def test_perf_dispatch(variant, show_viewer):
 
     # Aggregate SVD flag must match the variant for the dispatch path under test to actually run.
     assert scene.sim.mpm_solver.needs_svd == (variant == "svd")
+    assert liquid.particle_size == 0.005
+    liquid_mass = liquid.get_mass()
+    expected_liquid_mass = torch.full_like(liquid_mass, liquid.n_particles * 0.005**3 * liquid.material.rho)
+    assert torch.isclose(liquid_mass, expected_liquid_mass).all()
 
     init_elastic_pos = elastic.get_particles_pos()
     init_liquid_pos = liquid.get_particles_pos()

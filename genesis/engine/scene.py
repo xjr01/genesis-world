@@ -19,6 +19,8 @@ from genesis.engine.materials.base import EntityT, Material
 from genesis.engine.states.solvers import SimState
 from genesis.options import (
     BaseCouplerOptions,
+    DEMOptions,
+    FLIPOptions,
     FEMOptions,
     IPBFOptions,
     IPBSTFOptions,
@@ -84,6 +86,10 @@ class Scene(RBC):
         The options configuring the sf_solver (``scene.sim.SFSolver``).
     pbd_options : gs.options.PBDOptions
         The options configuring the pbd_solver (``scene.sim.PBDSolver``).
+    dem_options : gs.options.DEMOptions
+        The options configuring the dem_solver (``scene.sim.DEMSolver``).
+    flip_options : gs.options.FLIPOptions
+        The options configuring the flip_solver (``scene.sim.FLIPSolver``).
     ipbf_options : gs.options.IPBFOptions
         Options for the implicit position-based fluid (IPBF) solver.
     ipbstf_options : gs.options.IPBSTFOptions
@@ -114,6 +120,8 @@ class Scene(RBC):
         fem_options: FEMOptions | None = None,
         sf_options: SFOptions | None = None,
         pbd_options: PBDOptions | PBDUnifiedOptions | None = None,
+        dem_options: DEMOptions | None = None,
+        flip_options: FLIPOptions | None = None,
         ipbf_options: IPBFOptions | None = None,
         ipbstf_options: IPBSTFOptions | None = None,
         pbstf_options: PBSTFOptions | None = None,
@@ -138,6 +146,8 @@ class Scene(RBC):
         fem_options = fem_options or FEMOptions()
         sf_options = sf_options or SFOptions()
         pbd_options = pbd_options or PBDOptions()
+        dem_options = dem_options or DEMOptions()
+        flip_options = flip_options or FLIPOptions()
         ipbf_options = ipbf_options or IPBFOptions()
         ipbstf_options = ipbstf_options or IPBSTFOptions()
         pbstf_options = pbstf_options or PBSTFOptions()
@@ -162,6 +172,8 @@ class Scene(RBC):
             fem_options,
             sf_options,
             pbd_options,
+            dem_options,
+            flip_options,
             ipbf_options,
             ipbstf_options,
             pbstf_options,
@@ -181,6 +193,8 @@ class Scene(RBC):
         self.fem_options = fem_options.model_copy_from(sim_options)
         self.sf_options = sf_options.model_copy_from(sim_options)
         self.pbd_options = pbd_options.model_copy_from(sim_options)
+        self.dem_options = dem_options.model_copy_from(sim_options)
+        self.flip_options = flip_options.model_copy_from(sim_options)
         self.ipbf_options = ipbf_options.model_copy_from(sim_options)
         self.ipbstf_options = ipbstf_options.model_copy_from(sim_options)
         self.pbstf_options = pbstf_options.model_copy_from(sim_options)
@@ -203,6 +217,8 @@ class Scene(RBC):
             fem_options=self.fem_options,
             sf_options=self.sf_options,
             pbd_options=self.pbd_options,
+            dem_options=self.dem_options,
+            flip_options=self.flip_options,
             ipbf_options=self.ipbf_options,
             ipbstf_options=self.ipbstf_options,
             pbstf_options=self.pbstf_options,
@@ -248,6 +264,8 @@ class Scene(RBC):
         fem_options: FEMOptions,
         sf_options: SFOptions,
         pbd_options: PBDOptions | PBDUnifiedOptions,
+        dem_options: DEMOptions,
+        flip_options: FLIPOptions,
         ipbf_options: IPBFOptions,
         ipbstf_options: IPBSTFOptions,
         pbstf_options: PBSTFOptions,
@@ -294,6 +312,12 @@ class Scene(RBC):
 
         if not isinstance(pbstf_options, PBSTFOptions):
             gs.raise_exception("`pbstf_options` should be an instance of `PBSTFOptions`.")
+
+        if not isinstance(dem_options, DEMOptions):
+            gs.raise_exception("`dem_options` should be an instance of `DEMOptions`.")
+
+        if not isinstance(flip_options, FLIPOptions):
+            gs.raise_exception("`flip_options` should be an instance of `FLIPOptions`.")
 
         if not isinstance(vis_options, VisOptions):
             gs.raise_exception("`vis_options` should be an instance of `VisOptions`.")
@@ -489,6 +513,15 @@ class Scene(RBC):
             if surface.vis_mode not in ("particle", "recon"):
                 gs.raise_exception(
                     f"Unsupported `surface.vis_mode` for material {material}: '{surface.vis_mode}'. Expected one of: ['particle', 'recon']."
+                )
+
+        elif isinstance(material, (gs.materials.DEM.Base, gs.materials.FLIP.Base)):
+            if surface.vis_mode is None:
+                surface.vis_mode = "particle"
+
+            if surface.vis_mode not in ("particle",):
+                gs.raise_exception(
+                    f"Unsupported `surface.vis_mode` for material {material}: '{surface.vis_mode}'. Expected one of: ['particle']."
                 )
 
         elif isinstance(material, gs.materials.SF.Smoke):
@@ -1852,6 +1885,16 @@ class Scene(RBC):
     def pbd_solver(self):
         """The scene's `pbd_solver`, managing all the `PBDEntity` in the scene."""
         return self._sim.pbd_solver
+
+    @property
+    def dem_solver(self):
+        """The scene's `dem_solver`, managing all the `DEMEntity` in the scene."""
+        return self._sim.dem_solver
+
+    @property
+    def flip_solver(self):
+        """The scene's `flip_solver`, managing all the `FLIPEntity` in the scene."""
+        return self._sim.flip_solver
 
     @property
     def ipbf_solver(self):

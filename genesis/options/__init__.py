@@ -2,7 +2,9 @@ from .misc import CoacdOptions, FoamOptions
 from .profiling import ProfilingOptions
 from .solvers import (
     BaseCouplerOptions,
+    DEMOptions,
     FEMOptions,
+    FLIPOptions,
     IPBFOptions,
     IPBSTFOptions,
     IPCCouplerOptions,
@@ -30,7 +32,9 @@ from .vis import ViewerOptions, VisOptions
 __all__ = [
     "BaseCouplerOptions",
     "CoacdOptions",
+    "DEMOptions",
     "FEMOptions",
+    "FLIPOptions",
     "FoamOptions",
     "IPBFOptions",
     "IPBSTFOptions",

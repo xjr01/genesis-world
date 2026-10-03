@@ -100,6 +100,7 @@ class MPMSolver(Solver):
         struct_particle_info = qd.types.struct(
             material_idx=gs.qd_int,
             mass=gs.qd_float,
+            reference_volume=gs.qd_float,
             default_Jp=gs.qd_float,
             free=gs.qd_bool,
             # for muscle
@@ -261,6 +262,7 @@ class MPMSolver(Solver):
 
     def add_entity(self, idx, material, morph, surface, name: str | None = None) -> "MPMEntity":
         self.add_material(material)
+        particle_size = self._particle_size if material.particle_size is None else material.particle_size
 
         # create entity
         entity = MPMEntity(
@@ -269,7 +271,7 @@ class MPMSolver(Solver):
             material=material,
             morph=morph,
             surface=surface,
-            particle_size=self._particle_size,
+            particle_size=particle_size,
             idx=idx,
             particle_start=self.n_particles,
             vvert_start=self.n_vverts,
@@ -416,7 +418,13 @@ class MPMSolver(Solver):
                             actu=self.particles[f, i_p, i_b].actu,
                             m_dir=self.particles_info[i_p].muscle_direction,
                         )
-                stress = (-self.substep_dt * self._particle_volume * 4 * self._inv_dx * self._inv_dx) * stress
+                stress = (
+                    -self.substep_dt
+                    * self.particles_info[i_p].reference_volume
+                    * 4
+                    * self._inv_dx
+                    * self._inv_dx
+                ) * stress
                 affine = stress + self.particles_info[i_p].mass * self.particles[f, i_p, i_b].C
 
                 # C. project onto grid
@@ -914,6 +922,7 @@ class MPMSolver(Solver):
         material_idx: qd.i32,
         mat_default_Jp: qd.f32,
         mat_rho: qd.f32,
+        reference_volume: qd.f32,
         pos: qd.types.ndarray(),  # shape [n_particles, 3]
     ):
         for i_p_ in range(n_particles):
@@ -921,7 +930,8 @@ class MPMSolver(Solver):
 
             self.particles_info[i_p].material_idx = material_idx
             self.particles_info[i_p].default_Jp = mat_default_Jp
-            self.particles_info[i_p].mass = self._particle_volume * mat_rho
+            self.particles_info[i_p].reference_volume = reference_volume
+            self.particles_info[i_p].mass = reference_volume * mat_rho
             self.particles_info[i_p].free = True
             self.particles_info[i_p].muscle_group = 0
             self.particles_info[i_p].muscle_direction = qd.Vector([0.0, 0.0, 1.0], dt=gs.qd_float)

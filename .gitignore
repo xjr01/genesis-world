@@ -161,5 +161,9 @@ outputs/
 # Local benchmark archive (not versioned)
 /benchmarks/
 
+# Local integration runtimes and compiler caches
+/.runtime-cache/
+/.runtime-deps/
+
 # Local agent memory (not versioned)
 /.agents/

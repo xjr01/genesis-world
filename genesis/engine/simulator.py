@@ -6,6 +6,8 @@ import genesis as gs
 from genesis.options.morphs import Morph
 from genesis.options.solvers import (
     BaseCouplerOptions,
+    DEMOptions,
+    FLIPOptions,
     FEMOptions,
     IPBFOptions,
     IPBSTFOptions,
@@ -29,7 +31,9 @@ from .couplers import IPCCoupler, LegacyCoupler, SAPCoupler
 from .entities import HybridEntity
 from .sensors import SensorManager
 from .solvers import (
+    DEMSolver,
     FEMSolver,
+    FLIPSolver,
     IPBFSolver,
     IPBSTFSolver,
     KinematicSolver,
@@ -102,6 +106,8 @@ class Simulator(RBC):
         fem_options: FEMOptions,
         sf_options: SFOptions,
         pbd_options: PBDOptions | PBDUnifiedOptions,
+        dem_options: DEMOptions,
+        flip_options: FLIPOptions,
         ipbf_options: IPBFOptions,
         ipbstf_options: IPBSTFOptions,
         pbstf_options: PBSTFOptions,
@@ -119,6 +125,8 @@ class Simulator(RBC):
         self.fem_options = fem_options
         self.sf_options = sf_options
         self.pbd_options = pbd_options
+        self.dem_options = dem_options
+        self.flip_options = flip_options
         self.ipbf_options = ipbf_options
         self.ipbstf_options = ipbstf_options
         self.pbstf_options = pbstf_options
@@ -149,6 +157,8 @@ class Simulator(RBC):
         self.pbstf_solver = PBSTFSolver(self.scene, self, self.pbstf_options)
         self.fem_solver = FEMSolver(self.scene, self, self.fem_options)
         self.sf_solver = SFSolver(self.scene, self, self.sf_options)
+        self.dem_solver = DEMSolver(self.scene, self, self.dem_options)
+        self.flip_solver = FLIPSolver(self.scene, self, self.flip_options)
 
         self._solvers: list["Solver"] = gs.List(
             [
@@ -163,6 +173,8 @@ class Simulator(RBC):
                 self.pbstf_solver,
                 self.fem_solver,
                 self.sf_solver,
+                self.dem_solver,
+                self.flip_solver,
             ]
         )
 
@@ -206,6 +218,10 @@ class Simulator(RBC):
             entity = self.sph_solver.add_entity(self.n_entities, material, morph, surface, name=name)
         elif isinstance(material, gs.materials.PBD.Base):
             entity = self.pbd_solver.add_entity(self.n_entities, material, morph, surface, name=name)
+        elif isinstance(material, gs.materials.DEM.Base):
+            entity = self.dem_solver.add_entity(self.n_entities, material, morph, surface, name=name)
+        elif isinstance(material, gs.materials.FLIP.Base):
+            entity = self.flip_solver.add_entity(self.n_entities, material, morph, surface, name=name)
         elif isinstance(material, gs.materials.IPBF.Base):
             entity = self.ipbf_solver.add_entity(self.n_entities, material, morph, surface, name=name)
         elif isinstance(material, gs.materials.IPBSTF.Base):

@@ -5,11 +5,11 @@ import numpy as np
 import quadrants as qd
 
 import genesis as gs
+import genesis.utils.geom as gu
 from genesis.engine.boundaries import CubeBoundary, CylinderBoundary, PlaneBoundary, TiltedCylinderBoundary
 from genesis.engine.entities import IPBFEntity
 from genesis.engine.states.solvers import IPBFSolverState
 from genesis.utils.array_class import ErrorCode, V_ANNOTATION
-import genesis.utils.geom as gu
 from genesis.utils.misc import qd_to_numpy
 
 from .base_solver import Solver
@@ -644,9 +644,10 @@ class IPBFSolver(Solver):
             assert state.pos.shape[1] == self._n_particles, (
                 f"state size mismatch: {state.pos.shape[1]} != {self._n_particles}"
             )
+            envs_idx = self.scene._sanitize_envs_idx(envs_idx)
             kernel_set_state(
                 f,
-                self.scene._sanitize_envs_idx(envs_idx),
+                envs_idx,
                 state.pos,
                 state.vel,
                 state.active,
@@ -655,6 +656,8 @@ class IPBFSolver(Solver):
                 self,
                 self._errno,
             )
+            if self._has_boundary_pitcher and len(envs_idx) == self._B:
+                self.boundary2.set_pose(state.pitcher_origin, state.pitcher_axis)
 
     def get_state(self, f):
         if self.is_active:
@@ -663,6 +666,9 @@ class IPBFSolver(Solver):
                 f"state size mismatch: {state.pos.shape[1]} != {self._n_particles}"
             )
             kernel_get_state(f, state.pos, state.vel, state.active, state.c, state.boundary_group, self)
+            if self._has_boundary_pitcher:
+                state.pitcher_origin.copy_(state.pitcher_origin.new_tensor(self.boundary2.origin_np))
+                state.pitcher_axis.copy_(state.pitcher_axis.new_tensor(self.boundary2.axis_np))
         else:
             state = None
         return state

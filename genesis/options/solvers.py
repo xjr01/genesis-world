@@ -1434,6 +1434,179 @@ class PBDOptions(Options):
             self._hash_grid_res = np.ceil(np.array(self.hash_grid_res) / self.hash_grid_cell_size).astype(gs.np_int)
 
 
+class DEMOptions(Options):
+    """
+    Options configuring the DEMSolver.
+
+    Note
+    ----
+    DEM (Discrete Element Method) solver for simulating granular materials (sand) as spherical particles,
+    following the contact model and time-stepping of the reference implementation. The solver runs its own
+    sub-substeps inside each simulator substep, with a fixed step
+    `ddt = radius * pi * sqrt(density / young) / 2 * ddt_safety`.
+
+    If spatial hashing parameters are not given, they are computed automatically from `particle_size` and bounds.
+
+    Parameters
+    ----------
+    dt : float, optional
+        Time duration for each simulation step in seconds. If none, it will inherit from `SimOptions`. Defaults to None.
+    gravity : tuple, optional
+        Gravity force in N/kg. If none, it will inherit from `SimOptions`. Defaults to None.
+    particle_size : float, optional
+        Particle diameter in meters. Defaults to 1e-2.
+    ddt_safety : float, optional
+        Safety factor applied to the fixed DEM sub-substep `ddt = m_ddt * ddt_safety`. Values below 1.0
+        deviate from the reference implementation but improve stability when many simultaneous contacts raise the
+        effective stiffness beyond what the base step `m_ddt` was derived for. Defaults to 1.0.
+    surface_tension_coeff : float, optional
+        Scale of the capillary (liquid-bridge) cohesion between wetted grains (the `surface_tensor_cof`
+        constant of the reference's `ComputeDemCapillaryForces`). Defaults to 0.007 (the reference value).
+    cylinder_radius : float, optional
+        If set, an additional static hollow-cylinder collider (axis along z through the domain center) confines
+        the grains, following the reference's rotate-scene boundary. Defaults to None (box domain only).
+    lower_bound : tuple, shape (3,), optional
+        Lower bound of the simulation domain. The domain walls act as a static box collider for the particles.
+        Defaults to (-1.0, -1.0, 0.0).
+    upper_bound : tuple, shape (3,), optional
+        Upper bound of the simulation domain. Defaults to (1.0, 1.0, 1.0).
+    hash_grid_res : tuple, optional
+        Size of the spatially-repetitive spatial hashing grid in meters. If none, it will be computed automatically. Defaults to None.
+    hash_grid_cell_size : float, optional
+        Size of the cubic cell of the spatial hashing grid in meters. This should be at least 1.25 * `particle_size`.
+        If none, it will be computed automatically. Defaults to None.
+    """
+
+    dt: PositiveFloat | None = None
+    gravity: Vec3FType | None = None
+
+    particle_size: PositiveFloat = 1e-2
+
+    ddt_safety: PositiveFloat = 1.0
+
+    surface_tension_coeff: PositiveFloat = 0.007  # capillary (liquid-bridge) cohesion scale
+
+    restitution: PositiveFloat = 1.0  # grain-grain normal restitution e. 1.0 = the reference's
+    # strictly-elastic contact (no damping). e < 1 adds a spring-dashpot normal damping
+    # c = 2*xi*sqrt(k_norm*m_eff) with xi from e = exp(-pi*xi/sqrt(1-xi^2)) (recorded deviation:
+    # the reference's DEMForce::getForce has no damping; added on user request 2026-08-22 to calm
+    # the scoop first-touch splash)
+
+    cylinder_radius: PositiveFloat | None = None
+
+    # spatial hashing
+    hash_grid_res: Vec3FType | None = None  # size of the spatially-repetitive hash grid in meters
+    hash_grid_cell_size: PositiveFloat | None = None  # size of the cubic cell in meters
+
+    lower_bound: Vec3FType = (-1.0, -1.0, 0.0)
+    upper_bound: Vec3FType = (1.0, 1.0, 1.0)
+
+    _hash_grid_res: np.ndarray = PrivateAttr(default=None)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _resolve_defaults(cls, data: dict) -> dict:
+        particle_size = data.get("particle_size", 1e-2)
+        # NOTE: 1.25 * particle_size = 2.5 * radius, which covers the neighbor-search cutoff of sqrt(6) * radius
+        # used by the DEM contact model, so a 3x3x3 cell neighborhood never misses a contact pair.
+        if data.get("hash_grid_cell_size") is None:
+            data["hash_grid_cell_size"] = 1.25 * particle_size
+        return data
+
+    def model_post_init(self, context: Any) -> None:
+        if not np.all(np.array(self.upper_bound) > np.array(self.lower_bound)):
+            gs.raise_exception("Invalid pair of upper_bound and lower_bound.")
+
+        if self.hash_grid_cell_size < 1.25 * self.particle_size:
+            gs.raise_exception("`hash_grid_cell_size` should not be smaller than 1.25 * `particle_size`.")
+
+        if self.hash_grid_res is None:
+            max_hash_grid_res = np.ceil(
+                (np.array(self.upper_bound) - np.array(self.lower_bound)) / self.hash_grid_cell_size
+            ).astype(gs.np_int)
+            self._hash_grid_res = np.minimum(max_hash_grid_res, np.array([150, 150, 150], dtype=gs.np_int))
+        else:
+            self._hash_grid_res = np.ceil(np.array(self.hash_grid_res) / self.hash_grid_cell_size).astype(gs.np_int)
+
+
+class FLIPOptions(Options):
+    """
+    Options configuring the FLIPSolver.
+
+    Note
+    ----
+    FLIP/PIC solver for free-surface liquids on a MAC grid, following the reference implementation
+    (`sand-water-coupling-PIC-DEM-3d`): trilinear particle<->grid transfers, FLIP/PIC blending 0.95,
+    pressure projection with free-surface Dirichlet condition, and a density-correction (position
+    correction) pass. Particles are seeded on a stratified `seed_sub_factor`^3 per-cell pattern.
+
+    Parameters
+    ----------
+    dt : float, optional
+        Time duration for each simulation step in seconds. If none, it will inherit from `SimOptions`. Defaults to None.
+    gravity : tuple, optional
+        Gravity force in N/kg. If none, it will inherit from `SimOptions`. Defaults to None.
+    grid_res : int, optional
+        Number of MAC grid cells per axis of the simulation domain. Defaults to 64.
+    lower_bound : tuple, shape (3,), optional
+        Lower bound of the simulation domain. The domain walls act as a static box collider. Defaults to (-0.5, -0.5, 0.0).
+    upper_bound : tuple, shape (3,), optional
+        Upper bound of the simulation domain. Defaults to (0.5, 0.5, 1.0).
+    seed_sub_factor : int, optional
+        Particle seeding subdivision per cell: `seed_sub_factor`^3 particles per cell. Defaults to 3 (27 per cell),
+        matching the reference implementation.
+    blend_factor : float, optional
+        FLIP/PIC blending factor: 1.0 is pure FLIP (energetic, noisy), 0.0 is pure PIC (diffusive).
+        Defaults to 0.95, matching the reference implementation.
+    density_correction : bool, optional
+        Whether to run the density-correction (position correction) pass each substep. Slightly costlier but
+        keeps the particle distribution uniform. Defaults to True, matching the reference implementation.
+    pcg_max_iter : int, optional
+        Maximum iterations of the GPU preconditioned conjugate gradient solver used for the pressure and
+        density-correction systems (the reference uses AMGCL). Defaults to 200.
+    pcg_tol : float, optional
+        Relative residual tolerance of the PCG solver. Defaults to 1e-4.
+    dem_coupling : bool, optional
+        Whether to two-way couple with the DEM solver (sand) when one is active: sand grains feel pressure
+        gradient / added-mass / drag forces and absorb water; the fluid sees the grains' displaced volume and
+        the coupling reaction force. Disable for a pure-water scene to skip all coupling work. Defaults to True.
+    viscosity_coeff : float, optional
+        Coefficient of the quadratic drag exchanged between sand grains and the surrounding fluid.
+        Lower values let water infiltrate deeper into the sand bed instead of spreading on the surface,
+        at the cost of weaker two-way coupling (grains are also dragged less by the flow). Defaults to 1.0,
+        matching the reference implementation.
+    cylinder_radius : float, optional
+        If set, an additional static hollow-cylinder collider (axis along z through the domain center) confines
+        the fluid and grains, following the reference's rotate-scene boundary. Defaults to None (box domain only).
+    rotate_omega : float, optional
+        Angular velocity in rad/s of the C++ rotate-scene drive: while `t < rotate_duration`, fluid faces in
+        sand-free cells (target fraction >= 0.8) receive the rigid-body rotation increment `omega x r * dt`.
+        Defaults to 0.0 (off).
+    rotate_duration : float, optional
+        Duration in seconds of the rotation drive. Defaults to 2.0, matching the reference.
+    """
+
+    dt: PositiveFloat | None = None
+    gravity: Vec3FType | None = None
+
+    grid_res: PositiveInt = 64
+    lower_bound: Vec3FType = (-0.5, -0.5, 0.0)
+    upper_bound: Vec3FType = (0.5, 0.5, 1.0)
+
+    seed_sub_factor: PositiveInt = 3
+    blend_factor: NonNegativeFloat = 0.95
+    density_correction: StrictBool = True
+
+    pcg_max_iter: PositiveInt = 200
+    pcg_tol: PositiveFloat = 1e-4
+    dem_coupling: StrictBool = True
+    viscosity_coeff: NonNegativeFloat = 1.0
+
+    cylinder_radius: PositiveFloat | None = None
+    rotate_omega: float = 0.0
+    rotate_duration: PositiveFloat = 2.0
+
+
 class FEMOptions(Options):
     """
     Options configuring the FEMSolver.

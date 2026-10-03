@@ -7,6 +7,7 @@ import torch
 import quadrants as qd
 
 import genesis as gs
+import genesis.utils.geom as gu
 from genesis.engine.boundaries import (
     CubeBoundary,
     StaticCollider,
@@ -19,7 +20,6 @@ from genesis.engine.solvers.base_solver import Solver
 from genesis.engine.states.solvers import IPBSTFSolverState
 from genesis.utils import particle
 from genesis.utils.array_class import ErrorCode
-import genesis.utils.geom as gu
 from genesis.utils.misc import (
     assign_indexed_tensor,
     broadcast_tensor,
@@ -545,15 +545,23 @@ def _kernel_add_particles(
 
 
 @qd.kernel
+def _kernel_clear_errno(envs_idx: qd.types.ndarray(), errno: qd.Tensor):
+    for env_idx_local in range(envs_idx.shape[0]):
+        errno[envs_idx[env_idx_local]] = 0
+
+
+@qd.kernel
 def _kernel_set_state(
     n_particles: qd.i32,
+    envs_idx: qd.types.ndarray(),
     pos: qd.types.ndarray(),
     vel: qd.types.ndarray(),
     active: qd.types.ndarray(),
     particles: qd.template(),
     particles_status: qd.template(),
 ):
-    for particle_idx, env_idx in qd.ndrange(n_particles, particles.shape[1]):
+    for particle_idx, env_idx_local in qd.ndrange(n_particles, envs_idx.shape[0]):
+        env_idx = envs_idx[env_idx_local]
         for axis in qd.static(range(3)):
             particles[particle_idx, env_idx].pos[axis] = pos[env_idx, particle_idx, axis]
             particles[particle_idx, env_idx].vel[axis] = vel[env_idx, particle_idx, axis]
@@ -574,6 +582,38 @@ def _kernel_get_state(
             pos[env_idx, particle_idx, axis] = particles[particle_idx, env_idx].pos[axis]
             vel[env_idx, particle_idx, axis] = particles[particle_idx, env_idx].vel[axis]
         active[env_idx, particle_idx] = particles_status[particle_idx, env_idx].active
+
+
+@qd.kernel
+def _kernel_get_static_colliders_pose(
+    n_static_colliders: qd.i32,
+    pos: qd.types.ndarray(),
+    quat: qd.types.ndarray(),
+    static_colliders_pos: qd.Tensor,
+    static_colliders_quat: qd.Tensor,
+):
+    for collider_idx, env_idx in qd.ndrange(n_static_colliders, pos.shape[0]):
+        for axis in qd.static(range(3)):
+            pos[env_idx, collider_idx, axis] = static_colliders_pos[collider_idx, env_idx][axis]
+        for axis in qd.static(range(4)):
+            quat[env_idx, collider_idx, axis] = static_colliders_quat[collider_idx, env_idx][axis]
+
+
+@qd.kernel
+def _kernel_restore_static_colliders_pose(
+    n_static_colliders: qd.i32,
+    envs_idx: qd.types.ndarray(),
+    pos: qd.types.ndarray(),
+    quat: qd.types.ndarray(),
+    static_colliders_pos: qd.Tensor,
+    static_colliders_quat: qd.Tensor,
+):
+    for collider_idx, env_idx_local in qd.ndrange(n_static_colliders, envs_idx.shape[0]):
+        env_idx = envs_idx[env_idx_local]
+        for axis in qd.static(range(3)):
+            static_colliders_pos[collider_idx, env_idx][axis] = pos[env_idx, collider_idx, axis]
+        for axis in qd.static(range(4)):
+            static_colliders_quat[collider_idx, env_idx][axis] = quat[env_idx, collider_idx, axis]
 
 
 @qd.kernel
@@ -1035,15 +1075,40 @@ class IPBSTFSolver(Solver):
 
     def set_state(self, f, state, envs_idx=None):
         if self.is_active:
+            envs_idx = self._scene._sanitize_envs_idx(envs_idx)
+            _kernel_clear_errno(envs_idx, self._errno)
             _kernel_set_state(
-                self._n_particles, state.pos, state.vel, state.active, self.particles, self.particles_status
+                self._n_particles,
+                envs_idx,
+                state.pos,
+                state.vel,
+                state.active,
+                self.particles,
+                self.particles_status,
             )
+            if self._n_static_colliders > 0:
+                _kernel_restore_static_colliders_pose(
+                    self._n_static_colliders,
+                    envs_idx,
+                    state.static_colliders_pos,
+                    state.static_colliders_quat,
+                    self._kernel_static_colliders_pos,
+                    self._kernel_static_colliders_quat,
+                )
 
     def get_state(self, f):
         if not self.is_active:
             return None
         state = IPBSTFSolverState(self.scene)
         _kernel_get_state(self._n_particles, state.pos, state.vel, state.active, self.particles, self.particles_status)
+        if self._n_static_colliders > 0:
+            _kernel_get_static_colliders_pose(
+                self._n_static_colliders,
+                state.static_colliders_pos,
+                state.static_colliders_quat,
+                self._kernel_static_colliders_pos,
+                self._kernel_static_colliders_quat,
+            )
         return state
 
     def update_render_fields(self):

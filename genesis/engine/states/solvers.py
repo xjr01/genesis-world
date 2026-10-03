@@ -16,7 +16,7 @@ class SimState(RBC):
     ):
         self._scene = scene
         self._s_global = s_global
-        self._solvers_state = list()
+        self._solvers_state = []
         for solver in solvers:
             self._solvers_state.append(solver.get_state(f_local))
 
@@ -283,6 +283,31 @@ class IPBSTFSolverState(_ParticleFluidSolverState):
 
     def __init__(self, scene):
         super().__init__(scene, scene.sim.ipbstf_solver)
+        solver = scene.sim.ipbstf_solver
+        self._static_colliders_pos = None
+        self._static_colliders_quat = None
+        if solver._n_static_colliders > 0:
+            args = {
+                "dtype": gs.tc_float,
+                "requires_grad": False,
+                "scene": scene,
+            }
+            self._static_colliders_pos = gs.zeros((scene.sim._B, solver._n_static_colliders, 3), **args)
+            self._static_colliders_quat = gs.zeros((scene.sim._B, solver._n_static_colliders, 4), **args)
+
+    def serializable(self):
+        super().serializable()
+        if self._static_colliders_pos is not None:
+            self._static_colliders_pos = self._static_colliders_pos.detach()
+            self._static_colliders_quat = self._static_colliders_quat.detach()
+
+    @property
+    def static_colliders_pos(self):
+        return self._static_colliders_pos
+
+    @property
+    def static_colliders_quat(self):
+        return self._static_colliders_quat
 
 
 class PBSTFSolverState(_ParticleFluidSolverState):
@@ -465,6 +490,109 @@ class PBDSolverState:
         return self._free
 
 
+class DEMSolverState:
+    """Dynamic granular state required by reset and coupled wet-sand checkpoints."""
+
+    def __init__(self, scene):
+        self._scene = scene
+        solver = scene.dem_solver
+        args = {"dtype": gs.tc_float, "requires_grad": False, "scene": scene}
+        shape = (scene.sim._B, solver.n_particles)
+        self._pos = gs.zeros((*shape, 3), **args)
+        self._vel = gs.zeros((*shape, 3), **args)
+        self._ratio = gs.zeros(shape, **args)
+        args["dtype"] = gs.tc_bool
+        self._active = gs.zeros(shape, **args)
+
+    def serializable(self):
+        self._scene = None
+        self._pos = self._pos.detach()
+        self._vel = self._vel.detach()
+        self._ratio = self._ratio.detach()
+        self._active = self._active.detach()
+
+    @property
+    def scene(self):
+        return self._scene
+
+    @property
+    def pos(self):
+        return self._pos
+
+    @property
+    def vel(self):
+        return self._vel
+
+    @property
+    def ratio(self):
+        return self._ratio
+
+    @property
+    def active(self):
+        return self._active
+
+
+class FLIPSolverState:
+    """Dynamic FLIP particle and face-velocity state used at a simulation-step boundary."""
+
+    def __init__(self, scene):
+        self._scene = scene
+        solver = scene.flip_solver
+        args = {"dtype": gs.tc_float, "requires_grad": False, "scene": scene}
+        shape = (scene.sim._B, solver.n_particles)
+        self._pos = gs.zeros((*shape, 3), **args)
+        self._vel = gs.zeros((*shape, 3), **args)
+        args["dtype"] = gs.tc_bool
+        self._active = gs.zeros(shape, **args)
+        args["dtype"] = gs.tc_float
+        nx, ny, nz = (int(value) for value in solver._res)
+        self._grid_vel_u = gs.zeros((nx + 1, ny, nz), **args)
+        self._grid_vel_v = gs.zeros((nx, ny + 1, nz), **args)
+        self._grid_vel_w = gs.zeros((nx, ny, nz + 1), **args)
+        self._last_dt = float(solver._last_dt)
+
+    def serializable(self):
+        self._scene = None
+        self._pos = self._pos.detach()
+        self._vel = self._vel.detach()
+        self._active = self._active.detach()
+        self._grid_vel_u = self._grid_vel_u.detach()
+        self._grid_vel_v = self._grid_vel_v.detach()
+        self._grid_vel_w = self._grid_vel_w.detach()
+
+    @property
+    def scene(self):
+        return self._scene
+
+    @property
+    def pos(self):
+        return self._pos
+
+    @property
+    def vel(self):
+        return self._vel
+
+    @property
+    def active(self):
+        return self._active
+
+    @property
+    def grid_vel_u(self):
+        return self._grid_vel_u
+
+    @property
+    def grid_vel_v(self):
+        return self._grid_vel_v
+
+    @property
+    def grid_vel_w(self):
+        return self._grid_vel_w
+
+    @property
+    def last_dt(self):
+        return self._last_dt
+
+
 class FEMSolverState:
     def __init__(self, scene):
         self._scene = scene
@@ -510,6 +638,11 @@ class IPBFSolverState(_ParticleFluidSolverState):
         super().__init__(scene, scene.sim.ipbf_solver)
         self._c = gs.zeros((scene.sim._B, scene.sim.ipbf_solver.n_particles), dtype=gs.tc_float, scene=scene)
         self._boundary_group = gs.zeros(self._active.shape, dtype=gs.tc_int, scene=scene)
+        self._pitcher_origin = None
+        self._pitcher_axis = None
+        if scene.sim.ipbf_solver._has_boundary_pitcher:
+            self._pitcher_origin = gs.zeros((3,), dtype=gs.tc_float, scene=scene)
+            self._pitcher_axis = gs.zeros((3,), dtype=gs.tc_float, scene=scene)
 
     @property
     def c(self):
@@ -519,10 +652,21 @@ class IPBFSolverState(_ParticleFluidSolverState):
     def boundary_group(self):
         return self._boundary_group
 
+    @property
+    def pitcher_origin(self):
+        return self._pitcher_origin
+
+    @property
+    def pitcher_axis(self):
+        return self._pitcher_axis
+
     def serializable(self):
         super().serializable()
         self._c = self._c.detach()
         self._boundary_group = self._boundary_group.detach()
+        if self._pitcher_origin is not None:
+            self._pitcher_origin = self._pitcher_origin.detach()
+            self._pitcher_axis = self._pitcher_axis.detach()
 
 
 class PBDFluidSolverState(PBDSolverState):

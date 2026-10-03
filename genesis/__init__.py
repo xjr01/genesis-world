@@ -51,6 +51,11 @@ use_ndarray: bool | None = None
 use_zerocopy: bool | None = None
 EPS: float | None = None
 
+# Integer precision is backend-independent, so option validation may use it before engine initialization.
+qd_int = qd.i32
+np_int = np.int32
+tc_int = torch.int32
+
 
 ########################## init ##########################
 def init(

@@ -8,6 +8,27 @@
 [![GitHub Issues](https://img.shields.io/github/issues/Genesis-Embodied-AI/genesis-world)](https://github.com/Genesis-Embodied-AI/genesis-world/issues)
 [![GitHub Discussions](https://img.shields.io/github/discussions/Genesis-Embodied-AI/genesis-world)](https://github.com/Genesis-Embodied-AI/genesis-world/discussions)
 
+## UniRoboSim integration profile
+
+This repository provides a Genesis physics-engine profile for UniRoboSim-Genesis. It keeps the public Genesis scene
+lifecycle and adds typed construction support for the fork's particle-fluid, granular-fluid, garment-folding and
+butter-spreading capabilities.
+
+UniRoboSim-Genesis should integrate through two public entry points:
+
+- `genesis.integrations` maps portable physical properties to Genesis solver options and materials.
+- `examples.multiphysics.<scenario>` exposes `ScenarioConfig`, `build_scene(config)`, a named runtime and a stepwise
+  controller for task-level integration.
+
+Solver parameters, material parameters, assets and task motion are separate configuration groups. Adapters may replace
+asset poses, dimensions and paths without modifying solver settings. Registered scene callbacks keep moving boundaries
+and scenario contact behavior active for ordinary `scene.step()` calls.
+
+See [the UniRoboSim-Genesis integration guide](./docs/integration/unirobosim_genesis.md),
+[the scenario contract](./docs/architecture/multiphysics_scenario_contract.md), and
+[the normalized scenario catalogue](./examples/multiphysics/README.md). Pin deployments to a tested commit of this
+profile because the additional solver API is not part of an upstream Genesis release.
+
 
 
 **Genesis World** is a simulation platform for physical AI developments. It combines a unified multi-physics engine, a photo-realistic renderer ([Nyx](https://github.com/Genesis-Embodied-AI/genesis-nyx)), and a cross-platform compiler ([Quadrants](https://github.com/Genesis-Embodied-AI/quadrants)) behind a Pythonic simulation interface. Genesis World is designed to scale from a single laptop kernel to datacenter-grade GPUs, while remaining easy to read, extend, and embed in research code.
