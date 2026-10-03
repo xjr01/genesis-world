@@ -51,17 +51,17 @@ Three sections, mirroring the Genesis layers that ship runnable demos: **Physics
 
 | | | |
 |---|---|---|
-| [Rigid: franka cube](./examples/rigid/franka_cube.py) | [Rigid: collision tower](./examples/collision/tower.py) | [Rigid: contype](./examples/collision/contype.py) |
+| [Rigid: franka cube](./examples/genesis_origin_example/rigid/franka_cube.py) | [Rigid: collision tower](./examples/genesis_origin_example/collision/tower.py) | [Rigid: contype](./examples/genesis_origin_example/collision/contype.py) |
 | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/rigid_franka_cube.webp" width="240"> | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/collision_tower.webp" width="240"> | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/collision_contype.webp" width="240"> |
-| [FEM: hard & soft constraint](./examples/deformable/fem_hard_and_soft_constraint.py) | [MPM: tutorial](./examples/tutorials/mpm.py) | [MPM: sand wheel](./examples/coupling/sand_wheel.py) |
+| [FEM: hard & soft constraint](./examples/genesis_origin_example/deformable/fem_hard_and_soft_constraint.py) | [MPM: tutorial](./examples/genesis_origin_example/tutorials/mpm.py) | [MPM: sand wheel](./examples/genesis_origin_example/coupling/sand_wheel.py) |
 | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/fem_hard_and_soft_constraint.webp" width="240"> | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/tutorials_mpm.webp" width="240"> | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/coupling_sand_wheel.webp" width="240"> |
-| [SPH: rigid](./examples/coupling/sph_rigid.py) | [SPH: + MPM](./examples/coupling/sph_mpm.py) | [PBD: liquid](./examples/deformable/pbd_liquid.py) |
+| [SPH: rigid](./examples/genesis_origin_example/coupling/sph_rigid.py) | [SPH: + MPM](./examples/genesis_origin_example/coupling/sph_mpm.py) | [PBD: liquid](./examples/genesis_origin_example/deformable/pbd_liquid.py) |
 | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/coupling_sph_rigid.webp" width="240"> | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/coupling_sph_mpm.webp" width="240"> | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/pbd_liquid.webp" width="240"> |
-| [PBD: cloth](./examples/tutorials/pbd_cloth.py) | [Stable Fluid: smoke](./examples/fluid/smoke.py) | [IPC: robot cloth teleop](./examples/ipc/ipc_robot_cloth_teleop.py) |
+| [PBD: cloth](./examples/genesis_origin_example/tutorials/pbd_cloth.py) | [Stable Fluid: smoke](./examples/genesis_origin_example/fluid/smoke.py) | [IPC: robot cloth teleop](./examples/genesis_origin_example/ipc/ipc_robot_cloth_teleop.py) |
 | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/tutorials_pbd_cloth.webp" width="240"> | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/smoke.webp" width="240"> | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/ipc_cloth_teleop.webp" width="240"> |
-| [Coupler: cloth on rigid](./examples/coupling/cloth_on_rigid.py) | [Coupler: rigid + MPM](./examples/coupling/rigid_mpm_attachment.py) | [Coupler: cut dragon](./examples/coupling/cut_dragon.py) |
+| [Coupler: cloth on rigid](./examples/genesis_origin_example/coupling/cloth_on_rigid.py) | [Coupler: rigid + MPM](./examples/genesis_origin_example/coupling/rigid_mpm_attachment.py) | [Coupler: cut dragon](./examples/genesis_origin_example/coupling/cut_dragon.py) |
 | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/coupling_cloth_on_rigid.webp" width="240"> | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/coupling_rigid_mpm_attachment.webp" width="240"> | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/coupling_cut_dragon.webp" width="240"> |
-| [Coupler: water wheel](./examples/coupling/water_wheel.py) | [Coupler: flush cubes](./examples/coupling/flush_cubes.py) | [SAP: Franka grasp rigid cube](./examples/sap_coupling/franka_grasp_rigid_cube.py) |
+| [Coupler: water wheel](./examples/genesis_origin_example/coupling/water_wheel.py) | [Coupler: flush cubes](./examples/genesis_origin_example/coupling/flush_cubes.py) | [SAP: Franka grasp rigid cube](./examples/genesis_origin_example/sap_coupling/franka_grasp_rigid_cube.py) |
 | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/coupling_water_wheel.webp" width="240"> | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/coupling_flush_cubes.webp" width="240"> | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/sap_franka_grasp_rigid_cube.webp" width="240"> |
 
 ### Rendering
@@ -70,7 +70,7 @@ Genesis exposes three rendering paths as camera sensors: built-in (Nyx / Luisa /
 
 | | | |
 |---|---|---|
-| [Follow entity](./examples/rendering/follow_entity.py) | [Animated camera](./examples/rendering/moving_camera.py) | [Nyx: hello](https://github.com/Genesis-Embodied-AI/genesis-nyx/blob/main/examples/01_hello_nyx.py) |
+| [Follow entity](./examples/genesis_origin_example/rendering/follow_entity.py) | [Animated camera](./examples/genesis_origin_example/rendering/moving_camera.py) | [Nyx: hello](https://github.com/Genesis-Embodied-AI/genesis-nyx/blob/main/examples/01_hello_nyx.py) |
 | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/rendering_follow_entity.webp" width="240"> | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/rendering_moving_camera.webp" width="240"> | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/nyx_01_hello_nyx.png" width="240"> |
 | [Nyx: attached camera](https://github.com/Genesis-Embodied-AI/genesis-nyx/blob/main/examples/02_attached_camera.py) | [Nyx: PBR materials](https://github.com/Genesis-Embodied-AI/genesis-nyx/blob/main/examples/03_materials.py) | [Nyx: light types](https://github.com/Genesis-Embodied-AI/genesis-nyx/blob/main/examples/04_light_types.py) |
 | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/nyx_02_attached_camera.webp" width="240"> | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/nyx_03_materials.png" width="240"> | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/nyx_04_light_types.png" width="240"> |
@@ -81,17 +81,17 @@ Genesis exposes three rendering paths as camera sensors: built-in (Nyx / Luisa /
 
 | | | |
 |---|---|---|
-| [Controlling a robot](./examples/tutorials/control_your_robot.py) | [GUI: ImGui joint control](./examples/gui/imgui_joint_control.py) | [Heterogeneous envs](./examples/rigid/heterogeneous_simulation.py) |
+| [Controlling a robot](./examples/genesis_origin_example/tutorials/control_your_robot.py) | [GUI: ImGui joint control](./examples/genesis_origin_example/gui/imgui_joint_control.py) | [Heterogeneous envs](./examples/genesis_origin_example/rigid/heterogeneous_simulation.py) |
 | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/tutorials_control_your_robot.webp" width="240"> | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/gui_imgui_joint_control.webp" width="240"> | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/het_articulated.webp" width="240"> |
-| [Domain randomization](./examples/rigid/domain_randomization.py) | [Sensor: depth camera](./examples/sensors/depth_camera_custom_vverts.py) | [Sensor: IMU](./examples/sensors/imu_franka.py) |
+| [Domain randomization](./examples/genesis_origin_example/rigid/domain_randomization.py) | [Sensor: depth camera](./examples/genesis_origin_example/sensors/depth_camera_custom_vverts.py) | [Sensor: IMU](./examples/genesis_origin_example/sensors/imu_franka.py) |
 | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/rigid_domain_randomization.webp" width="240"> | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/sensors_depth_camera_custom_vverts.webp" width="240"> | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/sensors_imu_franka.webp" width="240"> |
-| [Sensor: lidar](./examples/sensors/lidar_teleop.py) | [Sensor: tactile sandbox](./examples/sensors/tactile_sandbox.py) | [Sensor: contact force](./examples/sensors/contact_force_go2.py) |
+| [Sensor: lidar](./examples/genesis_origin_example/sensors/lidar_teleop.py) | [Sensor: tactile sandbox](./examples/genesis_origin_example/sensors/tactile_sandbox.py) | [Sensor: contact force](./examples/genesis_origin_example/sensors/contact_force_go2.py) |
 | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/sensors_lidar_teleop.webp" width="240"> | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/sensors_tactile_sandbox.webp" width="240"> | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/sensors_contact_force_go2.webp" width="240"> |
-| [Sensor: surface distance](./examples/sensors/surface_distance_shadowhand.py) | [Sensor: temperature grid](./examples/sensors/temperature_grid.py) | [GUI: debug drawing](./examples/tutorials/draw_debug.py) |
+| [Sensor: surface distance](./examples/genesis_origin_example/sensors/surface_distance_shadowhand.py) | [Sensor: temperature grid](./examples/genesis_origin_example/sensors/temperature_grid.py) | [GUI: debug drawing](./examples/genesis_origin_example/tutorials/draw_debug.py) |
 | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/sensors_surface_distance_shadowhand.webp" width="240"> | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/sensors_temperature_grid.webp" width="240"> | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/tutorials_draw_debug.webp" width="240"> |
-| [GUI: mesh point picker](./examples/viewer_plugin/mesh_point_selector.py) | [GUI: mouse interaction](./examples/viewer_plugin/mouse_interaction.py) | [Diff-IK controller](./examples/rigid/diffik_controller.py) |
+| [GUI: mesh point picker](./examples/genesis_origin_example/viewer_plugin/mesh_point_selector.py) | [GUI: mouse interaction](./examples/genesis_origin_example/viewer_plugin/mouse_interaction.py) | [Diff-IK controller](./examples/genesis_origin_example/rigid/diffik_controller.py) |
 | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/viewer_mesh_point_selector.webp" width="240"> | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/viewer_mouse_interaction.webp" width="240"> | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/rigid_diffik_controller.webp" width="240"> |
-| [Batched IK](./examples/tutorials/batched_IK.py) | [Drone](./examples/drone/hover_train.py) | [Advanced: worm](./examples/tutorials/advanced_worm.py) |
+| [Batched IK](./examples/genesis_origin_example/tutorials/batched_IK.py) | [Drone](./examples/genesis_origin_example/drone/hover_train.py) | [Advanced: worm](./examples/genesis_origin_example/tutorials/advanced_worm.py) |
 | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/tutorials_batched_IK.webp" width="240"> | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/drone_hover_train.webp" width="240"> | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/tutorials_advanced_worm.webp" width="240"> |
 
 ## Quick Installation
@@ -163,7 +163,7 @@ uv pip install torch
 
 Run an example:
 ```bash
-uv run examples/rigid/single_franka.py
+uv run examples/genesis_origin_example/rigid/single_franka.py
 ```
 
 ## Docker
@@ -274,19 +274,19 @@ Catalogue entries pruned from the Physics grid. Kept here as a reference so
 they can be reinstated later. The links and thumbnail paths are all still
 valid in the repo; just paste any pair of rows back into the Physics table.
 
-| [Rigid: grasp bottle](./examples/rigid/grasp_bottle.py) | [Rigid: collision pyramid](./examples/collision/pyramid.py) | [FEM: elastic dragon](./examples/deformable/elastic_dragon.py) |
+| [Rigid: grasp bottle](./examples/genesis_origin_example/rigid/grasp_bottle.py) | [Rigid: collision pyramid](./examples/genesis_origin_example/collision/pyramid.py) | [FEM: elastic dragon](./examples/genesis_origin_example/deformable/elastic_dragon.py) |
 | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/rigid_grasp_bottle.webp" width="240"> | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/collision_pyramid.png" width="240"> | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/elastic_dragon.webp" width="240"> |
-| [FEM: SAP fixed constraint](./examples/sap_coupling/fem_fixed_constraint.py) | [SPH: liquid](./examples/tutorials/sph_liquid.py) | [Coupler: grasp soft cube](./examples/coupling/grasp_soft_cube.py) |
+| [FEM: SAP fixed constraint](./examples/genesis_origin_example/sap_coupling/fem_fixed_constraint.py) | [SPH: liquid](./examples/genesis_origin_example/tutorials/sph_liquid.py) | [Coupler: grasp soft cube](./examples/genesis_origin_example/coupling/grasp_soft_cube.py) |
 | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/sap_fem_fixed_constraint.webp" width="240"> | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/tutorials_sph_liquid.webp" width="240"> | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/coupling_grasp_soft_cube.webp" width="240"> |
-| [Coupler: cloth + rigid](./examples/coupling/cloth_attached_to_rigid.py) | [SAP: Franka grasp FEM sphere](./examples/sap_coupling/franka_grasp_fem_sphere.py) | [SAP: FEM sphere + cube](./examples/sap_coupling/fem_sphere_and_cube.py) |
+| [Coupler: cloth + rigid](./examples/genesis_origin_example/coupling/cloth_attached_to_rigid.py) | [SAP: Franka grasp FEM sphere](./examples/genesis_origin_example/sap_coupling/franka_grasp_fem_sphere.py) | [SAP: FEM sphere + cube](./examples/genesis_origin_example/sap_coupling/fem_sphere_and_cube.py) |
 | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/coupling_cloth_attached_to_rigid.webp" width="240"> | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/sap_franka_grasp_fem_sphere.webp" width="240"> | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/sap_fem_sphere_and_cube.webp" width="240"> |
 
 Pruned from Simulation Interface (same logic — labels/paths still valid):
 
-| [Entity name](./examples/tutorials/entity_name.py) | [Select rendered envs](./examples/tutorials/selecting_rendered_envs.py) | [GUI: keyboard teleop](./examples/viewer_plugin/keyboard_teleop.py) |
+| [Entity name](./examples/genesis_origin_example/tutorials/entity_name.py) | [Select rendered envs](./examples/genesis_origin_example/tutorials/selecting_rendered_envs.py) | [GUI: keyboard teleop](./examples/genesis_origin_example/viewer_plugin/keyboard_teleop.py) |
 | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/tutorials_entity_name.webp" width="240"> | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/tutorials_selecting_rendered_envs.webp" width="240"> | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/keyboard_teleop.webp" width="240"> |
-| [Control franka](./examples/rigid/control_franka.py) | [Position control comparison](./examples/tutorials/position_control_comparison.py) | [IK + motion planning](./examples/tutorials/IK_motion_planning_grasp.py) |
+| [Control franka](./examples/genesis_origin_example/rigid/control_franka.py) | [Position control comparison](./examples/genesis_origin_example/tutorials/position_control_comparison.py) | [IK + motion planning](./examples/genesis_origin_example/tutorials/IK_motion_planning_grasp.py) |
 | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/rigid_control_franka.webp" width="240"> | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/tutorials_position_control_comparison.webp" width="240"> | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/tutorials_IK_motion_planning_grasp.webp" width="240"> |
-| [Close kinematic chain](./examples/rigid/closed_loop.py) | [Advanced: muscle](./examples/tutorials/advanced_muscle.py) | [Advanced: hybrid robot](./examples/tutorials/advanced_hybrid_robot.py) |
+| [Close kinematic chain](./examples/genesis_origin_example/rigid/closed_loop.py) | [Advanced: muscle](./examples/genesis_origin_example/tutorials/advanced_muscle.py) | [Advanced: hybrid robot](./examples/genesis_origin_example/tutorials/advanced_hybrid_robot.py) |
 | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/rigid_closed_loop.webp" width="240"> | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/tutorials_advanced_muscle.webp" width="240"> | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/tutorials_advanced_hybrid_robot.webp" width="240"> |
 -->
