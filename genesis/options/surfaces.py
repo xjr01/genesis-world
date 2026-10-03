@@ -55,10 +55,14 @@ class Surface(Options):
     vis_mode : str | None, optional
         How the entity should be visualized, e.g.
         - 'visual': Render the entity's visual geometry.
-        - 'collision': Render the entity's collision geometry.
+        - 'collision': Render the entity's collision geometry. For position-based dynamics (PBD) cloth and elastic
+          entities, display the simulation surface directly to show resolved contacts; mesh detail and texture
+          coordinates from the authored visual mesh are replaced by the simulation geometry.
         - 'particle': Render the entity's particle representation (if applicable).
         - 'sdf': Render the reconstructed surface mesh of the entity's sdf.
         - 'recon': Render the reconstructed surface mesh of the entity's particle representation.
+        - 'tetrahedral': Render every unique tetrahedron edge of a finite element method entity. This reveals the
+          internal discretization but draws many more line segments and requires Rasterizer.
     smooth : bool, optional
         Whether to smooth face normals by interpolating vertex normals.
     double_sided : bool | None, optional
@@ -87,7 +91,7 @@ class Surface(Options):
 
     ior: float | None = None
     default_roughness: UnitInterval = 1.0
-    vis_mode: Literal["visual", "collision", "particle", "sdf", "recon"] | None = None
+    vis_mode: Literal["visual", "collision", "particle", "sdf", "recon", "tetrahedral"] | None = None
     smooth: StrictBool = True
     double_sided: StrictBool | None = None
     cutoff: float = 180.0

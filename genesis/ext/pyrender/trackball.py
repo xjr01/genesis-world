@@ -16,7 +16,14 @@ class Trackball(object):
     STATE_ROLL = 2
     STATE_ZOOM = 3
 
-    def __init__(self, pose, size, scale, target=np.array([0.0, 0.0, 0.0])):
+    def __init__(
+        self,
+        pose,
+        size,
+        scale,
+        target=np.array([0.0, 0.0, 0.0]),
+        world_up_axis=None,
+    ):
         """Initialize a trackball with an initial camera-to-world pose
         and the given parameters.
 
@@ -36,9 +43,20 @@ class Trackball(object):
         target : (3,) float
             The center of the scene in world coordinates.
             The trackball will revolve around this point.
+
+        world_up_axis : (3,) float
+            The scene axis that mouse orbiting treats as vertical. Defaults to ``[0,0,1]``.
         """
         self._size = np.asarray(size, dtype=np.float32)
         self._scale = float(scale)
+
+        if world_up_axis is None:
+            world_up_axis = (0.0, 0.0, 1.0)
+        self._world_up_axis = np.array(world_up_axis, copy=True)
+        world_up_axis_norm = np.linalg.norm(self._world_up_axis)
+        if world_up_axis_norm < EPSILON:
+            raise ValueError("Trackball world up axis must be nonzero.")
+        self._world_up_axis = self._world_up_axis / world_up_axis_norm
 
         self._pose = pose.copy()
         self._n_pose = pose.copy()
@@ -111,11 +129,7 @@ class Trackball(object):
 
         # Interpret drag as a rotation
         if self._state == Trackball.STATE_ROTATE:
-            # Compute updated azimut directly. No fancy math here because this angle can controlled freely.
-            roll_angle = np.arctan2(self._pose[2, 1], self._pose[2, 2])
-
-            # safeguard for degenerate case when roll_angle = 0
-            world_up_axis = np.array([0.0, 0.0, -1.0 if roll_angle < 0.0 else 1.0])
+            world_up_axis = self._world_up_axis if np.dot(y_axis, self._world_up_axis) >= 0.0 else -self._world_up_axis
             azimuth_angle = -dx / mindim
             azimuth_transform = transformations.rotation_matrix(azimuth_angle, world_up_axis, target)
 
@@ -123,7 +137,9 @@ class Trackball(object):
             pose_after_azimuth = azimuth_transform @ self._pose
             eye_after_azimuth = pose_after_azimuth[:3, 3]
             view_dir = target - eye_after_azimuth
-            current_elevation_angle = -np.arctan2(view_dir[2], np.linalg.norm(view_dir[:2]))
+            view_up_component = np.dot(view_dir, world_up_axis)
+            view_horizontal = view_dir - view_up_component * world_up_axis
+            current_elevation_angle = -np.arctan2(view_up_component, np.linalg.norm(view_horizontal))
 
             # Update elevation angle based on mouse motion
             desired_elevation_angle = current_elevation_angle - dy / mindim

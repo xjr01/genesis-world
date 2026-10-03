@@ -1,14 +1,18 @@
 import ctypes
+from multiprocessing import Process, Queue
 import os
 import platform
+import shutil
 import subprocess
 import sys
-import shutil
 import tempfile
-from multiprocessing import Process, Queue
+from typing import NamedTuple
+
+import numpy as np
 
 import igl
-import numpy as np
+import pysplashsurf
+from scipy import ndimage
 import trimesh
 
 import genesis as gs
@@ -46,9 +50,9 @@ def nowhere_particles(n):
 
 def trimesh_to_particles_simple(mesh, p_size, sampler):
     """
-    Mesh to particles via `random` or `regular` sampler.
+    Mesh to particles via `random`, `regular`, or `staggered` sampler.
     """
-    assert sampler in ("random", "regular")
+    assert sampler in ("random", "regular", "staggered")
 
     # compute file name via hashing for caching
     cache = msu.get_ptc_cache(mesh.vertices, mesh.faces, p_size, sampler)
@@ -161,8 +165,15 @@ def trimesh_to_particles_pbs(mesh, p_size, sampler, pos=(0, 0, 0)):
 
 def _box_to_particles(p_size, pos, size, sampler):
     """
-    Private function to sample particles from a box. This function only supports `random` and `regular` samplers.
-    This is a private function that does not consider additional mesh offset or scale.
+    Private function to sample particles from a box.
+
+    ``staggered`` reproduces the three-dimensional ``generateBoxPacked``
+    lattice used by the PBSTF C++ reference: nodes and face centers of a
+    staggered grid whose spacing is ``sqrt(2) * particle_size``.  Its nearest
+    particle distance is therefore exactly ``particle_size``.
+
+    This is a private function that supports `random`, `regular`, and
+    `staggered` samplers and does not consider additional mesh offset or scale.
     """
     size = np.array(size)
     pos = np.array(pos)
@@ -184,6 +195,30 @@ def _box_to_particles(p_size, pos, size, sampler):
         z = np.linspace(p_lower[2], p_upper[2], n_z)
         positions = np.stack(np.meshgrid(x, y, z, indexing="ij"), -1).reshape((-1, 3))
 
+    elif sampler == "staggered":
+        radius = 0.5 * p_size
+        spacing = np.sqrt(2.0) * p_size
+        resolution = np.maximum(np.floor((size - 2.0 * radius) / spacing + 0.5).astype(np.int64), 0)
+        origin = pos - 0.5 * resolution * spacing
+
+        lattices = []
+
+        node_axes = [np.arange(n + 1, dtype=np.float64) for n in resolution]
+        nodes = np.stack(np.meshgrid(*node_axes, indexing="ij"), -1).reshape((-1, 3))
+        lattices.append(origin + spacing * nodes)
+
+        for axis in range(3):
+            face_shape = resolution.copy()
+            face_shape[axis] += 1
+            if np.all(face_shape > 0):
+                face_axes = [np.arange(n, dtype=np.float64) for n in face_shape]
+                faces = np.stack(np.meshgrid(*face_axes, indexing="ij"), -1).reshape((-1, 3))
+                offset = np.full(3, 0.5, dtype=np.float64)
+                offset[axis] = 0.0
+                lattices.append(origin + spacing * (faces + offset))
+
+        positions = np.concatenate(lattices, axis=0)
+
     else:
         gs.raise_exception(f"Unsupported sampler method: {sampler}.")
 
@@ -199,7 +234,7 @@ def box_to_particles(p_size=0.01, pos=(0, 0, 0), size=(1, 1, 1), sampler="random
         except gs.GenesisException:
             sampler = "random"
 
-    if sampler in ("random", "regular"):
+    if sampler in ("random", "regular", "staggered"):
         positions = _box_to_particles(
             p_size=p_size,
             pos=pos,
@@ -208,6 +243,59 @@ def box_to_particles(p_size=0.01, pos=(0, 0, 0), size=(1, 1, 1), sampler="random
         )
 
     return positions
+
+
+def mesh_cavity_to_particles(mesh, p_size, seed, max_height, clearance=None, height_axis=1):
+    """Sample the mesh cavity connected to ``seed`` on a regular lattice below ``max_height``.
+
+    Six-connected flood filling confines the result to the selected positive signed-distance component. A clearance of
+    at least half the lattice spacing makes every axial step observe the rejected band around a positive-thickness wall.
+    The function raises when the selected component reaches the mesh bounds, which indicates a path into the exterior.
+    """
+    if p_size <= 0.0:
+        gs.raise_exception("Mesh cavity particle spacing must be positive.")
+    if clearance is None:
+        clearance = 0.5 * p_size
+    if clearance < 0.5 * p_size:
+        gs.raise_exception("Mesh cavity clearance must be at least half the particle spacing.")
+    if height_axis not in (0, 1, 2):
+        gs.raise_exception("Mesh cavity height axis must be 0, 1, or 2.")
+
+    seed = np.array(seed)
+    lower = mesh.bounds[0] + clearance
+    upper = mesh.bounds[1] - clearance
+    upper[height_axis] = min(upper[height_axis], max_height)
+    if np.any(seed < lower) or np.any(seed > upper):
+        gs.raise_exception("Mesh cavity seed must lie within the sampling bounds and below the maximum height.")
+
+    grid_axes = []
+    axis_tolerance = p_size * 1e-9
+    for axis in range(3):
+        negative = np.arange(seed[axis] - p_size, lower[axis] - p_size, -p_size)
+        negative = negative[negative >= lower[axis] - axis_tolerance][::-1]
+        positive = np.arange(seed[axis], upper[axis] + p_size, p_size)
+        positive = positive[positive <= upper[axis] + axis_tolerance]
+        grid_axes.append(np.concatenate((negative, positive)))
+
+    resolution = tuple(len(grid_axis) for grid_axis in grid_axes)
+    query_points = np.stack(np.meshgrid(*grid_axes, indexing="ij"), axis=-1).reshape((-1, 3))
+    signed_distance, *_ = igl.signed_distance(query_points, mesh.vertices, mesh.faces)
+    is_available = signed_distance.reshape(resolution) >= clearance
+    seed_idx = tuple(np.searchsorted(grid_axes[axis], seed[axis]) for axis in range(3))
+    if not is_available[seed_idx]:
+        gs.raise_exception("Mesh cavity seed must be at least the requested clearance from the mesh surface.")
+
+    labels, _ = ndimage.label(is_available, ndimage.generate_binary_structure(rank=3, connectivity=1))
+    is_selected = labels == labels[seed_idx]
+    for axis in range(3):
+        has_boundary_reach = np.take(is_selected, indices=0, axis=axis).any()
+        if axis != height_axis:
+            has_boundary_reach |= np.take(is_selected, indices=-1, axis=axis).any()
+        if has_boundary_reach:
+            gs.raise_exception("Mesh cavity flood fill reached the mesh bounds.")
+
+    particles_idx = np.nonzero(is_selected)
+    return np.column_stack(tuple(grid_axes[axis][particles_idx[axis]] for axis in range(3)))
 
 
 def cylinder_to_particles(p_size=0.01, pos=(0, 0, 0), radius=0.5, height=1.0, sampler="random"):
@@ -286,43 +374,93 @@ def shell_to_particles(p_size=0.01, pos=(0, 0, 0), inner_radius=0.5, outer_radiu
     return positions
 
 
-def _splashsurf_worker(positions, radius, args_dict, result_queue):
-    try:
-        import pysplashsurf
+class ReconstructionOptions(NamedTuple):
+    radius_scale: float = 1.0
+    voxel_scale: float = 1.0
+    isovalue: float = 0.0
+    adaptivity: float = 0.01
+    smoothing_iterations: int = 25
 
+
+class ReconstructedParticleArrays(NamedTuple):
+    vertices: np.ndarray
+    triangles: np.ndarray
+    normals: np.ndarray
+    concentrations: np.ndarray | None
+
+
+def _splashsurf_worker(positions, radius, options, result_queue, concentrations):
+    try:
+        # The reconstruction interface requires contiguous float64 arrays and a named attribute mapping.
+        attributes = None
+        if concentrations is not None:
+            attributes = {"concentration": np.ascontiguousarray(concentrations, dtype=np.float64)}
         mesh_with_data, _ = pysplashsurf.reconstruction_pipeline(
-            positions,
-            particle_radius=radius * args_dict.get("rscale", 1.0),
+            np.ascontiguousarray(positions, dtype=np.float64),
+            attributes_to_interpolate=attributes,
+            particle_radius=radius * options.radius_scale,
             smoothing_length=2.0,
             cube_size=0.8,
             iso_surface_threshold=0.6,
             mesh_smoothing_weights=True,
-            mesh_smoothing_iters=int(args_dict.get("smooth", 25)),
+            mesh_smoothing_iters=options.smoothing_iterations,
             normals_smoothing_iters=10,
             mesh_cleanup=True,
             compute_normals=True,
             multi_threading=True,
         )
-        normals = mesh_with_data.point_attributes["normals"]
-        vertices = mesh_with_data.mesh.vertices
-        triangles = mesh_with_data.mesh.triangles
-        result_queue.put_nowait((vertices, triangles, normals))
+        result_queue.put_nowait(
+            ReconstructedParticleArrays(
+                mesh_with_data.mesh.vertices,
+                mesh_with_data.mesh.triangles,
+                mesh_with_data.point_attributes["normals"],
+                mesh_with_data.point_attributes["concentration"] if concentrations is not None else None,
+            )
+        )
     except Exception as e:
         result_queue.put_nowait(e)
         raise
 
 
-def particles_to_mesh(positions, radius, backend):
-    def parse_args(backend):
-        args_dict = dict()
-        args_list = backend.split("-")
-        if len(args_list) >= 2:
-            args_dict["rscale"] = float(args_list[1])
-            args_list = args_list[2:]
-            for i in range(0, len(args_list), 2):
-                args_dict[args_list[i]] = float(args_list[i + 1])
-        return args_dict
+def _splashsurf_reconstruct(positions, radius, options, concentrations=None):
+    # Reclaim native reconstruction allocations between frames to bound memory during long recordings.
+    result_queue = Queue()
+    if malloc_trim is not None:
+        _splashsurf_worker(positions, radius, options, result_queue, concentrations)
+        result = result_queue.get()
+        malloc_trim(0)
+    else:
+        proc = Process(target=_splashsurf_worker, args=(positions, radius, options, result_queue, concentrations))
+        proc.start()
+        result = result_queue.get()
+        proc.join()
+        if proc.exitcode != 0:
+            gs.raise_exception_from(f"splashsurf subprocess failed with exit code {proc.exitcode}", result)
+    result_queue.close()
+    return result
 
+
+def _parse_recon_backend(backend):
+    options = ReconstructionOptions(radius_scale=2.0 if "openvdb" in backend else 1.0)
+    args_list = backend.split("-")
+    if len(args_list) >= 2:
+        options = options._replace(radius_scale=float(args_list[1]))
+        args_list = args_list[2:]
+        for i in range(0, len(args_list), 2):
+            value = float(args_list[i + 1])
+            match args_list[i]:
+                case "vscale":
+                    options = options._replace(voxel_scale=value)
+                case "isovalue":
+                    options = options._replace(isovalue=value)
+                case "adaptivity":
+                    options = options._replace(adaptivity=value)
+                case "smooth":
+                    options = options._replace(smoothing_iterations=int(value))
+    return options
+
+
+def particles_to_mesh(positions, radius, backend):
     if positions.shape[0] == 0:
         return trimesh.Trimesh(vertices=np.zeros((0, 3)), faces=np.zeros((0, 3)))
 
@@ -338,7 +476,7 @@ def particles_to_mesh(positions, radius, backend):
     else:
         radii = np.array([])
 
-    args_dict = parse_args(backend)
+    options = _parse_recon_backend(backend)
 
     if "openvdb" in backend:
         if sys.platform != "linux" or sys.version_info[:2] == (3, 9):
@@ -346,13 +484,13 @@ def particles_to_mesh(positions, radius, backend):
 
         import ParticleMesherPy
 
-        radius_scale = args_dict.get("rscale", 2.0)
+        radius_scale = options.radius_scale
         reconstructor = ParticleMesherPy.MeshConstructor(
             ParticleMesherPy.MeshConstructorConfig(
                 particle_radius=radius * radius_scale,
-                voxel_scale=args_dict.get("vscale", 1.0),
-                isovalue=args_dict.get("isovalue", 0.0),
-                adaptivity=args_dict.get("adaptivity", 0.01),
+                voxel_scale=options.voxel_scale,
+                isovalue=options.isovalue,
+                adaptivity=options.adaptivity,
             )
         )
         mesh = reconstructor.construct(positions=positions, radii=radii * radius_scale)
@@ -362,21 +500,10 @@ def particles_to_mesh(positions, radius, backend):
 
         return trimesh.Trimesh(vertices, faces, process=False)
     elif "splashsurf" in backend:
-        # FIXME: Running in subprocess or manually reclaiming free-ed head memory is necessary to avoid unbounded growth
-        result_queue = Queue()
-        if malloc_trim is not None:
-            _splashsurf_worker(positions, radius, args_dict, result_queue)
-            result = result_queue.get()
-            malloc_trim(0)
-        else:
-            proc = Process(target=_splashsurf_worker, args=(positions, radius, args_dict, result_queue))
-            proc.start()
-            result = result_queue.get()
-            proc.join()
-            if proc.exitcode != 0:
-                gs.raise_exception_from(f"splashsurf subprocess failed with exit code {proc.exitcode}", result)
-        vertices, triangles, normals = result
-        mesh = trimesh.Trimesh(vertices=vertices, faces=triangles, face_normals=normals, process=False)
+        result = _splashsurf_reconstruct(positions, radius, options)
+        mesh = trimesh.Trimesh(
+            vertices=result.vertices, faces=result.triangles, vertex_normals=result.normals, process=False
+        )
         gs.logger.debug(f"[splashsurf]: reconstruct vertices: {mesh.vertices.shape}, {mesh.faces.shape}")
         return mesh
     else:
@@ -457,3 +584,37 @@ def filter_surface(positions, radii, particle_radius, half_width=8.0, radius_sca
         f"\tFrom {positions.shape[0]} to {np.sum(surface_indices.is_surface)}"
     )
     return surface_indices.is_surface
+
+
+class ReconstructedConcentrationMesh(NamedTuple):
+    mesh: trimesh.Trimesh
+    concentrations: np.ndarray
+
+
+def concentration_colors(concentrations):
+    """Map passive concentrations from pale water to dark coffee as OpenGL float32 colors."""
+    concentration = np.clip(concentrations[..., None], 0.0, 1.0)
+    water = np.array((1.0, 1.0, 1.0, 1.0))
+    mixed = np.array((0.95, 0.78, 0.30, 1.0))
+    coffee = np.array((0.30, 0.14, 0.05, 1.0))
+    low = water + 2.0 * concentration * (mixed - water)
+    high = mixed + (2.0 * concentration - 1.0) * (coffee - mixed)
+    return np.where(concentration <= 0.5, low, high).astype(np.float32)
+
+
+def particles_to_mesh_with_concentration(positions, radius, backend, concentrations):
+    """Reconstruct a liquid surface and interpolate concentrations at its vertices with splashsurf."""
+    if "splashsurf" not in backend:
+        gs.raise_exception("Concentration surface rendering requires a splashsurf reconstruction backend.")
+    if len(positions) == 0:
+        return ReconstructedConcentrationMesh(trimesh.Trimesh(), np.empty(0))
+    mesh_data = _splashsurf_reconstruct(positions, radius, _parse_recon_backend(backend), concentrations)
+    return ReconstructedConcentrationMesh(
+        trimesh.Trimesh(
+            vertices=mesh_data.vertices,
+            faces=mesh_data.triangles,
+            vertex_normals=mesh_data.normals,
+            process=False,
+        ),
+        mesh_data.concentrations,
+    )

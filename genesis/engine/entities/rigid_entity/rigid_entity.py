@@ -626,8 +626,10 @@ class KinematicEntity(Entity):
         )
 
     def _parse_scene(self, morph, surface):
-        # Keep track of whether parsed inertia can be considered valid
-        is_inertia_invalid = True
+        # Whether the parsed inverse weight has been invalidated, either because the inertia it derives from was
+        # replaced, or because it was never trustworthy in the first place. It is applied once, after every reason
+        # to invalidate has been collected.
+        is_inertia_invalid = False
 
         # Mujoco's unified MJCF+URDF parser is not good enough for now to be used for loading both MJCF and URDF files.
         # First, it would happen when loading visual meshes having supported format (i.e. Collada files '.dae').
@@ -656,7 +658,7 @@ class KinematicEntity(Entity):
                                 for key, value in l_info_gs.items():
                                     if value is None:
                                         l_info_mj[key] = None
-                                        is_inertia_invalid = False
+                                        is_inertia_invalid = True
                                 break
                 l_infos = l_infos_mj
 
@@ -674,7 +676,7 @@ class KinematicEntity(Entity):
                     for link_j_infos in links_j_infos:
                         for j_info in link_j_infos:
                             if j_info["type"] not in (gs.JOINT_TYPE.FREE, gs.JOINT_TYPE.FIXED):
-                                is_inertia_invalid = False
+                                is_inertia_invalid = True
                                 break
 
                 # Take into account 'world' body if it was added automatically for our legacy URDF parser
@@ -829,7 +831,6 @@ class KinematicEntity(Entity):
             if parent_idx >= 0 and all(j_info["type"] == gs.JOINT_TYPE.FIXED for j_info in links_j_infos[i]):
                 has_links_subtree_mass[parent_idx] |= has_links_subtree_mass[i]
 
-        is_inertia_invalid = False
         for i, (l_info, link_g_infos, link_j_infos, has_link_subtree_mass) in enumerate(
             zip(l_infos, links_g_infos, links_j_infos, has_links_subtree_mass)
         ):
@@ -920,6 +921,19 @@ class KinematicEntity(Entity):
 
         # Exclude joints with 0 dofs to align with Mujoco
         links_j_infos = [[j_info for j_info in link_j_infos if j_info["n_dofs"] > 0] for link_j_infos in links_j_infos]
+
+        if morph.collision_links is not None:
+            parsed_link_names = {l_info["name"] for l_info in l_infos}
+            unknown_link_names = set(morph.collision_links).difference(parsed_link_names)
+            if unknown_link_names:
+                gs.raise_exception(
+                    f"Unknown collision links {sorted(unknown_link_names)} in morph '{morph._identifier()}'."
+                )
+            for l_info, link_g_infos in zip(l_infos, links_g_infos):
+                if l_info["name"] not in morph.collision_links:
+                    link_g_infos[:] = [
+                        g_info for g_info in link_g_infos if not (g_info["contype"] or g_info["conaffinity"])
+                    ]
 
         return l_infos, links_j_infos, links_g_infos, eqs_info
 
@@ -3719,6 +3733,28 @@ class RigidEntity(KinematicEntity):
         """
         links_idx = self._get_global_idx(links_idx_local, self.n_links, self._link_start, unsafe=True)
         return self._solver.get_links_vel(links_idx, envs_idx, ref=ref)
+
+    @gs.assert_built
+    @tracked
+    def set_velocity(self, vel=None, ang=None, envs_idx=None):
+        """Set the prescribed world-frame velocity of a fixed entity's base link.
+
+        Parameters
+        ----------
+        vel : array_like | None
+            Linear velocity at the base-link origin. Zero if unspecified.
+        ang : array_like | None
+            Angular velocity. Zero if unspecified.
+        envs_idx : None | array_like, optional
+            The indices of the environments. If None, all environments are considered.
+        """
+        if not self.base_link.is_fixed:
+            gs.raise_exception("Prescribed base velocity is only supported for fixed rigid entities.")
+        if vel is None:
+            vel = (0.0, 0.0, 0.0)
+        if ang is None:
+            ang = (0.0, 0.0, 0.0)
+        self._solver.set_fixed_links_velocity(vel, ang, self.base_link_idx, envs_idx)
 
     @gs.assert_built
     def get_links_acc(self, links_idx_local=None, envs_idx=None):

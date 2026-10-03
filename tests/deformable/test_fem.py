@@ -1,14 +1,17 @@
 import math
 
-import igl
 import numpy as np
 import pytest
 import torch
 
+import igl
+
 import genesis as gs
+import genesis.utils.element as element_utils
+from genesis.ext import pyrender
 from genesis.utils.misc import tensor_to_array
 
-from ..utils import assert_allclose, get_hf_dataset
+from ..utils import assert_allclose, assert_equal, get_hf_dataset
 
 
 @pytest.mark.required
@@ -28,6 +31,34 @@ def test_interior_tetrahedralized_vertex(cube_verts_and_faces, box_obj_path, sho
             minratio=1.5,
             verbose=1,
             maxvolume=0.01,
+        ),
+        material=gs.materials.FEM.Muscle(),
+    )
+    skeleton = scene.add_entity(
+        morph=gs.morphs.Mesh(
+            file=box_obj_path,
+            pos=(1.5, 0.0, 0.0),
+            nobisect=False,
+            minratio=1.5,
+            verbose=1,
+            maxvolume=0.01,
+        ),
+        material=gs.materials.FEM.Muscle(),
+        surface=gs.surfaces.Default(
+            color=(0.95, 0.68, 0.12),
+            vis_mode="tetrahedral",
+        ),
+    )
+    grid_vertices, grid_elements = element_utils.create_tetrahedral_grid(
+        lower=(-0.5, -0.5, -0.5),
+        upper=(0.5, 0.5, 0.5),
+        resolution=(2, 1, 2),
+    )
+    tetrahedral_entity = scene.add_entity(
+        morph=gs.morphs.TetrahedralMesh(
+            vertices=grid_vertices,
+            elements=grid_elements,
+            pos=(3.0, 0.0, 0.0),
         ),
         material=gs.materials.FEM.Muscle(),
     )
@@ -91,6 +122,29 @@ def test_interior_tetrahedralized_vertex(cube_verts_and_faces, box_obj_path, sho
     (fem_node_primitive,) = scene.visualizer.context.static_nodes[(0, vgeom.uid)].mesh.primitives
     viz_verts = fem_node_primitive.positions
     assert_allclose(viz_verts, vertices[vgeom.sim_verts_idx], tol=gs.EPS)
+
+    skeleton_vertices = tensor_to_array(skeleton.get_state().pos[0])
+    skeleton_element_edges = np.concatenate(
+        (
+            skeleton.elems[:, (0, 1)],
+            skeleton.elems[:, (0, 2)],
+            skeleton.elems[:, (0, 3)],
+            skeleton.elems[:, (1, 2)],
+            skeleton.elems[:, (1, 3)],
+            skeleton.elems[:, (2, 3)],
+        ),
+        axis=0,
+    )
+    skeleton_edges = np.unique(np.sort(skeleton_element_edges, axis=1), axis=0)
+    (skeleton_primitive,) = scene.visualizer.context.static_nodes[(0, skeleton.uid)].mesh.primitives
+    assert skeleton_primitive.mode == pyrender.GLTF.LINES
+    assert_equal(skeleton_primitive.indices, skeleton_edges)
+    assert_allclose(skeleton_primitive.positions, skeleton_vertices, atol=1e-7)
+
+    assert tetrahedral_entity.n_vertices == 18
+    assert tetrahedral_entity.n_elements == 24
+    assert_equal(tetrahedral_entity.elems, grid_elements)
+    assert_allclose(tetrahedral_entity.get_state().pos[0], grid_vertices + (3.0, 0.0, 0.0), tol=gs.EPS)
 
 
 @pytest.mark.required
@@ -329,6 +383,10 @@ def test_hard_constraint(use_implicit_solver, show_viewer):
     )
     scene.build(n_envs=2)
 
+    embedded_pos = box.get_embedded_positions((0,), ((0.25, 0.25, 0.25, 0.25),))
+    expected_embedded_pos = box.get_state().pos[..., box.elems[0], :].mean(dim=-2)
+    assert_allclose(embedded_pos[..., 0, :], expected_embedded_pos, tol=1e-8)
+
     # Simulate
     n_steps = int(0.5 * math.pi / MOTION_SPEED)
     for it in range(n_steps):
@@ -503,6 +561,70 @@ def test_implicit_sap_coupler_collide_sphere_box(show_viewer):
         entity_center = 0.5 * (BV[0] + BV[-1])
         assert_allclose(entity_center[:2], 0.0, tol=0.02)
         assert_allclose(entity_center[2], init_height, tol=5e-3)
+
+
+@pytest.mark.required
+@pytest.mark.parametrize("n_envs", [0, 2])
+def test_implicit_one_way_rigid_surface_projection(n_envs, show_viewer):
+    DT = 0.01
+    DAMPING_ALPHA = 0.5
+    vertices, elements = element_utils.create_tetrahedral_grid(
+        lower=(-0.16, -0.16, -0.16),
+        upper=(0.0, 0.0, 0.0),
+        resolution=(1, 1, 1),
+    )
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=DT,
+            gravity=(0.0, 0.0, 0.0),
+        ),
+        fem_options=gs.options.FEMOptions(
+            floor_height=-0.2,
+            use_implicit_solver=True,
+            damping_alpha=DAMPING_ALPHA,
+        ),
+        coupler_options=gs.options.LegacyCouplerOptions(),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(0.5, 0.5, 0.4),
+            camera_lookat=(-0.05, -0.05, -0.05),
+        ),
+        show_viewer=show_viewer,
+    )
+    fem = scene.add_entity(
+        morph=gs.morphs.TetrahedralMesh(
+            vertices=vertices,
+            elements=elements,
+        ),
+        material=gs.materials.FEM.Elastic(),
+    )
+    rigid = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(0.04, -0.08, -0.08),
+            size=(0.02, 0.24, 0.24),
+            fixed=True,
+        ),
+        material=gs.materials.Rigid(
+            coup_friction=0.0,
+            is_coup_reaction_enabled=False,
+        ),
+    )
+    scene.build(n_envs=n_envs)
+
+    pos_initial = fem.get_state().pos
+    scene.fem_solver.set_gravity(gravity=(0.0, 1.0, 0.0), envs_idx=n_envs - 1 if n_envs else None)
+    scene.step()
+    state = fem.get_state()
+    velocity_expected = torch.zeros_like(state.vel)
+    velocity_expected[-1, :, 1] = DT / (1.0 + DAMPING_ALPHA * DT)
+    assert_allclose(state.vel, velocity_expected, atol=1e-5)
+    assert_allclose(state.pos, pos_initial + DT * velocity_expected, atol=1e-6)
+
+    scene.reset()
+    scene.fem_solver.set_gravity(gravity=(0.0, 0.0, 0.0))
+    rigid.set_pos((-0.04, -0.08, -0.08))
+    scene.step()
+
+    assert (fem.get_state().pos[..., 0] < -0.05).all()
 
 
 # This test cannot be flagged as required because it takes 400s to run on CPU.

@@ -140,6 +140,22 @@ class SPHEntityState(RBC):
         return self._vel
 
 
+class IPBSTFEntityState(SPHEntityState):
+    """Dynamic state queried from an implicit position-based surface-tension fluid (IPBSTF) entity."""
+
+
+class PBSTFEntityState(SPHEntityState):
+    """Dynamic state queried from a genesis PBSTFEntity."""
+
+    def __init__(self, entity, s_global):
+        super().__init__(entity, s_global)
+        self._c = gs.zeros((self.entity.sim._B, self.entity.n_particles), dtype=gs.tc_float, scene=self.entity.scene)
+
+    @property
+    def c(self):
+        return self._c
+
+
 class FEMEntityState:
     """
     Dynamic state queried from a genesis FEMEntity.
@@ -226,3 +242,7 @@ class RigidEntityState(RBC):
     @property
     def quat(self):
         return self._quat
+
+
+class IPBFEntityState(PBSTFEntityState):
+    """Dynamic state of an implicit position-based fluid entity."""

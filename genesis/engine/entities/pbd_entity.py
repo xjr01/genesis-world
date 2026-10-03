@@ -1,11 +1,32 @@
-import quadrants as qd
 import numpy as np
+import torch
+
+import igl
 import trimesh
 
+import quadrants as qd
+
 import genesis as gs
+from genesis.engine.entities.particle_concentration import initial_concentration
+from genesis.engine.entities.particle_entity import ParticleEntity
+from genesis.options.solvers import PBDOptions, PBDUnifiedOptions
 import genesis.utils.geom as gu
 import genesis.utils.mesh as mu
-from genesis.engine.entities.particle_entity import ParticleEntity
+from genesis.utils.misc import broadcast_tensor
+
+
+@qd.kernel
+def kernel_bind_pbd_surface_vertices(
+    particles_idx: qd.types.ndarray(ndim=1),
+    particle_start: int,
+    vvert_start: int,
+    vverts_info: qd.template(),
+):
+    for i_v_ in range(particles_idx.shape[0]):
+        i_v = vvert_start + i_v_
+        vverts_info[i_v].support_idxs.fill(particle_start + particles_idx[i_v_])
+        vverts_info[i_v].support_weights.fill(0.0)
+        vverts_info[i_v].support_weights[0] = 1.0
 
 
 class PBDBaseEntity(ParticleEntity):
@@ -95,6 +116,8 @@ class PBDBaseEntity(ParticleEntity):
 
     @gs.assert_built
     def fix_particles_to_link(self, link_idx, particles_idx_local=None, envs_idx=None):
+        if isinstance(self._scene.pbd_options, PBDUnifiedOptions):
+            gs.raise_exception("PBDUnifiedSolver supports fixed particles and one-way rigid contact.")
         envs_idx = self._scene._sanitize_envs_idx(envs_idx)
         particles_idx_local = self._sanitize_particles_idx_local(particles_idx_local, envs_idx)
         particles_idx = particles_idx_local + self._particle_start
@@ -139,7 +162,8 @@ class PBDBaseEntity(ParticleEntity):
         particles_idx_local = self._sanitize_particles_idx_local(particles_idx_local, envs_idx)
         particles_idx = particles_idx_local + self._particle_start
         self.solver._kernel_release_particle(particles_idx, envs_idx)
-        self.solver._sim._coupler.kernel_pbd_rigid_clear_animate_particles_by_link(particles_idx, envs_idx)
+        if isinstance(self._scene.pbd_options, PBDOptions):
+            self.solver._sim._coupler.kernel_pbd_rigid_clear_animate_particles_by_link(particles_idx, envs_idx)
 
     # ------------------------------------------------------------------------------------
     # --------------------------------- naming methods -----------------------------------
@@ -209,6 +233,21 @@ class PBDTetEntity(PBDBaseEntity):
             name=name,
         )
         self._edge_start = edge_start
+        self._vverts_particles_idx = None
+        if isinstance(self.morph, gs.morphs.TetrahedralMesh) or self.surface.vis_mode == "collision":
+            self._vverts_particles_idx, faces = np.unique(self.surface_triangles, return_inverse=True)
+            self._vverts = self._particles[self._vverts_particles_idx]
+            self._vfaces = faces.reshape((-1, 3))
+            self._vmesh = gs.Mesh.from_attrs(verts=self._vverts, faces=self._vfaces, surface=self.surface)
+
+    def _add_vverts_to_solver(self):
+        """Bind collision vertices to surface particles, or skin the authored visual mesh."""
+        if self._vverts_particles_idx is None:
+            super()._add_vverts_to_solver()
+        else:
+            kernel_bind_pbd_surface_vertices(
+                self._vverts_particles_idx, self._particle_start, self._vvert_start, self.solver.vverts_info
+            )
 
     def _add_particles_to_solver(self):
         self._kernel_add_particles_edges_to_solver(
@@ -259,10 +298,10 @@ class PBDTetEntity(PBDBaseEntity):
 
     def sample(self):
         """
-        Sample and preprocess the mesh for the PBD tetrahedral entity.
+        Transform the mesh into world coordinates and prepare its simulation surface.
 
-        Applies transformation from the morph, stores mesh vertices and faces, and performs remeshing based on the
-        particle size.
+        Explicit tetrahedral meshes retain their vertices and topology. Other morphs are remeshed using the particle
+        size as the target surface edge length.
         """
         # We don't use ParticleEntity.sample() because we need to maintain the remeshed self._mesh as well. The morph
         # pose offset (e.g. an up-axis conversion) is composed onto the morph pose.
@@ -279,7 +318,8 @@ class PBDTetEntity(PBDBaseEntity):
         self._vfaces = np.asarray(self._vmesh.faces, dtype=gs.np_int)
 
         self._mesh = self._vmesh.copy()
-        self._mesh.remesh(edge_len_abs=self.particle_size, fix=isinstance(self, PBD3DEntity))
+        if not isinstance(self.morph, gs.morphs.TetrahedralMesh):
+            self._mesh.remesh(edge_len_abs=self.particle_size, fix=isinstance(self, PBD3DEntity))
 
     def _reset_grad(self):
         pass
@@ -300,6 +340,14 @@ class PBDTetEntity(PBDBaseEntity):
     def edges(self):
         """Edge array of the mesh."""
         return self._edges
+
+    @property
+    def surface_triangles(self):
+        """Simulation surface triangles as local particle indices, with shape (n_triangles, 3)."""
+        if isinstance(self, PBD3DEntity):
+            faces, *_ = igl.boundary_facets(self._elems)
+            return faces
+        return self._mesh.faces
 
     @property
     def n_edges(self):
@@ -408,11 +456,12 @@ class PBD2DEntity(PBDTetEntity):
 
         self._kernel_add_particles_air_resistance_to_solver(f=self._scene.sim.cur_substep_local)
 
-        self._kernel_add_inner_edges_to_solver(
-            f=self._scene.sim.cur_substep_local,
-            inner_edges=self._inner_edges,
-            inner_edges_len_rest=self._inner_edges_len_rest,
-        )
+        if self.n_inner_edges:
+            self._kernel_add_inner_edges_to_solver(
+                f=self._scene.sim.cur_substep_local,
+                inner_edges=self._inner_edges,
+                inner_edges_len_rest=self._inner_edges_len_rest,
+            )
 
     @qd.kernel
     def _kernel_add_particles_air_resistance_to_solver(self, f: qd.i32):
@@ -438,6 +487,11 @@ class PBD2DEntity(PBDTetEntity):
     def n_inner_edges(self):
         """The number of inner edges in the 2D mesh."""
         return len(self._inner_edges)
+
+    @property
+    def inner_edges(self):
+        """Adjacent triangle vertex indices with shape [n_inner_edges, 4]."""
+        return self._inner_edges
 
 
 @qd.data_oriented
@@ -515,8 +569,12 @@ class PBD3DEntity(PBDTetEntity):
             gs.raise_exception("Input mesh has zero volume.")
         self._mass = self._vmesh.volume * self.material.rho
 
-        tet_cfg = mu.generate_tetgen_config_from_morph(self.morph)
-        particles, elems, *_ = self._mesh.tetrahedralize(tet_cfg)
+        if isinstance(self.morph, gs.morphs.TetrahedralMesh):
+            particles = self._mesh.verts
+            elems = np.array(self.morph.elements)
+        else:
+            tet_cfg = mu.generate_tetgen_config_from_morph(self.morph)
+            particles, elems, *_ = self._mesh.tetrahedralize(tet_cfg)
         self._particles = particles.astype(gs.np_float, copy=False)
         self._init_particles_offset = gs.tensor(self._particles) - gs.tensor(self._sampled_pos)
 
@@ -564,6 +622,30 @@ class PBD3DEntity(PBDTetEntity):
         return len(self._elems)
 
     @property
+    def elems(self):
+        """Tetrahedron vertex indices with shape [n_elems, 4]."""
+        return self._elems
+
+    @gs.assert_built
+    def get_embedded_positions(self, elements_idx_local, barycentric, envs_idx=None):
+        """Evaluate tetrahedral material points as [B, n_points, 3] using the unified solver."""
+        if not isinstance(self._scene.pbd_options, PBDUnifiedOptions):
+            gs.raise_exception("Embedded PBD positions require PBDUnifiedOptions.")
+        elements_idx_local = broadcast_tensor(elements_idx_local, gs.tc_int, (-1,), ("points_idx",)).contiguous()
+        barycentric = broadcast_tensor(
+            barycentric, gs.tc_float, (len(elements_idx_local), 4), ("points_idx", "tetrahedron_vertices_idx")
+        ).contiguous()
+        if (elements_idx_local < 0).any() or (elements_idx_local >= self.n_elems).any():
+            gs.raise_exception("Embedded PBD element indices are out of range.")
+        if (
+            not torch.isfinite(barycentric).all()
+            or (barycentric < -1.0e-5).any()
+            or ((barycentric.sum(dim=-1) - 1.0).abs() > 1.0e-5).any()
+        ):
+            gs.raise_exception("Embedded PBD barycentric weights must describe finite points inside tetrahedra.")
+        return self.solver.get_embedded_positions(elements_idx_local + self._elem_start, barycentric, envs_idx)
+
+    @property
     def elem_start(self):
         """The starting index of the elements in the global solver."""
         return self._elem_start
@@ -607,17 +689,27 @@ class PBDParticleEntity(PBDBaseEntity):
         )
 
     def _add_particles_to_solver(self):
+        c_init = initial_concentration(self._particles, self.material.c_init, self.material.c_init_z_mid)
         self._kernel_add_particles_to_solver(
             f=self._sim.cur_substep_local,
             particles=self._particles,
             rho=self._material.rho,
             material_type=int(self.solver.MATERIAL.LIQUID),
             active=self.active,
+            c_init=c_init,
+            boundary_group=self._material.boundary_group,
         )
 
     @qd.kernel
     def _kernel_add_particles_to_solver(
-        self, f: qd.i32, particles: qd.types.ndarray(), rho: qd.float32, material_type: qd.i32, active: qd.i32
+        self,
+        f: qd.i32,
+        particles: qd.types.ndarray(),
+        rho: qd.float32,
+        material_type: qd.i32,
+        active: qd.i32,
+        c_init: qd.types.ndarray(),
+        boundary_group: qd.i32,
     ):
         for i_p_ in range(self._n_particles):
             i_p = i_p_ + self._particle_start
@@ -638,8 +730,11 @@ class PBDParticleEntity(PBDBaseEntity):
             self.solver.particles[i_p, i_b].vel = qd.Vector.zero(gs.qd_float, 3)
             self.solver.particles[i_p, i_b].dpos = qd.Vector.zero(gs.qd_float, 3)
             self.solver.particles[i_p, i_b].free = True
+            self.solver.particles[i_p, i_b].c = c_init[i_p_]
+            self.solver.particles[i_p, i_b].dc = 0.0
 
             self.solver.particles_ng[i_p, i_b].active = qd.cast(active, gs.qd_bool)
+            self.solver.particles_ng[i_p, i_b].boundary_group = boundary_group
 
     @property
     def n_fluid_particles(self):

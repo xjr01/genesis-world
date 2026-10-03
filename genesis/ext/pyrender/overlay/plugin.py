@@ -769,9 +769,7 @@ class ImGuiOverlayPlugin(ViewerPlugin):
         if changed_pos or changed_lookat:
             cam_pos = np.array(list(new_pos)) if changed_pos else np.array(pos)
             cam_lookat = np.array(list(new_lookat)) if changed_lookat else np.array(lookat)
-            # Build pose with fixed world-up to prevent unintuitive roll
-            world_up = np.array([0.0, 0.0, 1.0])
-            cam_pose = gu.pos_lookat_up_to_T(cam_pos, cam_lookat, world_up)
+            cam_pose = gu.pos_lookat_up_to_T(cam_pos, cam_lookat, trackball._world_up_axis)
             self.scene.viewer._camera_up = cam_pose[:3, 1].copy()
             trackball.set_camera_pose(cam_pose)
             # Sync trackball orbit center so mouse orbiting works correctly after

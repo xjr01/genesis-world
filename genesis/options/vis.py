@@ -1,9 +1,10 @@
-from typing import TYPE_CHECKING, Annotated, Any, Literal, Mapping, Sequence, Union
-from pydantic import StrictBool, StrictInt, Field, model_validator
+from typing import Annotated, Any, Literal, Mapping, Sequence, TYPE_CHECKING, Union
+
+from pydantic import Field, StrictBool, StrictInt, model_validator
 
 import genesis as gs
 from genesis.datatypes import List
-from genesis.typing import IArrayType, PositiveFloat, PositiveInt, PositiveVec2IType, Vec3FType, UnitIntervalVec3Type
+from genesis.typing import IArrayType, PositiveFloat, PositiveInt, PositiveVec2IType, UnitIntervalVec3Type, Vec3FType
 
 from .options import Options
 
@@ -46,7 +47,7 @@ class ViewerOptions(Options):
     camera_lookat : tuple of float, shape (3,)
         The lookat position that the camera.
     camera_up : tuple of float, shape (3,)
-        The up vector of the camera's extrinsic pose.
+        The scene's up direction for the initial camera pose and mouse orbiting.
     camera_fov : float
         The field of view (in degrees) of the camera.
     enable_help_text : bool
@@ -157,7 +158,8 @@ class VisOptions(Options):
         The segmentation level used for segmentation mask rendering. Should be one of ['entity', 'link', 'geom'].
         Defaults to 'link'.
     render_particle_as : str
-        How particles in the scene should be rendered. Should be one of ['sphere', 'tet']. Defaults to 'sphere'.
+        Particle shape: 'sphere' gives a smooth silhouette and supports liquid concentration colors, 'tet' uses fewer
+        triangles, and 'points' draws concentration colors at a fixed screen-space size. Defaults to 'sphere'.
     particle_size_scale : float
         Scale applied to actual particle size for rendering. Defaults to 1.0.
     contact_force_scale : float = 0.02
@@ -189,7 +191,7 @@ class VisOptions(Options):
     visualize_sph_boundary: StrictBool = False
     visualize_pbd_boundary: StrictBool = False
     segmentation_level: Literal["entity", "link", "geom"] = "link"
-    render_particle_as: Literal["sphere", "tet"] = "sphere"
+    render_particle_as: Literal["sphere", "tet", "points"] = "sphere"
     particle_size_scale: PositiveFloat = 1.0
     contact_force_scale: PositiveFloat = 0.01
     n_support_neighbors: StrictInt = 12

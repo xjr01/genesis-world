@@ -2,15 +2,159 @@ import os
 import sys
 
 import numpy as np
+
 import pytest
 import trimesh
 
 import genesis as gs
 from genesis.utils.misc import qd_to_numpy, tensor_to_array
+import genesis.utils.particle as particle_utils
 
 from ..conftest import IS_INTERACTIVE_VIEWER_AVAILABLE, SKIP_NO_VIEWER
-from ..utils import assert_allclose, assert_equal, get_hf_dataset, rgb_array_to_png_bytes
 from .conftest import RENDERER_TYPE
+from ..utils import assert_allclose, assert_equal, get_hf_dataset, rgb_array_to_png_bytes
+
+
+@pytest.mark.required
+@pytest.mark.parametrize("renderer_type", [RENDERER_TYPE.RASTERIZER])
+def test_pbd_reconstruction_uses_pbd_particle_radius(monkeypatch, renderer):
+    particle_size = 0.04
+    reconstructed_radii = []
+
+    def reconstruct_surface(positions, radius, backend):
+        reconstructed_radii.append(radius)
+        mesh = trimesh.creation.icosphere(subdivisions=1, radius=radius)
+        if len(positions) > 0:
+            mesh.apply_translation(positions.mean(axis=0))
+        return mesh
+
+    monkeypatch.setattr(particle_utils, "particles_to_mesh", reconstruct_surface)
+
+    scene = gs.Scene(
+        pbd_options=gs.options.PBDOptions(
+            particle_size=particle_size,
+            lower_bound=(-0.2, -0.2, 0.0),
+            upper_bound=(0.2, 0.2, 0.4),
+        ),
+        # Keep the MPM radius deliberately different to catch accidental cross-solver use.
+        mpm_options=gs.options.MPMOptions(particle_size=0.01),
+        renderer=renderer,
+        show_viewer=False,
+        show_FPS=False,
+    )
+    scene.add_entity(
+        material=gs.materials.PBD.Liquid(sampler="regular"),
+        morph=gs.morphs.Box(pos=(0.0, 0.0, 0.12), size=(0.08, 0.08, 0.08)),
+        surface=gs.surfaces.Default(vis_mode="recon"),
+    )
+    camera = scene.add_camera(
+        res=(32, 32),
+        pos=(0.5, 0.5, 0.4),
+        lookat=(0.0, 0.0, 0.1),
+    )
+
+    scene.build()
+    camera.render()
+
+    assert reconstructed_radii
+    assert all(radius == pytest.approx(particle_size / 2.0) for radius in reconstructed_radii)
+
+
+@pytest.mark.required
+@pytest.mark.parametrize("backend", [gs.cuda])
+@pytest.mark.parametrize("renderer_type", [RENDERER_TYPE.RASTERIZER])
+@pytest.mark.parametrize("n_envs", [0, 2])
+@pytest.mark.parametrize(
+    "vis_mode, render_particle_as", [("particle", "points"), ("particle", "sphere"), ("recon", "sphere")]
+)
+def test_concentration_colors_and_merged_surface(n_envs, vis_mode, render_particle_as, renderer, show_viewer):
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            gravity=(0.0, 0.0, 0.0),
+        ),
+        pbd_options=gs.options.PBDOptions(
+            particle_size=0.02,
+            lower_bound=(-0.2, -0.2, 0.0),
+            upper_bound=(0.2, 0.2, 0.3),
+        ),
+        ipbf_options=gs.options.IPBFOptions(
+            particle_size=0.02,
+            lower_bound=(-0.2, -0.2, 0.0),
+            upper_bound=(0.2, 0.2, 0.3),
+            has_boundary_particles=False,
+        ),
+        pbstf_options=gs.options.PBSTFOptions(
+            particle_size=0.02,
+            lower_bound=(-0.2, -0.2, 0.0),
+            upper_bound=(0.2, 0.2, 0.3),
+        ),
+        vis_options=gs.options.VisOptions(
+            background_color=(0.0, 0.0, 0.0),
+            segmentation_level="entity",
+            render_particle_as=render_particle_as,
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(0.0, -0.65, 0.45),
+            camera_lookat=(0.0, 0.0, 0.1),
+        ),
+        renderer=renderer,
+        show_viewer=show_viewer,
+    )
+    liquids = []
+    material_types = (gs.materials.PBD.Liquid, gs.materials.IPBF.Liquid, gs.materials.PBSTF.Liquid)
+    for x, material_type in zip((-0.12, 0.0, 0.12), material_types):
+        for concentration in (0.0, 1.0):
+            liquids.append(
+                scene.add_entity(
+                    morph=gs.morphs.Box(
+                        pos=(x, 0.0, 0.1),
+                        size=(0.08, 0.08, 0.08),
+                    ),
+                    material=material_type(
+                        sampler="regular",
+                        c_init=concentration,
+                    ),
+                    surface=gs.surfaces.Default(
+                        vis_mode=vis_mode,
+                    ),
+                )
+            )
+    camera = scene.add_camera(res=(128, 128), pos=(0.0, -0.65, 0.45), lookat=(0.0, 0.0, 0.1))
+    scene.build(n_envs=n_envs)
+    mixed_rgb, *_ = camera.render()
+    for entity in liquids:
+        entity.set_particles_concentration(0.5)
+    # Coincident equal-mass particles have the same interpolated concentration after homogenization.
+    scene.visualizer.update()
+    uniform_rgb, *_ = camera.render()
+    if vis_mode == "recon":
+        assert_allclose(mixed_rgb, uniform_rgb, atol=1.0)
+    for entity in liquids:
+        entity.set_particles_concentration(0.0)
+    scene.visualizer.update()
+    water_rgb, _, segmentation, _ = camera.render(segmentation=True)
+    for entity in liquids:
+        entity.set_particles_concentration(1.0)
+    scene.visualizer.update()
+    coffee_rgb, *_ = camera.render()
+    split_rgb = None
+    if vis_mode == "particle":
+        for entity in liquids:
+            entity.set_particles_concentration(entity.get_particles_pos()[..., 2] > 0.1)
+        scene.visualizer.update()
+        split_rgb, *_ = camera.render()
+    difference = np.abs(water_rgb / 255.0 - coffee_rgb / 255.0).max(axis=-1)
+    for material_type in material_types:
+        entity_indices = [entity.idx + 1 for entity in liquids if isinstance(entity.material, material_type)]
+        is_liquid = (difference > 0.02) & np.isin(segmentation, entity_indices)
+        assert is_liquid.sum() > 20
+        water_color = water_rgb[is_liquid].mean(axis=0)
+        coffee_color = coffee_rgb[is_liquid].mean(axis=0)
+        assert water_color.min() > coffee_color.max()
+        assert coffee_color[0] > coffee_color[1] > coffee_color[2]
+        if split_rgb is not None:
+            assert (is_liquid & (split_rgb == water_rgb).all(axis=-1)).sum() > 8
+            assert (is_liquid & (split_rgb == coffee_rgb).all(axis=-1)).sum() > 8
 
 
 @pytest.mark.slow  # ~200s

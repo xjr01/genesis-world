@@ -7,7 +7,7 @@ import sys
 import threading
 import time
 from contextlib import nullcontext
-from threading import Event, RLock, Semaphore, Thread
+from threading import Event, Lock, RLock, Semaphore, Thread
 from typing import TYPE_CHECKING, Optional
 
 import numpy as np
@@ -85,6 +85,8 @@ class Viewer(pyglet.window.Window):
     viewer_flags : dict
         A set of flags for controlling the viewer's behavior.
         Described in the note below.
+    world_up_axis : (3,) float
+        The scene axis that mouse orbiting treats as vertical.
     **kwargs : dict
         Any keyword arguments left over will be interpreted as belonging to
         either the :attr:`.Viewer.render_flags` or :attr:`.Viewer.viewer_flags`
@@ -183,6 +185,7 @@ class Viewer(pyglet.window.Window):
         shadow=False,
         plane_reflection=False,
         env_separate_rigid=False,
+        world_up_axis=None,
         plugins=None,
         enable_help_text=True,
         **kwargs,
@@ -206,6 +209,7 @@ class Viewer(pyglet.window.Window):
         self._thread: Optional[Thread] = None
         self._run_in_thread = run_in_thread
         self._seg_node_map = context.seg_node_map
+        self._world_up_axis = world_up_axis
 
         self._offscreen_event = Event()
         self._offscreen_pending_render = None
@@ -217,6 +221,7 @@ class Viewer(pyglet.window.Window):
         self._offscreen_result = None
 
         self._video_recorder = None
+        self._recording_lock = Lock()
         # Step counter of the last frame written to the video, so a paused (non-advancing) simulation does not fill
         # the recording with duplicate frozen frames.
         self._last_recorded_t = -1
@@ -613,6 +618,8 @@ class Viewer(pyglet.window.Window):
     def save_video(self, filename=None):
         """Save the stored frames to a video file.
 
+        The save dialog opens once at least one frame has been captured.
+
         To use this asynchronously, run the viewer with the ``record``
         flag and the ``run_in_thread`` flags set.
         Kill the viewer after your desired time with
@@ -625,36 +632,49 @@ class Viewer(pyglet.window.Window):
             a file dialog will be opened to ask the user where
             to save the video file.
         """
-        self._video_recorder.close()
+        with self._recording_lock:
+            self.viewer_flags["record"] = False
+            video_recorder = self._video_recorder
+            self._video_recorder = None
+            if video_recorder is None:
+                return
+            video_recorder.close()
+            recording_filename = video_recorder.filename
+        if not os.path.isfile(recording_filename):
+            gs.logger.warning("Recording captured zero frames, so no video file was generated.")
+            return
         if filename is None:
             filename = self._get_save_filename(["mp4"])
         if filename is None:
-            os.remove(self._video_recorder.filename)
+            os.remove(recording_filename)
         else:
-            shutil.move(self._video_recorder.filename, filename)
+            shutil.move(recording_filename, filename)
 
     def toggle_recording(self) -> bool:
         """Start or stop recording the on-screen viewer to a video file, returning the resulting record state.
 
         Starting opens a fresh video writer and marks the window title; stopping closes it and prompts (via
         save_video) for a destination. Both the 'R' keybind and the overlay record button drive this one path."""
-        if self.viewer_flags["record"]:
+        with self._recording_lock:
+            is_recording = self.viewer_flags["record"]
+            if not is_recording:
+                # Importing moviepy is very slow and rarely needed, so defer it to the first recording.
+                from moviepy.video.io.ffmpeg_writer import FFMPEG_VideoWriter
+
+                self._video_recorder = FFMPEG_VideoWriter(
+                    filename=os.path.join(gs.utils.misc.get_cache_dir(), "tmp_video.mp4"),
+                    fps=self.viewer_flags["refresh_rate"],
+                    size=self.viewport_size,
+                )
+                # Sentinel so the first frame is always captured regardless of the current step counter.
+                self._last_recorded_t = -1
+                self.viewer_flags["record"] = True
+        if is_recording:
             self.save_video()
             self.set_caption(self.viewer_flags["window_title"])
         else:
-            # Importing moviepy is very slow and rarely needed, so defer it to the first recording.
-            from moviepy.video.io.ffmpeg_writer import FFMPEG_VideoWriter
-
-            self._video_recorder = FFMPEG_VideoWriter(
-                filename=os.path.join(gs.utils.misc.get_cache_dir(), "tmp_video.mp4"),
-                fps=self.viewer_flags["refresh_rate"],
-                size=self.viewport_size,
-            )
-            # Sentinel so the first frame is always captured regardless of the current step counter.
-            self._last_recorded_t = -1
             self.set_caption("{} (RECORDING)".format(self.viewer_flags["window_title"]))
-        self.viewer_flags["record"] = not self.viewer_flags["record"]
-        return self.viewer_flags["record"]
+        return not is_recording
 
     def on_close(self):
         """Exit the event loop when the window is closed."""
@@ -859,8 +879,9 @@ class Viewer(pyglet.window.Window):
 
         # Capture the recording frame right after the scene render, before any on-screen overlay (captions, help
         # text, and the plugins' ImGui panel / gizmo) is drawn, so the video shows only the rendered scene.
-        if self.viewer_flags["record"]:
-            self._record()
+        with self._recording_lock:
+            if self.viewer_flags["record"]:
+                self._record()
 
         if self.viewer_flags["caption"] is not None:
             for caption in self.viewer_flags["caption"]:
@@ -1006,7 +1027,13 @@ class Viewer(pyglet.window.Window):
         self._camera_node.matrix = self._default_camera_pose
         oc = self._default_orth_cam
         oc.xmag, oc.ymag = self._orth_cam_reset_mags
-        self._trackball = Trackball(self._default_camera_pose, self.viewport_size, scale, centroid)
+        self._trackball = Trackball(
+            self._default_camera_pose,
+            self.viewport_size,
+            scale,
+            centroid,
+            world_up_axis=self._world_up_axis,
+        )
 
     def _get_save_filename(self, file_exts):
         global root

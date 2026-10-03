@@ -136,6 +136,7 @@ class Mesh(object):
         is_floor=False,
         env_shared=True,
         active_envs=None,
+        instance_colors=None,
     ):
         """Create a Mesh from a :class:`~trimesh.base.Trimesh`.
 
@@ -153,6 +154,8 @@ class Mesh(object):
             If `False`, the mesh will not be rendered.
         poses : (n,4,4) float
             Array of 4x4 transformation matrices for instancing this object.
+        instance_colors : (n,4) float, optional
+            Replace vertex colors with one RGBA color per pose, sharing the same mesh geometry across instances.
         wireframe : bool
             If `True`, the mesh will be rendered as a wireframe object
         smooth : bool
@@ -191,6 +194,8 @@ class Mesh(object):
 
             # Compute colors, texture coords, and material properties
             color_0, texcoord_0, primitive_material = Mesh._get_trimesh_props(m, smooth=smooth, material=material)
+            if instance_colors is not None:
+                color_0 = instance_colors
 
             # Override if material is given. Shallow-copy so per-primitive state (e.g. wireframe) stays isolated, while
             # the heavy Texture objects stay shared with the source material. Primitives reusing one material then
@@ -222,6 +227,7 @@ class Mesh(object):
                     is_floor=is_floor,
                     env_shared=env_shared,
                     active_envs=active_envs,
+                    is_color_instanced=instance_colors is not None,
                 )
             )
 

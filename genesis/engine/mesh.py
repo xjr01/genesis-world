@@ -2,20 +2,22 @@ import os
 from itertools import chain
 from typing import Any, NamedTuple
 
-import fast_simplification
 import numpy as np
+
+import fast_simplification
+import igl
 import trimesh
 from scipy.spatial import QhullError
 
 import genesis as gs
-import genesis.utils.gltf as gltf_utils
-import genesis.utils.mesh as mu
-import genesis.utils.particle as pu
-import genesis.utils.point_cloud as pc
 from genesis.options.surfaces import Surface
 from genesis.repr_base import RBC
 from genesis.typing import Matrix3x3Type, Vec3FType
+import genesis.utils.gltf as gltf_utils
+import genesis.utils.mesh as mu
 from genesis.utils.misc import redirect_libc_stderr
+import genesis.utils.particle as pu
+import genesis.utils.point_cloud as pc
 
 
 class InertialProperties(NamedTuple):
@@ -507,9 +509,13 @@ class Mesh(RBC):
         """
         Create genesis.Mesh objects from morph and surface options.
 
-        A list is always returned: a Mesh morph (morphs.Mesh) may contain multiple sub-meshes, while primitive
-        morphs yield a single mesh.
+        A list is always returned: a Mesh morph (morphs.Mesh) may contain multiple sub-meshes, while primitive and
+        explicit tetrahedral morphs yield a single mesh.
         """
+        if isinstance(morph, gs.options.morphs.TetrahedralMesh):
+            faces, *_ = igl.boundary_facets(np.array(morph.elements))
+            return [cls.from_attrs(np.array(morph.vertices), faces, surface=surface)]
+
         if isinstance(morph, gs.options.morphs.Mesh):
             if morph.is_format(gs.options.morphs.MESH_FORMATS):
                 if morph.is_format(gs.options.morphs.GLTF_FORMATS):

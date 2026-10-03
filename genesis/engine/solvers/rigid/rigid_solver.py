@@ -156,6 +156,7 @@ from .abd.accessor import (
     kernel_set_dofs_damping,
     kernel_set_dofs_frictionloss,
     kernel_set_dofs_limit,
+    kernel_set_fixed_links_velocity,
     kernel_set_dofs_velocity,
     kernel_set_dofs_velocity_grad,
     kernel_set_dofs_zero_velocity,
@@ -408,9 +409,14 @@ class RigidSolver(KinematicSolver):
         self.n_fixed_verts_ = max(1, self.n_fixed_verts)
         self.n_candidate_equalities_ = max(1, self.n_equalities + self._options.max_dynamic_constraints)
 
-        # Resolve precision-dependent tolerance default
+        # Resolve precision-dependent tolerance default. The convergence thresholds reference the scene's free-motion
+        # cost (see func_terminate_or_update_descent_batch), which stands an order of magnitude above the bare inertia
+        # for a metre-scale scene under standard gravity, so the ratio drops by as much to leave the thresholds where
+        # they stood. Reproducing the reference behaviour compares against the inertia and keeps its value.
         if self._options.tolerance is None:
             self._options.tolerance = 1e-5 if gs.qd_float == qd.f32 else 1e-8
+            if not self._enable_mujoco_compatibility:
+                self._options.tolerance *= 0.1
 
         super().build()
 
@@ -743,6 +749,17 @@ class RigidSolver(KinematicSolver):
                     n_geoms=self._n_geoms,
                 )
 
+        # Jacobi equilibration of the Newton system (see nt_jacobi in array_class.py): every factor, incremental
+        # update and solve of every arm rides the scaled coordinates; the reference behaviour keeps the raw factor.
+        # Enabled when the model's mass-diagonal spread bound (_jacobi_mass_spread_bound) exceeds what the working
+        # precision's Cholesky factor conditions accurately; the double-precision threshold carries the mantissa
+        # headroom over single, past any scene built from physical units.
+        mass_spread_threshold = 1e4 if gs.qd_float == qd.f32 else 5e12
+        rigid_config["enable_jacobi_equilibration"] = (
+            not self._enable_mujoco_compatibility
+            and rigid_config["solver_type"] == gs.constraint_solver.Newton
+            and self._jacobi_mass_spread_bound() > mass_spread_threshold
+        )
         self.rigid_config = array_class.RigidSimStaticConfig(**rigid_config)
 
         if self.rigid_config.requires_grad:
@@ -789,6 +806,92 @@ class RigidSolver(KinematicSolver):
 
     def _sanitize_geom_sol_params(self, sol_params):
         return _sanitize_sol_params(sol_params, self._sol_min_timeconst, self._sol_default_timeconst)
+
+    def _jacobi_mass_spread_bound(self):
+        """Upper-bound the spread of the mass matrix diagonal over every configuration, from the model alone.
+
+        Each DOF's diagonal entry is bracketed without kinematics. A translational entry is exactly its per-DOF
+        armature plus the subtree mass. A rotational entry is the link the joint carries plus its descendants: with a
+        single joint the link's axis, anchor and centre of mass (COM) are fixed in its frame, so its own term
+        armature + a^T I_anchor a is exact for a revolute axis and bracketed by the principal inertias about the
+        anchor for free/spherical DOFs whose axes turn with the configuration; descendants add at least nothing, at
+        most their largest principal inertia plus their mass carried at an anchor-to-COM distance no configuration
+        exceeds (frame offsets summed along the chain, each joint anchor counted twice since a joint rotation swings
+        the child origin around it, and each prismatic descendant's full travel span, infinite when unlimited). The
+        largest upper bracket over the smallest lower one thus bounds the true diagonal spread at every configuration:
+        equilibration may enable for scenes whose reachable configurations stay better conditioned, never the reverse.
+        """
+        links = [link for entity in self._entities for link in entity.links]
+        children = {}
+        for link in links:
+            children.setdefault(link.parent_idx, []).append(link)
+
+        lower, upper = [], []
+        for link in links:
+            if link.is_fixed:
+                continue
+            for joint in link.joints:
+                if joint.type == gs.JOINT_TYPE.FIXED:
+                    continue
+                anchor = joint.pos
+                # Anchor-to-COM distance bound per subtree link (see the docstring); the carrying link's own term is
+                # exact only when this joint is its sole joint, since later chained joints re-rotate the link about
+                # their own anchors.
+                is_sole_joint = len(link.joints) == 1
+                if is_sole_joint:
+                    dist_com = {link.idx: np.linalg.norm(link.inertial_pos - anchor)}
+                else:
+                    dist_com = {link.idx: np.linalg.norm(anchor) + np.linalg.norm(link.inertial_pos)}
+                dist_origin = {link.idx: np.linalg.norm(anchor)}
+                sub, stack = [], [link]
+                while stack:
+                    cur = stack.pop()
+                    sub.append(cur)
+                    for child in children.get(cur.idx, []):
+                        hop = np.linalg.norm(child.pos) + 2.0 * sum(np.linalg.norm(j.pos) for j in child.joints)
+                        # A prismatic descendant carries the subtree outward by up to its full travel span (which
+                        # covers the offset from any zero configuration within limits); an unlimited slide makes the
+                        # upper bracket infinite and the gate enables.
+                        hop += sum(np.ptp(j.dofs_limit) for j in child.joints if j.type == gs.JOINT_TYPE.PRISMATIC)
+                        dist_origin[child.idx] = dist_origin[cur.idx] + hop
+                        dist_com[child.idx] = dist_origin[child.idx] + np.linalg.norm(child.inertial_pos)
+                        stack.append(child)
+                sub_mass = sum(l.inertial_mass for l in sub)
+                eigvals = np.linalg.eigvalsh(link.inertial_i)
+                rot_desc_upper = sum(
+                    np.linalg.eigvalsh(l.inertial_i)[-1] + l.inertial_mass * dist_com[l.idx] ** 2
+                    for l in sub
+                    if l is not link
+                )
+                # Carrying link's inertia about the anchor: exact along a fixed axis, principal bracket otherwise.
+                if is_sole_joint:
+                    R_inertial = gu.quat_to_R(link.inertial_quat)
+                    inertia_com = R_inertial @ link.inertial_i @ R_inertial.T
+                    offset_com = link.inertial_pos - anchor
+                    rot_self_lower = eigvals[0]
+                    rot_self_upper = eigvals[-1] + link.inertial_mass * np.dot(offset_com, offset_com)
+                else:
+                    inertia_com = None
+                    offset_com = None
+                    rot_self_lower = eigvals[0]
+                    rot_self_upper = eigvals[-1] + link.inertial_mass * dist_com[link.idx] ** 2
+                for i_d, armature_d in enumerate(joint.dofs_armature):
+                    if joint.type == gs.JOINT_TYPE.PRISMATIC or (joint.type == gs.JOINT_TYPE.FREE and i_d < 3):
+                        lower.append(armature_d + sub_mass)
+                        upper.append(armature_d + sub_mass)
+                    elif joint.type == gs.JOINT_TYPE.REVOLUTE and is_sole_joint:
+                        axis = joint.dofs_motion_ang[i_d]
+                        lever = np.cross(axis, offset_com)
+                        rot_self = axis @ inertia_com @ axis + link.inertial_mass * np.dot(lever, lever)
+                        lower.append(armature_d + rot_self)
+                        upper.append(armature_d + rot_self + rot_desc_upper)
+                    else:
+                        lower.append(armature_d + max(rot_self_lower, 0.0))
+                        upper.append(armature_d + rot_self_upper + rot_desc_upper)
+        lower = [val for val in lower if val > 0.0]
+        if not lower or not upper:
+            return 0.0
+        return max(upper) / min(lower)
 
     def _init_invweight_and_meaninertia(self, envs_idx=None, *, force_update=True):
         # Early return if no DoFs. This is essential to avoid segfault on CUDA.
@@ -1124,11 +1227,15 @@ class RigidSolver(KinematicSolver):
             # A geom is hollow when its own center lies in a cavity rather than inside its material (bowl, mug,
             # nut), i.e. its own SDF is positive at its center. This is a static property of the collision
             # geometry, precomputed here so the narrowphase never has to probe it at runtime. SPHERE/PLANE/TERRAIN
-            # SDFs are analytic and never hollow.
+            # SDFs are analytic and convex geoms enclose their own center, so neither is ever hollow and probing
+            # them would only force their SDF grid to be built.
             geoms_is_hollow = []
             for geom, center in zip(geoms, geoms_center):
                 is_hollow = False
-                if geom.type not in (gs.GEOM_TYPE.SPHERE, gs.GEOM_TYPE.PLANE, gs.GEOM_TYPE.TERRAIN):
+                if (
+                    geom.type not in (gs.GEOM_TYPE.SPHERE, gs.GEOM_TYPE.PLANE, gs.GEOM_TYPE.TERRAIN)
+                    and not geom.is_convex
+                ):
                     grid_pos = geom.T_mesh_to_sdf[:3, :3] @ center + geom.T_mesh_to_sdf[:3, 3]
                     cell = np.minimum(np.maximum(np.floor(grid_pos).astype(gs.np_int), 0), geom.sdf_res - 2)
                     frac = grid_pos - cell
@@ -1159,6 +1266,7 @@ class RigidSolver(KinematicSolver):
                 np.array([geom.data for geom in geoms], dtype=gs.np_float),
                 np.array([geom.is_convex for geom in geoms], dtype=gs.np_bool),
                 np.array([geom.needs_coup for geom in geoms], dtype=gs.np_int),
+                np.array([geom.is_coup_reaction_enabled for geom in geoms], dtype=gs.np_bool),
                 np.array([geom.contype for geom in geoms], dtype=np.int32),
                 np.array([geom.conaffinity for geom in geoms], dtype=np.int32),
                 np.array([geom.coup_softness for geom in geoms], dtype=gs.np_float),
@@ -1309,12 +1417,27 @@ class RigidSolver(KinematicSolver):
                 f"Exceeding max number of post-pruning contact points ({max_contacts}) supported by the constraint "
                 "solver. Please increase the value of RigidSolver's option 'max_contacts'."
             )
+        if errno & array_class.ErrorCode.INVALID_CONTACT_NAN:
+            gs.raise_exception(
+                "Collision detection reported a contact whose position, normal or penetration is not finite. This is a "
+                "solver-internal error, please report it."
+            )
         if errno & array_class.ErrorCode.INVALID_FORCE_NAN:
             gs.raise_exception("Invalid constraint forces causing 'nan'. Please decrease Rigid simulation timestep.")
         if errno & array_class.ErrorCode.INVALID_ACC_NAN:
             gs.raise_exception("Invalid accelerations causing 'nan'. Please decrease Rigid simulation timestep.")
         if errno & array_class.ErrorCode.OVERFLOW_HIBERNATION_ISLANDS:
             gs.raise_exception("Contact island buffer overflow. Please increase RigidOptions 'max_collision_pairs'.")
+        if errno & array_class.ErrorCode.INVALID_FEM_RIGID_SURFACE_INTERSECTION:
+            gs.raise_exception(
+                "One-way implicit FEM surface projection did not resolve every rigid surface intersection. Please "
+                "decrease the simulation timestep."
+            )
+        if errno & array_class.ErrorCode.INVALID_PBD_RIGID_SURFACE_INTERSECTION:
+            gs.raise_exception(
+                "One-way PBD surface collision has unresolved rigid intersections. Please decrease the simulation "
+                "timestep or release particles pinned inside a collider."
+            )
 
     def _kernel_detect_collision(self):
         self.collider.clear()
@@ -1978,6 +2101,46 @@ class RigidSolver(KinematicSolver):
 
     def set_links_pos(self, pos, links_idx=None, envs_idx=None):
         raise DeprecationError("This method has been removed. Please use 'set_base_links_pos' instead.")
+
+    @mutates(StateChange.DYNAMICS, links="links_idx")
+    def set_fixed_links_velocity(self, vel, ang, links_idx=None, envs_idx=None):
+        """Set the world-frame velocity of fixed base links at their origins.
+
+        The prescribed linear and angular velocities drive velocity boundary conditions while each link's pose
+        remains controlled explicitly through the base-pose setters.
+        """
+        if links_idx is None:
+            links_idx = self._base_links_idx
+        if isinstance(links_idx, int) and not self.links[links_idx].is_fixed:
+            gs.raise_exception("Prescribed base velocity is only supported for fixed links.")
+
+        ang, _, _ = self._sanitize_io_variables(
+            ang, links_idx, self.n_links, "links_idx", envs_idx, (3,), skip_allocation=True
+        )
+        vel, links_idx, envs_idx = self._sanitize_io_variables(
+            vel, links_idx, self.n_links, "links_idx", envs_idx, (3,), skip_allocation=True
+        )
+        if self.n_envs == 0:
+            vel = vel[None]
+            ang = ang[None]
+
+        if gs.use_zerocopy:
+            mask = indices_to_mask(envs_idx, links_idx)
+            kinematic_vel = qd_to_torch(self.dyn_state.links.kinematic_vel, transpose=True, copy=False)
+            assign_indexed_tensor(kinematic_vel, mask, vel)
+            kinematic_ang = qd_to_torch(self.dyn_state.links.kinematic_ang, transpose=True, copy=False)
+            assign_indexed_tensor(kinematic_ang, mask, ang)
+            if gs.backend == gs.metal:
+                torch.mps.synchronize()
+        else:
+            kernel_set_fixed_links_velocity(links_idx, envs_idx, vel, ang, self.dyn_state, self.rigid_config)
+
+        if envs_idx.dtype == torch.bool:
+            fn = kernel_masked_forward_velocity
+        else:
+            fn = kernel_forward_velocity
+        fn(envs_idx, self.dyn_state, self.dyn_info, self.rigid_info, self.rigid_config, is_backward=False)
+        self._is_forward_vel_updated = True
 
     @mutates(StateChange.GEOMETRY, links="links_idx")
     def set_base_links_pos(self, pos, links_idx=None, envs_idx=None, *, relative=False, skip_forward=False):

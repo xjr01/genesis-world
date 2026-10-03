@@ -9,6 +9,29 @@ from genesis.repr_base import RBC
 STACK_SIZE = 64
 
 
+@qd.func
+def point_aabb_distance_sqr(point: qd.types.vector(3), lower: qd.types.vector(3), upper: qd.types.vector(3)):
+    """Return the squared distance from a point to an axis-aligned bounding box (AABB)."""
+    delta = qd.Vector.zero(gs.qd_float, 3)
+    for axis in qd.static(range(3)):
+        if point[axis] < lower[axis]:
+            delta[axis] = lower[axis] - point[axis]
+        elif point[axis] > upper[axis]:
+            delta[axis] = point[axis] - upper[axis]
+    return delta.norm_sqr()
+
+
+@qd.kernel
+def kernel_remap_leaf_faces(faces_idx: qd.types.ndarray(ndim=1), bvh_morton_codes: qd.template()):
+    """Rewrite compacted bounding volume hierarchy (BVH) leaf payloads from subset slots to global face indices.
+
+    The u32 payload uses a one-time kernel because its field type lies outside DLPack export support.
+    """
+    for batch_idx, leaf_idx in qd.ndrange(bvh_morton_codes.shape[0], bvh_morton_codes.shape[1]):
+        face_slot = qd.cast(bvh_morton_codes[batch_idx, leaf_idx][1], gs.qd_int)
+        bvh_morton_codes[batch_idx, leaf_idx][1] = qd.cast(faces_idx[face_slot], qd.u32)
+
+
 @qd.data_oriented
 class AABB(RBC):
     """

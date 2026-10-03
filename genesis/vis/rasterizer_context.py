@@ -1,14 +1,15 @@
 import numpy as np
 import torch
+
 import trimesh
 
 import genesis as gs
-import genesis.utils.geom as gu
-import genesis.utils.mesh as mu
-import genesis.utils.particle as pu
 from genesis.ext import pyrender
 from genesis.ext.pyrender.jit_render import JITRenderer
-from genesis.utils.misc import tensor_to_array, qd_to_numpy
+import genesis.utils.geom as gu
+import genesis.utils.mesh as mu
+from genesis.utils.misc import qd_to_numpy, tensor_to_array
+import genesis.utils.particle as pu
 
 
 class SegmentationColorMap:
@@ -163,6 +164,8 @@ class RasterizerContext:
         self.on_rigid()
         self.on_mpm()
         self.on_sph()
+        self.on_pbstf()
+        self.on_multifluid()
         self.on_pbd()
         self.on_dem()
         self.on_flip()
@@ -766,10 +769,174 @@ class RasterizerContext:
                         node = self.static_nodes[(idx, sph_entity.uid)]
                         self.jit.update_buffer(node, "model", tfs.transpose((0, 2, 1)))
 
+    def on_multifluid(self):
+        for solver in (self.sim.pbstf_solver, self.sim.ipbf_solver, self.sim.pbd_solver):
+            if not solver.is_active:
+                continue
+            liquids = [
+                entity
+                for entity in solver.entities
+                if isinstance(
+                    entity.material, (gs.materials.PBD.Liquid, gs.materials.PBSTF.Liquid, gs.materials.IPBF.Liquid)
+                )
+            ]
+            if not liquids:
+                continue
+            concentrations = qd_to_numpy(solver.particles.c, self.rendered_envs_idx, transpose=True)
+            for entity in liquids:
+                if entity.surface.vis_mode == "recon":
+                    self.add_dynamic_node(entity, None)
+                elif entity.surface.vis_mode == "particle":
+                    for env_slot, idx in enumerate(self.rendered_envs_idx):
+                        if self.render_particle_as == "points":
+                            colors = pu.concentration_colors(
+                                concentrations[env_slot, entity.particle_start : entity.particle_end]
+                            )
+                            mesh = pyrender.Mesh.from_points(entity.init_particles, colors=colors)
+                        elif solver is self.sim.pbd_solver and self.render_particle_as != "sphere":
+                            continue
+                        else:
+                            sphere = mu.create_sphere(solver.particle_radius * self.particle_size_scale, subdivisions=1)
+                            sphere.visual = mu.surface_uvs_to_trimesh_visual(
+                                entity.surface, n_verts=len(sphere.vertices)
+                            )
+                            poses = np.tile(np.eye(4), (entity.n_particles, 1, 1))
+                            poses[:, :3, 3] = entity.init_particles
+                            colors = None
+                            if entity.material.c_init is not None or entity.material.c_init_z_mid is not None:
+                                colors = pu.concentration_colors(
+                                    concentrations[env_slot, entity.particle_start : entity.particle_end]
+                                )
+                            mesh = pyrender.Mesh.from_trimesh(sphere, smooth=True, poses=poses, instance_colors=colors)
+                        self.add_static_node(entity, mesh, i_b=idx)
+
+    def update_multifluid(self):
+        for solver in (self.sim.pbstf_solver, self.sim.ipbf_solver, self.sim.pbd_solver):
+            if not solver.is_active:
+                continue
+            liquids = [
+                entity
+                for entity in solver.entities
+                if isinstance(
+                    entity.material, (gs.materials.PBD.Liquid, gs.materials.PBSTF.Liquid, gs.materials.IPBF.Liquid)
+                )
+            ]
+            if not liquids:
+                continue
+            particles_pos = qd_to_numpy(solver.particles_render.pos, self.rendered_envs_idx, transpose=True)
+            particles_pos = particles_pos + self.scene.envs_offset[self.rendered_envs_idx, None]
+            is_active = qd_to_numpy(solver.particles_render.active, self.rendered_envs_idx, transpose=True)
+            concentrations = qd_to_numpy(solver.particles_render.c, self.rendered_envs_idx, transpose=True)
+            recon_entities = [entity for entity in liquids if entity.surface.vis_mode == "recon"]
+            for env_slot, idx in enumerate(self.rendered_envs_idx):
+                if recon_entities:
+                    spans = [slice(entity.particle_start, entity.particle_end) for entity in recon_entities]
+                    positions = np.concatenate(
+                        [particles_pos[env_slot, span][is_active[env_slot, span]] for span in spans]
+                    )
+                    values = np.concatenate(
+                        [concentrations[env_slot, span][is_active[env_slot, span]] for span in spans]
+                    )
+                    if any(
+                        isinstance(entity.material, gs.materials.IPBF.Liquid)
+                        or entity.material.c_init is not None
+                        or entity.material.c_init_z_mid is not None
+                        for entity in recon_entities
+                    ):
+                        recon = pu.particles_to_mesh_with_concentration(
+                            positions, solver.particle_radius, recon_entities[0].surface.recon_backend, values
+                        )
+                        mesh = recon.mesh
+                        mesh.visual = trimesh.visual.ColorVisuals(
+                            vertex_colors=pu.concentration_colors(recon.concentrations)
+                        )
+                    else:
+                        mesh = pu.particles_to_mesh(
+                            positions, solver.particle_radius, recon_entities[0].surface.recon_backend
+                        )
+                        mesh.visual = mu.surface_uvs_to_trimesh_visual(
+                            recon_entities[0].surface, n_verts=len(mesh.vertices)
+                        )
+                    self.add_dynamic_node(recon_entities[0], pyrender.Mesh.from_trimesh(mesh, smooth=True))
+                for entity in liquids:
+                    if entity.surface.vis_mode != "particle":
+                        continue
+                    span = slice(entity.particle_start, entity.particle_end)
+                    node = self.static_nodes[(idx, entity.uid)]
+                    if self.render_particle_as == "points":
+                        self.jit.update_buffer(node, "pos", particles_pos[env_slot, span].astype(np.float32))
+                        self.jit.update_buffer(node, "vertex", pu.concentration_colors(concentrations[env_slot, span]))
+                    elif solver is not self.sim.pbd_solver or self.render_particle_as == "sphere":
+                        poses = np.tile(np.eye(4), (entity.n_particles, 1, 1))
+                        poses[:, :3, 3] = particles_pos[env_slot, span]
+                        self.jit.update_buffer(node, "model", poses.transpose((0, 2, 1)))
+                        if node.mesh.primitives[0].is_color_instanced:
+                            self.jit.update_buffer(
+                                node, "instance_color", pu.concentration_colors(concentrations[env_slot, span])
+                            )
+
+    def on_pbstf(self):
+        for solver in (self.sim.ipbstf_solver,):
+            if not solver.is_active:
+                continue
+            for entity in solver.entities:
+                if entity.surface.vis_mode == "recon":
+                    self.add_dynamic_node(entity, None)
+                elif entity.surface.vis_mode == "particle":
+                    for idx in self.rendered_envs_idx:
+                        mesh = mu.create_sphere(solver.particle_radius * self.particle_size_scale, subdivisions=1)
+                        mesh.visual = mu.surface_uvs_to_trimesh_visual(entity.surface, n_verts=len(mesh.vertices))
+                        tfs = np.tile(np.eye(4), (entity.n_particles, 1, 1))
+                        tfs[:, :3, 3] = entity.init_particles
+                        self.add_static_node(entity, pyrender.Mesh.from_trimesh(mesh, smooth=True, poses=tfs), i_b=idx)
+
+    def update_pbstf(self):
+        for solver in (self.sim.ipbstf_solver,):
+            if not solver.is_active:
+                continue
+            particles_all = qd_to_numpy(solver.particles_render.pos, transpose=True)
+            particles_all = particles_all + self.scene.envs_offset[:, None, :]
+            active_all = qd_to_numpy(solver.particles_render.active, transpose=True)
+            for entity in solver.entities:
+                for idx in self.rendered_envs_idx:
+                    if entity.surface.vis_mode == "recon":
+                        mesh = pu.particles_to_mesh(
+                            positions=particles_all[idx, entity.particle_start : entity.particle_end][
+                                active_all[idx, entity.particle_start : entity.particle_end]
+                            ],
+                            radius=solver.particle_radius,
+                            backend=entity.surface.recon_backend,
+                        )
+                        mesh.visual = mu.surface_uvs_to_trimesh_visual(entity.surface, n_verts=len(mesh.vertices))
+                        self.add_dynamic_node(entity, pyrender.Mesh.from_trimesh(mesh, smooth=True))
+                    elif entity.surface.vis_mode == "particle":
+                        tfs = np.tile(np.eye(4), (entity.n_particles, 1, 1))
+                        tfs[:, :3, 3] = particles_all[idx, entity.particle_start : entity.particle_end]
+                        node = self.static_nodes[(idx, entity.uid)]
+                        self.jit.update_buffer(node, "model", tfs.transpose((0, 2, 1)))
+
     def on_pbd(self):
         if self.sim.pbd_solver.is_active:
+            vertices_render = None
+            if any(entity.surface.vis_mode == "tetrahedral" for entity in self.sim.pbd_solver.entities):
+                vertices_render = (
+                    qd_to_numpy(
+                        self.sim.pbd_solver.get_tetrahedral_state_render(self.sim.cur_substep_local),
+                        self.rendered_envs_idx,
+                        transpose=True,
+                    )
+                    + self.scene.envs_offset[self.rendered_envs_idx, None, :]
+                )
             for pbd_entity in self.sim.pbd_solver.entities:
-                if pbd_entity.surface.vis_mode == "visual":
+                if isinstance(pbd_entity.material, gs.materials.PBD.Liquid) and (
+                    pbd_entity.surface.vis_mode == "recon" or self.render_particle_as in ("points", "sphere")
+                ):
+                    continue
+                if pbd_entity.surface.vis_mode == "tetrahedral":
+                    vertices = vertices_render[:, pbd_entity.particle_start : pbd_entity.particle_end]
+                    self.add_tetrahedral_entity(pbd_entity, vertices)
+                    continue
+                if pbd_entity.surface.vis_mode in ("visual", "collision"):
                     # Apply surface visual with UVs to the trimesh
                     pbd_entity.vmesh.trimesh.visual = mu.surface_uvs_to_trimesh_visual(
                         pbd_entity.surface, uvs=pbd_entity.vmesh.uvs, n_verts=len(pbd_entity.vmesh.trimesh.vertices)
@@ -799,7 +966,7 @@ class RasterizerContext:
                             )
                             pbd_entity._tets_mesh = mesh
                             self.add_static_node(pbd_entity, pyrender.Mesh.from_trimesh(mesh, smooth=False), i_b=idx)
-                    elif pbd_entity.surface.vis_mode == "visual":
+                    elif pbd_entity.surface.vis_mode in ("visual", "collision"):
                         self.add_static_node(
                             pbd_entity,
                             pyrender.Mesh.from_trimesh(
@@ -828,16 +995,30 @@ class RasterizerContext:
 
     def update_pbd(self):
         if self.sim.pbd_solver.is_active:
-            particles_all = qd_to_numpy(self.sim.pbd_solver.particles_render.pos) + self.scene.envs_offset
-            particles_vel_all = qd_to_numpy(self.sim.pbd_solver.particles_render.vel)
-            active_all = qd_to_numpy(self.sim.pbd_solver.particles_render.active).astype(dtype=np.bool_, copy=False)
-            vverts_all = qd_to_numpy(self.sim.pbd_solver.vverts_render.pos) + self.scene.envs_offset
+            particles_pos = (
+                qd_to_numpy(self.sim.pbd_solver.particles_render.pos, self.rendered_envs_idx, transpose=True)
+                + self.scene.envs_offset[self.rendered_envs_idx, None]
+            )
+            particles_vel = qd_to_numpy(
+                self.sim.pbd_solver.particles_render.vel, self.rendered_envs_idx, transpose=True
+            )
+            is_active = (
+                qd_to_numpy(self.sim.pbd_solver.particles_render.active, self.rendered_envs_idx, transpose=True) != 0
+            )
+            vverts_pos = (
+                qd_to_numpy(self.sim.pbd_solver.vverts_render.pos, self.rendered_envs_idx, transpose=True)
+                + self.scene.envs_offset[self.rendered_envs_idx, None]
+            )
             for pbd_entity in self.sim.pbd_solver.entities:
-                for idx in self.rendered_envs_idx:
-                    particles_env = particles_all[:, idx]
-                    particles_vel_env = particles_vel_all[:, idx]
-                    active_env = active_all[:, idx]
-                    vverts_env = vverts_all[:, idx]
+                if isinstance(pbd_entity.material, gs.materials.PBD.Liquid) and (
+                    pbd_entity.surface.vis_mode == "recon" or self.render_particle_as in ("points", "sphere")
+                ):
+                    continue
+                for env_slot, idx in enumerate(self.rendered_envs_idx):
+                    particles_env = particles_pos[env_slot]
+                    particles_vel_env = particles_vel[env_slot]
+                    active_env = is_active[env_slot]
+                    vverts_env = vverts_pos[env_slot]
 
                     if pbd_entity.surface.vis_mode == "recon":
                         positions = particles_env[pbd_entity.particle_start : pbd_entity.particle_end][
@@ -845,7 +1026,7 @@ class RasterizerContext:
                         ]
                         mesh = pu.particles_to_mesh(
                             positions=positions,
-                            radius=self.sim.mpm_solver.particle_radius,
+                            radius=self.sim.pbd_solver.particle_radius,
                             backend=pbd_entity.surface.recon_backend,
                         )
                         mesh.visual = mu.surface_uvs_to_trimesh_visual(pbd_entity.surface, n_verts=len(mesh.vertices))
@@ -872,7 +1053,12 @@ class RasterizerContext:
                             normal_data = self.jit.update_normal(node, update_data)
                             if normal_data is not None:
                                 self.jit.update_buffer(node, "normal", normal_data)
-                    elif pbd_entity.surface.vis_mode == "visual":
+                    elif pbd_entity.surface.vis_mode == "tetrahedral":
+                        vertices = particles_env[pbd_entity.particle_start : pbd_entity.particle_end]
+                        node = self.static_nodes[(idx, pbd_entity.uid)]
+                        update_data = self._scene.reorder_vertices(node, vertices.astype(np.float32))
+                        self.jit.update_buffer(node, "pos", update_data)
+                    elif pbd_entity.surface.vis_mode in ("visual", "collision"):
                         vverts = vverts_env[pbd_entity.vvert_start : pbd_entity.vvert_end]
                         node = self.static_nodes[(idx, pbd_entity.uid)]
                         update_data = self._scene.reorder_vertices(node, vverts.astype(np.float32))
@@ -973,46 +1159,100 @@ class RasterizerContext:
 
     def on_fem(self):
         if self.sim.fem_solver.is_active:
-            vverts_pos, _, _ = self.sim.fem_solver.get_state_render(self.sim.cur_substep_local)
-            vverts_all = qd_to_numpy(vverts_pos, self.rendered_envs_idx, transpose=True)
+            has_visual = any(entity.surface.vis_mode == "visual" for entity in self.sim.fem_solver.entities)
+            has_tetrahedral = any(entity.surface.vis_mode == "tetrahedral" for entity in self.sim.fem_solver.entities)
+            vverts_render = None
+            vertices_render = None
+            if has_visual:
+                vverts_pos, _, _ = self.sim.fem_solver.get_state_render(self.sim.cur_substep_local)
+                vverts_render = qd_to_numpy(vverts_pos, self.rendered_envs_idx, transpose=True)
+            if has_tetrahedral:
+                vertices_pos = self.sim.fem_solver.get_tetrahedral_state_render(self.sim.cur_substep_local)
+                vertices_render = qd_to_numpy(vertices_pos, self.rendered_envs_idx, transpose=True)
 
             for fem_entity in self.sim.fem_solver.entities:
-                if fem_entity.surface.vis_mode != "visual":
-                    continue
+                if fem_entity.surface.vis_mode == "visual":
+                    for i_g, vgeom in enumerate(fem_entity.vgeoms):
+                        visual = mu.surface_uvs_to_trimesh_visual(vgeom.surface, uvs=vgeom.uvs, n_verts=vgeom.n_vverts)
+                        seg_key = (fem_entity.idx, i_g) if self.segmentation_level == "geom" else fem_entity.idx
+                        vverts = vverts_render[:, vgeom.vvert_start : vgeom.vvert_end]
+                        for env_i, i_b in enumerate(self.rendered_envs_idx):
+                            mesh = trimesh.Trimesh(vverts[env_i], vgeom.vmesh.faces, process=False)
+                            mesh.visual = visual
+                            node = pyrender.Mesh.from_trimesh(
+                                mesh, smooth=vgeom.surface.smooth, double_sided=vgeom.surface.double_sided
+                            )
+                            static_node = self.add_node(node)
+                            self.static_nodes[(i_b, vgeom.uid)] = static_node
+                            self.create_node_seg(seg_key, static_node)
+                elif fem_entity.surface.vis_mode == "tetrahedral":
+                    vertices = vertices_render[:, fem_entity.v_start : fem_entity.v_start + fem_entity.n_vertices]
+                    self.add_tetrahedral_entity(fem_entity, vertices)
 
-                for i_g, vgeom in enumerate(fem_entity.vgeoms):
-                    visual = mu.surface_uvs_to_trimesh_visual(vgeom.surface, uvs=vgeom.uvs, n_verts=vgeom.n_vverts)
-                    seg_key = (fem_entity.idx, i_g) if self.segmentation_level == "geom" else fem_entity.idx
-                    vverts = vverts_all[:, vgeom.vvert_start : vgeom.vvert_end]
-                    for env_i, i_b in enumerate(self.rendered_envs_idx):
-                        mesh = trimesh.Trimesh(vverts[env_i], vgeom.vmesh.faces, process=False)
-                        mesh.visual = visual
-                        node = pyrender.Mesh.from_trimesh(
-                            mesh, smooth=vgeom.surface.smooth, double_sided=vgeom.surface.double_sided
-                        )
-                        static_node = self.add_node(node)
-                        self.static_nodes[(i_b, vgeom.uid)] = static_node
-                        self.create_node_seg(seg_key, static_node)
+    def add_tetrahedral_entity(self, entity, vertices):
+        """Render tetrahedron edges with the entity's surface and environment segmentation."""
+        element_edges = np.concatenate(
+            (
+                entity.elems[:, (0, 1)],
+                entity.elems[:, (0, 2)],
+                entity.elems[:, (0, 3)],
+                entity.elems[:, (1, 2)],
+                entity.elems[:, (1, 3)],
+                entity.elems[:, (2, 3)],
+            ),
+            axis=0,
+        )
+        edges = np.unique(np.sort(element_edges, axis=1), axis=0)
+        surface_texture = entity.surface.get_rgba()
+        if isinstance(surface_texture, gs.textures.ColorTexture):
+            color = surface_texture.color
+        else:
+            color = surface_texture.mean_color
+        seg_key = (entity.idx, 0) if self.segmentation_level == "geom" else entity.idx
+        for env_i, i_b in enumerate(self.rendered_envs_idx):
+            primitive = pyrender.Primitive(
+                positions=vertices[env_i],
+                color_0=color,
+                indices=edges,
+                mode=pyrender.GLTF.LINES,
+            )
+            node = pyrender.Mesh(primitives=[primitive], name=f"tetrahedral_{entity.uid}")
+            static_node = self.add_node(node)
+            self.static_nodes[(i_b, entity.uid)] = static_node
+            self.create_node_seg(seg_key, static_node)
 
     def update_fem(self):
         if self.sim.fem_solver.is_active:
-            vverts_pos, _, _ = self.sim.fem_solver.get_state_render(self.sim.cur_substep_local)
-            vverts_all = qd_to_numpy(vverts_pos, self.rendered_envs_idx, transpose=True)
+            has_visual = any(entity.surface.vis_mode == "visual" for entity in self.sim.fem_solver.entities)
+            has_tetrahedral = any(entity.surface.vis_mode == "tetrahedral" for entity in self.sim.fem_solver.entities)
+            vverts_render = None
+            vertices_render = None
+            if has_visual:
+                vverts_pos, _, _ = self.sim.fem_solver.get_state_render(self.sim.cur_substep_local)
+                vverts_render = qd_to_numpy(vverts_pos, self.rendered_envs_idx, transpose=True)
+            if has_tetrahedral:
+                vertices_pos = self.sim.fem_solver.get_tetrahedral_state_render(self.sim.cur_substep_local)
+                vertices_render = qd_to_numpy(vertices_pos, self.rendered_envs_idx, transpose=True)
 
             for fem_entity in self.sim.fem_solver.entities:
-                if fem_entity.surface.vis_mode != "visual":
-                    continue
-
-                for vgeom in fem_entity.vgeoms:
-                    vverts = vverts_all[:, vgeom.vvert_start : vgeom.vvert_end]
+                if fem_entity.surface.vis_mode == "visual":
+                    for vgeom in fem_entity.vgeoms:
+                        vverts = vverts_render[:, vgeom.vvert_start : vgeom.vvert_end]
+                        for env_i, i_b in enumerate(self.rendered_envs_idx):
+                            node = self.static_nodes[(i_b, vgeom.uid)]
+                            render_verts = vverts[env_i].astype(np.float32, copy=False)
+                            update_data = self._scene.reorder_vertices(node, render_verts)
+                            self.jit.update_buffer(node, "pos", update_data)
+                            normal_data = self.jit.update_normal(node, update_data)
+                            if normal_data is not None:
+                                self.jit.update_buffer(node, "normal", normal_data)
+                elif fem_entity.surface.vis_mode == "tetrahedral":
+                    vertices = vertices_render[:, fem_entity.v_start : fem_entity.v_start + fem_entity.n_vertices]
                     for env_i, i_b in enumerate(self.rendered_envs_idx):
-                        node = self.static_nodes[(i_b, vgeom.uid)]
-                        render_verts = vverts[env_i].astype(np.float32, copy=False)
+                        node = self.static_nodes[(i_b, fem_entity.uid)]
+                        render_verts = vertices[env_i].astype(np.float32, copy=False)
                         update_data = self._scene.reorder_vertices(node, render_verts)
                         self.jit.update_buffer(node, "pos", update_data)
-                        normal_data = self.jit.update_normal(node, update_data)
-                        if normal_data is not None:
-                            self.jit.update_buffer(node, "normal", normal_data)
 
     def update_sensors(self):
         self.sim._sensor_manager.draw_debug(self)
@@ -1232,8 +1472,8 @@ class RasterizerContext:
         # Update current time right away
         self._t = self.scene._t
 
-        # Remove up old dynamic nodes
-        self.clear_dynamic_nodes(only_outdated=True)
+        # A forced render rebuilds the surface at the same simulation time.
+        self.clear_dynamic_nodes(only_outdated=False)
 
         # Force updating rendering-only quantities that are not updated automatically during simulation
         self.visualizer.update_visual_states(force_render)
@@ -1247,6 +1487,8 @@ class RasterizerContext:
         self.update_contact()
         self.update_mpm()
         self.update_sph()
+        self.update_pbstf()
+        self.update_multifluid()
         self.update_pbd()
         self.update_dem()
         self.update_flip()

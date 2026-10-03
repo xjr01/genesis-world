@@ -1,9 +1,159 @@
+from pathlib import Path
+
 import numpy as np
 import pytest
 
-import genesis as gs
+import igl
+import trimesh
 
-from ..utils import assert_allclose, get_hf_dataset
+from examples import pbstf_coffee_water
+
+import genesis as gs
+from genesis.utils import geom
+from genesis.utils.misc import tensor_to_array
+
+from ..utils import assert_allclose, assert_equal, get_hf_dataset
+
+
+@pytest.mark.required
+@pytest.mark.slow("gpu")
+@pytest.mark.parametrize("backend", [gs.cuda])
+def test_dual_arm_manipulation(show_viewer):
+    demo = pbstf_coffee_water.build_scene(is_viewer_shown=show_viewer, is_motion_only=True)
+    lower, upper = map(tensor_to_array, demo.robot.get_dofs_limit())
+    rim = demo.cup_cavity.bounds[1, 1]
+    phases = set()
+    stir_positions = []
+    max_error = 0.0
+    previous_openings = np.array((0.044, 0.0007))
+    previous_opening_velocity = np.zeros(2)
+    observation = pbstf_coffee_water.observe_scene(demo)
+    previous_positions = np.stack([hand.pos for hand in observation.hands])
+    previous_quaternions = np.stack([hand.quat for hand in observation.hands])
+    previous_velocity = np.zeros((2, 3))
+    previous_angular_velocity = np.zeros((2, 3))
+    has_parallel_start = False
+    reach_start = np.array(pbstf_coffee_water.WATER_CUP_POS) + (0.0, pbstf_coffee_water.CUP_GRIP_HEIGHT, 0.0)
+    reach_direction = np.array(pbstf_coffee_water.SPONGE_START) - reach_start
+    reach_direction[1] = 0.0
+    reach_direction /= np.linalg.norm(reach_direction)
+    cup_vertices = tensor_to_array(demo.water_cup.get_verts()) - pbstf_coffee_water.WATER_CUP_POS
+    # The contact-driven sequence needs the full pouring, recovery and wiping horizons in one scene.
+    for step in range(round(pbstf_coffee_water.MOTION_END / pbstf_coffee_water.CONTROL_DT)):
+        time = (step + 1) * pbstf_coffee_water.CONTROL_DT
+        target, error = pbstf_coffee_water.update_motion(demo, time, observation)
+        positions = np.stack((target.right.pos, target.left.pos))
+        quaternions = np.stack((target.right.quat, target.left.quat))
+        velocity = (positions - previous_positions) / pbstf_coffee_water.CONTROL_DT
+        acceleration = (velocity - previous_velocity) / pbstf_coffee_water.CONTROL_DT
+        rotation = geom.transform_quat_by_quat(geom.inv_quat(previous_quaternions), quaternions)
+        angular_velocity = geom.quat_to_rotvec(rotation) / pbstf_coffee_water.CONTROL_DT
+        angular_acceleration = (angular_velocity - previous_angular_velocity) / pbstf_coffee_water.CONTROL_DT
+        assert np.linalg.norm(velocity, axis=-1).max() < 0.8
+        assert np.linalg.norm(acceleration, axis=-1).max() < 20.0
+        assert np.linalg.norm(angular_velocity, axis=-1).max() < 6.0
+        assert np.linalg.norm(angular_acceleration, axis=-1).max() < 50.0
+        previous_positions = positions
+        previous_quaternions = quaternions
+        previous_velocity = velocity
+        previous_angular_velocity = angular_velocity
+        openings = np.array((target.right_opening, target.left_opening))
+        opening_velocity = (openings - previous_openings) / pbstf_coffee_water.CONTROL_DT
+        opening_acceleration = (opening_velocity - previous_opening_velocity) / pbstf_coffee_water.CONTROL_DT
+        assert np.abs(opening_velocity).max() < 0.1
+        assert np.abs(opening_acceleration).max() < 2.0
+        previous_openings = openings
+        previous_opening_velocity = opening_velocity
+        pbstf_coffee_water.step_scene(demo)
+        observation = pbstf_coffee_water.observe_scene(demo)
+        cup_min_y = (cup_vertices @ geom.quat_to_R(observation.cup.quat)[1]).min() + observation.cup.pos[1]
+        assert cup_min_y > pbstf_coffee_water.TABLE_Y - 0.002
+        pbstf_coffee_water.check_contacts(demo, time)
+        demo.scene.rigid_solver.check_errno()
+        qpos = tensor_to_array(demo.qpos)
+        assert ((lower <= qpos) & (qpos <= upper)).all()
+        max_error = max(error, max_error)
+        if target.right_phase not in phases or target.left_phase not in phases:
+            gs.logger.info(f"{time:.3f}s: right={target.right_phase.name}, left={target.left_phase.name}")
+        phases.update((target.right_phase, target.left_phase))
+        measurement = pbstf_coffee_water.measure_motion(time, target, observation)
+        assert measurement.hands_position_error[1] < 0.005
+        if target.right_phase not in (pbstf_coffee_water.Phase.REACH_SPONGE, pbstf_coffee_water.Phase.CATCH):
+            assert measurement.hands_position_error[0] < 0.005
+        if target.right_phase == pbstf_coffee_water.Phase.REACH_SPONGE:
+            displacement = target.right.pos - reach_start
+            assert np.linalg.norm(np.cross(displacement, reach_direction)) < 1e-6
+            assert displacement @ reach_direction >= 0.0
+            assert np.linalg.norm(np.cross(observation.hands[0].pos - reach_start, reach_direction)) < 0.005
+            assert_allclose(target.right.quat, pbstf_coffee_water.POUR_QUAT, atol=1e-6)
+            assert_allclose(target.right_opening, 0.044, atol=1e-6)
+        if time <= 6.0:
+            assert measurement.cup_position_error < 0.002
+            assert measurement.cup_rotation_error < 2.0
+        if 1.0 <= time < 6.0:
+            assert observation.is_cup_grasped
+        if target.right_phase in (pbstf_coffee_water.Phase.UPRIGHT, pbstf_coffee_water.Phase.PLACE_CUP):
+            assert observation.is_cup_grasped
+        if time == pbstf_coffee_water.PARALLEL_START:
+            assert_equal(
+                (target.right_phase, target.left_phase),
+                (pbstf_coffee_water.Phase.REACH_SPONGE, pbstf_coffee_water.Phase.LIFT_ROD),
+            )
+            has_parallel_start = True
+        if step + 1 == round((pbstf_coffee_water.PARALLEL_START + 0.4) / pbstf_coffee_water.CONTROL_DT):
+            assert observation.hands[0].pos[0] < pbstf_coffee_water.WATER_CUP_POS[0] - 0.01
+            assert observation.hands[0].pos[2] < -0.02
+            assert observation.rod.pos[1] > pbstf_coffee_water.ROD_PARK[1] + 0.04
+        if target.left_phase in (
+            pbstf_coffee_water.Phase.INSERT_ROD,
+            pbstf_coffee_water.Phase.STIR,
+            pbstf_coffee_water.Phase.HOLD_ROD,
+            pbstf_coffee_water.Phase.WITHDRAW_ROD,
+        ) and step % 10 == 0:
+            vertices = tensor_to_array(demo.rod.get_verts()) - pbstf_coffee_water.COFFEE_CUP_POS
+            is_below_rim = vertices[:, 1] < rim
+            if is_below_rim.any():
+                assert demo.cup_cavity.contains(vertices[is_below_rim]).all()
+        if target.left_phase == pbstf_coffee_water.Phase.STIR:
+            stir_positions.append(observation.rod.pos)
+        if time > pbstf_coffee_water.PARALLEL_START and (
+            target.right_phase == target.left_phase == pbstf_coffee_water.Phase.REST
+        ):
+            break
+    assert max_error < 2e-4
+    assert has_parallel_start
+    assert demo.motion.has_caught_cup
+    assert 50.0 <= demo.motion.max_knock_tilt <= 65.0
+    assert_equal(sorted(phases), list(pbstf_coffee_water.Phase))
+    stir_positions = np.stack(stir_positions) - pbstf_coffee_water.COFFEE_CUP_POS
+    angles = np.unwrap(np.arctan2(stir_positions[:, 2], stir_positions[:, 0]))
+    gs.logger.info(
+        f"Measured stirring angle: {angles[-1] - angles[0]:.6f}rad; parked rod: {observation.rod.pos}; "
+        f"returned cup: {observation.cup.pos}; sponge: {observation.sponge_pos}."
+    )
+    assert_allclose(angles[-1] - angles[0], 6.0 * np.pi, atol=0.05)
+    assert_allclose(observation.rod.pos, pbstf_coffee_water.ROD_PARK, atol=0.002)
+    assert_allclose(observation.cup.pos, pbstf_coffee_water.WATER_CUP_POS, atol=0.002)
+    assert observation.cup_tilt < 2.0
+    assert_allclose(
+        demo.sponge.get_pos(),
+        np.array(pbstf_coffee_water.SPONGE_END) + (0.0, 0.5 * pbstf_coffee_water.SPONGE_SIZE[1], 0.0),
+        atol=0.005,
+    )
+    torso = trimesh.load(Path(gs.utils.get_assets_dir()) / "urdf/sim1_acone/meshes/body4.STL")
+    torso_pos = np.array(pbstf_coffee_water.ROBOT_POS) + geom.transform_by_quat(
+        np.array((0.094118, 0.0010067, 0.77)), np.array(pbstf_coffee_water.ROBOT_QUAT)
+    )
+    vertices = np.concatenate(
+        [
+            tensor_to_array(visual_geom.get_vverts())
+            for idx in range(23, 29)
+            for visual_geom in demo.robot.get_link(f"right_link{idx}").vgeoms
+        ]
+    )
+    local_vertices = geom.inv_transform_by_trans_quat(vertices, torso_pos, np.array(pbstf_coffee_water.ROBOT_QUAT))
+    distances, *_ = igl.signed_distance(local_vertices, torso.vertices, torso.faces)
+    assert distances.min() > 0.005
 
 
 @pytest.mark.slow("gpu")  # gpu ~250s

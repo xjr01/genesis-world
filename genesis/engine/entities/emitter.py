@@ -2,9 +2,10 @@ import numpy as np
 import torch
 
 import genesis as gs
+from genesis.engine.entities.particle_concentration import initial_concentration
+from genesis.repr_base import RBC
 import genesis.utils.geom as gu
 import genesis.utils.particle as pu
-from genesis.repr_base import RBC
 
 
 class Emitter(RBC):
@@ -49,9 +50,39 @@ class Emitter(RBC):
 
     def reset(self):
         """
-        Reset the emitter's internal particle index to start emitting from the beginning.
+        Reset the emitter's particle index and accumulated emission length.
         """
         self._next_particle = 0
+        self._acc_droplet_len = 0.0
+
+    def _emit_particles(self, positions, velocities):
+        n_particles = len(positions)
+        if n_particles > self._entity.n_particles:
+            gs.raise_exception(
+                f"Number of particles to emit ({n_particles}) at the current step is larger than the maximum "
+                f"number of particles ({self._entity.n_particles})."
+            )
+
+        if self._next_particle + n_particles > self._entity.n_particles:
+            self._next_particle = 0
+        particles_idx = torch.arange(
+            self._next_particle, self._next_particle + n_particles, dtype=gs.tc_int, device=gs.device
+        )
+        self._entity.set_particles_pos(positions, particles_idx)
+        self._entity.set_particles_vel(velocities, particles_idx)
+        if isinstance(self._entity.material, (gs.materials.PBD.Liquid, gs.materials.PBSTF.Liquid)):
+            concentrations = initial_concentration(
+                positions, self._entity.material.c_init, self._entity.material.c_init_z_mid
+            )
+            self._entity.set_particles_concentration(concentrations, particles_idx)
+        elif isinstance(self._entity.material, gs.materials.IPBF.Liquid):
+            self._entity.set_particles_concentration(self._entity.material.c_init, particles_idx)
+        self._entity.set_particles_active(gs.ACTIVE, particles_idx)
+
+        self._next_particle += n_particles
+        if self._next_particle == self._entity.n_particles:
+            self._next_particle = 0
+        gs.logger.debug(f"Emitted {n_particles} particles. Next particle index: {self._next_particle}.")
 
     def emit(
         self,
@@ -63,6 +94,7 @@ class Emitter(RBC):
         theta=0.0,
         speed=1.0,
         p_size=None,
+        generation_speed=None,
     ):
         """
         Emit particles in a specified shape and direction from a nozzle.
@@ -74,7 +106,8 @@ class Emitter(RBC):
         droplet_size : float or tuple
             Size of the droplet. A single float for symmetric shapes, or a tuple of (width, height) for rectangles.
         droplet_length : float, optional
-            Length of the droplet in the emitting direction. If None, calculated from speed and simulation timing.
+            Length of the droplet in the emitting direction. If None, calculated from ``generation_speed`` and
+            simulation timing.
         pos : tuple of float
             World position of the nozzle from which the droplet is emitted.
         direction : tuple of float
@@ -82,9 +115,13 @@ class Emitter(RBC):
         theta : float
             Rotation angle (in radians) around the droplet axis.
         speed : float
-            Emission speed of the particles.
+            Initial speed assigned to emitted particles.
         p_size : float, optional
             Particle size used for filling the droplet. Defaults to the solver's particle size.
+        generation_speed : float, optional
+            Axial speed used to determine the generated length when ``droplet_length`` is unspecified. It defaults to
+            ``speed``. Values above ``speed`` inject particles faster than they leave the source and can increase local
+            density.
 
         Raises
         ------
@@ -109,8 +146,9 @@ class Emitter(RBC):
         p_size = self._entity.particle_size if p_size is None else p_size
 
         if droplet_length is None:
-            # Use the speed to determine the length of the droplet in the emitting direction
-            droplet_length = speed * self._solver.substep_dt * self._sim.substeps + self._acc_droplet_len
+            if generation_speed is None:
+                generation_speed = speed
+            droplet_length = generation_speed * self._solver.substep_dt * self._sim.substeps + self._acc_droplet_len
             if droplet_length < p_size:  # too short, so we should not emit
                 self._acc_droplet_len = droplet_length
                 droplet_length = 0.0
@@ -155,32 +193,8 @@ class Emitter(RBC):
             if not self._solver.boundary.is_inside(positions):
                 gs.raise_exception("Emitted particles are outside the boundary.")
 
-            n_particles = len(positions)
-
-            # Expand vels with batch dimension
             vels = speed * direction
-
-            if n_particles > self._entity.n_particles:
-                gs.raise_exception(
-                    f"Number of particles to emit ({n_particles}) at the current step is larger than the maximum "
-                    f"number of particles ({self._entity.n_particles})."
-                )
-
-            particles_idx = torch.arange(
-                self._next_particle, self._next_particle + n_particles, dtype=gs.tc_int, device=gs.device
-            )
-
-            self._entity.set_particles_pos(positions, particles_idx)
-            self._entity.set_particles_vel(vels, particles_idx)
-            self._entity.set_particles_active(gs.ACTIVE, particles_idx)
-
-            self._next_particle += n_particles
-
-            # recycle particles
-            if self._next_particle + n_particles > self._entity.n_particles:
-                self._next_particle = 0
-
-            gs.logger.debug(f"Emitted {n_particles} particles. Next particle index: {self._next_particle}.")
+            self._emit_particles(positions, vels)
 
         else:
             gs.logger.debug("Droplet length is too short for current step. Skipping to next step.")
@@ -226,28 +240,7 @@ class Emitter(RBC):
         positions[dists < gs.EPS] = gs.EPS
         vels = (speed / (dists[:, None] + gs.EPS)) * positions_
 
-        n_particles = len(positions)
-        if n_particles > self._entity.n_particles:
-            gs.raise_exception(
-                f"Number of particles to emit ({n_particles}) at the current step is larger than the maximum number "
-                f"of particles ({self._entity.n_particles})."
-            )
-
-        particles_idx = torch.arange(
-            self._next_particle, self._next_particle + n_particles, dtype=gs.tc_int, device=gs.device
-        )
-
-        self._entity.set_particles_pos(positions, particles_idx)
-        self._entity.set_particles_vel(vels, particles_idx)
-        self._entity.set_particles_active(gs.ACTIVE, particles_idx)
-
-        self._next_particle += n_particles
-
-        # recycle particles
-        if self._next_particle + n_particles > self._entity.n_particles:
-            self._next_particle = 0
-
-        gs.logger.debug(f"Emitted {n_particles} particles. Next particle index: {self._next_particle}.")
+        self._emit_particles(positions, vels)
 
     @property
     def uid(self):

@@ -22,6 +22,46 @@ def mesh_to_elements(mesh, tet_cfg=dict()):
     return elements
 
 
+def create_tetrahedral_grid(lower, upper, resolution):
+    """Create a regular Cartesian vertex grid with six consistently oriented tetrahedra per grid cell.
+
+    ``resolution`` gives the number of cells along each axis. The result contains exactly
+    ``prod(resolution + 1)`` vertices and ``6 * prod(resolution)`` tetrahedra.
+    """
+    lower = np.array(lower)
+    upper = np.array(upper)
+    resolution = np.array(resolution)
+    if lower.shape != (3,) or upper.shape != (3,) or resolution.shape != (3,):
+        raise ValueError("Tetrahedral grid bounds and resolution must each have three entries.")
+    if not np.issubdtype(resolution.dtype, np.integer):
+        raise TypeError("Tetrahedral grid resolution entries must be integers.")
+    if (resolution <= 0).any():
+        raise ValueError("Tetrahedral grid resolution entries must be positive.")
+    if (upper <= lower).any():
+        raise ValueError("Tetrahedral grid upper bounds must exceed lower bounds.")
+
+    axes = tuple(np.linspace(lower[axis], upper[axis], resolution[axis] + 1) for axis in range(3))
+    vertices = np.stack(np.meshgrid(*axes, indexing="ij"), axis=-1).reshape((-1, 3))
+    cells = np.stack(
+        np.meshgrid(*(np.arange(resolution[axis]) for axis in range(3)), indexing="ij"), axis=-1
+    ).reshape((-1, 3))
+    strides = np.array(((resolution[1] + 1) * (resolution[2] + 1), resolution[2] + 1, 1))
+    cells_v000 = cells @ strides
+    stride_x, stride_y, stride_z = strides
+    tetrahedra_offsets = np.array(
+        (
+            (0, stride_x, stride_x + stride_y, stride_x + stride_y + stride_z),
+            (0, stride_x + stride_y, stride_y, stride_x + stride_y + stride_z),
+            (0, stride_y, stride_y + stride_z, stride_x + stride_y + stride_z),
+            (0, stride_y + stride_z, stride_z, stride_x + stride_y + stride_z),
+            (0, stride_z, stride_x + stride_z, stride_x + stride_y + stride_z),
+            (0, stride_x + stride_z, stride_x, stride_x + stride_y + stride_z),
+        )
+    )
+    elements = (cells_v000[:, None, None] + tetrahedra_offsets[None]).reshape((-1, 4))
+    return vertices, elements
+
+
 def split_all_surface_tets(verts, elems):
     """
     Splits tetrahedras that have 4 vertices on the surface into 4 smaller tetrahedras.

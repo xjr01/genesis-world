@@ -2,12 +2,16 @@ import dataclasses
 import math
 from enum import IntEnum
 
-import quadrants as qd
-from typing_extensions import dataclass_transform  # Made it into standard lib from Python 3.12
 import numpy as np
 import torch
 
+from typing_extensions import dataclass_transform  # Made it into standard lib from Python 3.12
+
+import quadrants as qd
+
 import genesis as gs
+
+V_ANNOTATION = qd.template()
 
 
 def _tensor_backend():
@@ -81,12 +85,21 @@ def V_SCALAR_FROM(dtype, value):
 
 class ErrorCode(IntEnum):
     SUCCESS = 0b000000000000000000000000000000000
-    OVERFLOW_CANDIDATE_CONTACTS = 0b00000000000000000000000000000001
-    OVERFLOW_COLLISION_PAIRS = 0b00000000000000000000000000000010
-    OVERFLOW_HIBERNATION_ISLANDS = 0b00000000000000000000000000000100
-    INVALID_FORCE_NAN = 0b00000000000000000000000000001000
-    INVALID_ACC_NAN = 0b00000000000000000000000000010000
-    OVERFLOW_CONTACTS = 0b00000000000000000000000000100000
+    OVERFLOW_COLLISION_PAIRS = 0b00000000000000000000000000000001
+    OVERFLOW_CANDIDATE_CONTACTS = 0b00000000000000000000000000000010
+    OVERFLOW_CONTACTS = 0b00000000000000000000000000000100
+    OVERFLOW_HIBERNATION_ISLANDS = 0b00000000000000000000000000001000
+    INVALID_CONTACT_NAN = 0b00000000000000000000000000010000
+    INVALID_FORCE_NAN = 0b00000000000000000000000000100000
+    INVALID_ACC_NAN = 0b00000000000000000000000001000000
+    INVALID_IPBSTF_STATE_NAN = 0b00000000000000000000000010000000
+    INVALID_PBSTF_STATE_NAN = 0b00000000000000000000000100000000
+    INVALID_PBSTF_DEFORMABLE_COLLIDER = 0b00000000000000000000001000000000
+    INVALID_FEM_RIGID_SURFACE_INTERSECTION = 0b00000000000000000000010000000000
+    INVALID_PBD_RIGID_SURFACE_INTERSECTION = 0b00000000000000000000100000000000
+    INVALID_PBD_STATE = 0b00000000000000000001000000000000
+    INVALID_PBD_VOLUME = 0b00000000000000000010000000000000
+    INVALID_IPBF_STATE_NAN = 0b00000000000000000100000000000000
 
 
 # =========================================== RigidInfo ===========================================
@@ -481,6 +494,12 @@ class ConstraintState:
     # In practice, this variable is re-purposed to store the Cholesky factor L st H = L @ L.T to spare memory resources.
     # TODO: Optimize storage to only allocate memory half of the Hessian matrix to sparse memory resources.
     nt_H: qd.Tensor
+    # Per-DOF Jacobi scale s_i = 1/sqrt(diag(M + J^T D J)_i), at natural DOF id, refreshed ahead of every direct
+    # rebuild (func_jacobi_scale; 1 on an empty diagonal). Assembly writes H already scaled, nt_H holds L of S H S,
+    # update vectors are scaled at construction, and the batch solve wraps grad/Mgrad, so Mgrad = H^-1 grad exactly. A unit diagonal keeps the Hessian's mixed-unit spread within float32's
+    # conditioning capability at any geometry scale and makes the bare-EPS pivot floor scale-relative. Only meaningful
+    # with enable_jacobi_equilibration.
+    nt_jacobi: qd.Tensor
     # Diagonal of the persisted cone-free Hessian packed in nt_H's mirror slots (see nt_H). Only meaningful with
     # enable_cone_free_hessian_reuse.
     nt_H_cone_free_diag: qd.Tensor
@@ -632,6 +651,7 @@ def get_constraint_state(constraint_solver, solver, collider):
             if solver.rigid_config.enable_register_tiled_mass
             else V(dtype=gs.qd_float, shape=(_B, solver.n_dofs_, solver.n_dofs_))
         ),
+        nt_jacobi=V(dtype=gs.qd_float, shape=(solver.n_dofs_, _B), layout=dof_vec_layout),
         nt_H_env_start=V(dtype=gs.qd_int, shape=sparse_dof_shape),
         dof_perm=V(dtype=gs.qd_int, shape=sparse_dof_shape),
         dof_iperm=V(dtype=gs.qd_int, shape=sparse_dof_shape),
@@ -1008,7 +1028,7 @@ def get_mpr_simplex_support(B_):
 class MPRState:
     simplex_support: MPRSimplexSupport
     simplex_size: qd.Tensor
-    # Reliability of the portal in simplex_support[1..3] after a contact, a PORTAL_STATUS value (INVALID/UNKNOWN/VALID).
+    # What the depth of the contact in simplex_support[1..3] is worth, a PORTAL_STATUS value. Zero means no portal.
     # Only VALID portals are reused (perturbation reconstruction, EPA seeding); INVALID forces a GJK refine.
     portal_status: qd.Tensor
 
@@ -1319,7 +1339,7 @@ def get_gjk_state_contact_only(_B):
         simplex_vertex_intersect=get_gjk_simplex_vertex(_B, is_active=True),
         simplex_buffer_intersect=get_gjk_simplex_buffer(_B, is_active=True),
         nsimplex=V(dtype=gs.qd_int, shape=(_B,)),
-        # EPA — dummy allocations, never accessed by func_gjk
+        # EPA - dummy allocations, never accessed by func_gjk
         polytope=get_epa_polytope(_dummy_B, is_active=True),
         polytope_verts=MDVertex(
             obj1=V_VEC(3, dtype=gs.qd_float, shape=(1, 1)),
@@ -1334,13 +1354,13 @@ def get_gjk_state_contact_only(_B):
         polytope_faces_map=V(dtype=gs.qd_int, shape=(1, 1)),
         polytope_horizon_data=get_epa_polytope_horizon_data(_dummy_B, 1, is_active=True),
         polytope_horizon_stack=get_epa_polytope_horizon_data(_dummy_B, 1, is_active=True),
-        # Multi-contact — dummy
+        # Multi-contact - dummy
         contact_faces=get_contact_face(_dummy_B, 1, is_active=True),
         contact_normals=get_contact_normal(_dummy_B, 1, is_active=True),
         contact_halfspaces=get_contact_halfspace(_dummy_B, 1, is_active=True),
         contact_clipped_polygons=V_VEC(3, dtype=gs.qd_float, shape=(1, 2, 1)),
         multi_contact_flag=V(dtype=gs.qd_bool, shape=(_B,)),
-        # Results — full _B for fields func_gjk writes; dummy for EPA-only fields
+        # Results - full _B for fields func_gjk writes; dummy for EPA-only fields
         witness=get_witness(_B, 1, is_active=True),
         n_witness=V(dtype=gs.qd_int, shape=(_B,)),
         n_contacts=V(dtype=gs.qd_int, shape=(1,)),
@@ -1759,6 +1779,8 @@ class LinksState:
     j_quat_bw: qd.Tensor
     j_vel: qd.Tensor
     j_ang: qd.Tensor
+    kinematic_vel: qd.Tensor
+    kinematic_ang: qd.Tensor
     cd_ang: qd.Tensor
     cd_vel: qd.Tensor
     # Whether any contact or connect/weld equality row involves the link this step. Written by the constraint
@@ -1816,6 +1838,8 @@ def get_links_state(solver):
         j_quat_bw=V(dtype=gs.qd_vec4, shape=shape_bw, needs_grad=requires_grad),
         j_vel=V(dtype=gs.qd_vec3, shape=shape, needs_grad=requires_grad),
         j_ang=V(dtype=gs.qd_vec3, shape=shape, needs_grad=requires_grad),
+        kinematic_vel=V(dtype=gs.qd_vec3, shape=shape),
+        kinematic_ang=V(dtype=gs.qd_vec3, shape=shape),
         cd_ang=V(dtype=gs.qd_vec3, shape=shape, needs_grad=requires_grad),
         cd_vel=V(dtype=gs.qd_vec3, shape=shape, needs_grad=requires_grad),
         is_constrained=V(dtype=gs.qd_bool, shape=shape),
@@ -1976,6 +2000,7 @@ class GeomsInfo:
     is_decomposed: qd.Tensor
     is_hollow: qd.Tensor
     needs_coup: qd.Tensor
+    is_coup_reaction_enabled: qd.Tensor
     coup_friction: qd.Tensor
     coup_softness: qd.Tensor
     coup_restitution: qd.Tensor
@@ -2013,6 +2038,7 @@ def get_geoms_info(solver, is_active=True):
         is_decomposed=V(dtype=gs.qd_bool, shape=shape),
         is_hollow=V(dtype=gs.qd_bool, shape=shape),
         needs_coup=V(dtype=gs.qd_int, shape=shape),
+        is_coup_reaction_enabled=V(dtype=gs.qd_bool, shape=shape),
         coup_friction=V(dtype=gs.qd_float, shape=shape),
         coup_softness=V(dtype=gs.qd_float, shape=shape),
         coup_restitution=V(dtype=gs.qd_float, shape=shape),
@@ -2325,6 +2351,50 @@ def get_rigid_adjoint_cache(solver):
     )
 
 
+# =========================================== FEMProjectionState ===========================================
+
+
+@dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
+class FEMProjectionState:
+    normals: qd.Tensor
+    is_active: qd.Tensor
+    is_processed: qd.Tensor
+    has_changed: qd.Tensor
+    has_contact: qd.Tensor
+    is_pcg_active_saved: qd.Tensor
+
+
+@dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
+class RigidSurfaceInfo:
+    projection_geoms_idx: qd.Tensor
+    surface_geom_slots: qd.Tensor
+    surface_geoms_idx: qd.Tensor
+    atlas_offsets: qd.Tensor
+
+
+@dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
+class RigidSurfaceContactState:
+    corrections: qd.Tensor
+    n_corrections: qd.Tensor
+    is_active: qd.Tensor
+    has_intersection: qd.Tensor
+    previous_geoms_pos: qd.Tensor
+    previous_geoms_quat: qd.Tensor
+
+
+def get_rigid_surface_contact_state(n_envs, n_vertices, n_geoms):
+    """Allocate corrections and relative-motion history for a deformable surface against rigid geoms."""
+    # Field-backed buffers support optional contact state in the legacy coupler's class kernels.
+    return RigidSurfaceContactState(
+        corrections=qd.Vector.field(n=3, dtype=gs.qd_float, shape=(n_envs, n_vertices)),
+        n_corrections=qd.field(dtype=gs.qd_int, shape=(n_envs, n_vertices)),
+        is_active=qd.field(dtype=gs.qd_bool, shape=(n_envs,)),
+        has_intersection=qd.field(dtype=gs.qd_int, shape=(n_envs,)),
+        previous_geoms_pos=qd.Vector.field(n=3, dtype=gs.qd_float, shape=(n_envs, n_geoms)),
+        previous_geoms_quat=qd.Vector.field(n=4, dtype=gs.qd_float, shape=(n_envs, n_geoms)),
+    )
+
+
 # =========================================== DynInfo and DynState ===========================================
 
 
@@ -2467,6 +2537,9 @@ class RigidSimStaticConfig(metaclass=AutoInitMeta):
     # flattened index decompositions) key on this flag, while algorithm selection (warp-cooperative vs serial
     # reductions) keys on enable_cooperative_constraint_kernels alone.
     constraint_layout_batch_first: bool = False
+    # Whether the Newton system is Jacobi-equilibrated: see nt_jacobi in ConstraintState for the mechanics, the rigid
+    # solver's resolution for the gating.
+    enable_jacobi_equilibration: bool = False
     tiled_n_dofs_per_block: int = -1
     tiled_n_dofs: int = -1
     tiled_n_island_dofs: int = -1  # shared-tile cap for the cooperative per-island solve (fits GPU shared memory)

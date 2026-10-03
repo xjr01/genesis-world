@@ -2,16 +2,19 @@ import functools
 from pathlib import Path
 
 import numpy as np
-import quadrants as qd
 import torch
+
 import trimesh
 
+import quadrants as qd
+
 import genesis as gs
+from genesis.engine.entities.particle_concentration import kernel_get_concentration, kernel_set_concentration
+from genesis.engine.states.cache import QueriedStates
 import genesis.utils.geom as gu
 import genesis.utils.mesh as mu
+from genesis.utils.misc import broadcast_tensor, qd_to_torch, to_gs_tensor
 import genesis.utils.particle as pu
-from genesis.engine.states.cache import QueriedStates
-from genesis.utils.misc import to_gs_tensor, broadcast_tensor
 
 from .base_entity import Entity
 
@@ -57,6 +60,43 @@ class ParticleEntity(Entity):
         Whether to enable skinning for rendering this entity's mesh.
     """
 
+    @gs.assert_built
+    def get_particles_concentration(self, envs_idx=None):
+        """Return passive liquid concentrations, with shape [B, N] or [N] for an unbatched scene."""
+        if not isinstance(
+            self.material, (gs.materials.PBD.Liquid, gs.materials.PBSTF.Liquid, gs.materials.IPBF.Liquid)
+        ):
+            gs.raise_exception("Concentration requires a PBD, PBSTF, or IPBF liquid material.")
+        envs_idx = self.scene._sanitize_envs_idx(envs_idx)
+        concentrations = self._sanitize_particles_tensor(None, gs.tc_float, None, envs_idx)
+        if gs.use_zerocopy:
+            concentrations[:] = qd_to_torch(self.solver.particles.c, transpose=True)[
+                envs_idx, self.particle_start : self.particle_end
+            ]
+        else:
+            kernel_get_concentration(envs_idx, self.particle_start, concentrations, self.solver.particles)
+        return concentrations if self.scene.n_envs else concentrations[0]
+
+    @gs.assert_built
+    def set_particles_concentration(self, concentrations, particles_idx_local=None, envs_idx=None):
+        """Set passive liquid concentrations in [0, 1]; scalar inputs broadcast across selected particles."""
+        if not isinstance(
+            self.material, (gs.materials.PBD.Liquid, gs.materials.PBSTF.Liquid, gs.materials.IPBF.Liquid)
+        ):
+            gs.raise_exception("Concentration requires a PBD, PBSTF, or IPBF liquid material.")
+        envs_idx = self.scene._sanitize_envs_idx(envs_idx)
+        particles_idx = self._sanitize_particles_idx_local(particles_idx_local, envs_idx) + self.particle_start
+        concentrations = self._sanitize_particles_tensor(concentrations, gs.tc_float, particles_idx, envs_idx)
+        if not ((concentrations >= 0.0) & (concentrations <= 1.0)).all():
+            gs.raise_exception("Concentrations must be finite and between zero and one.")
+        if gs.use_zerocopy:
+            concentrations_t = qd_to_torch(self.solver.particles.c, transpose=True, copy=False)
+            concentrations_t[envs_idx[:, None], particles_idx] = concentrations
+            if gs.backend == gs.metal:
+                torch.mps.synchronize()
+        else:
+            kernel_set_concentration(particles_idx, envs_idx, concentrations, self.solver.particles)
+
     def __init__(
         self,
         scene,
@@ -90,7 +130,9 @@ class ParticleEntity(Entity):
             self._vmesh = gs.Mesh.from_morph_surface(self.morph, self.surface)
             self._surface = self._vmesh[0].surface
 
-        elif isinstance(self._morph, (gs.options.morphs.Primitive, gs.options.morphs.Mesh)):
+        elif isinstance(
+            self._morph, (gs.options.morphs.Primitive, gs.options.morphs.Mesh, gs.options.morphs.TetrahedralMesh)
+        ):
             meshes = gs.Mesh.from_morph_surface(self.morph, self.surface)
             if len(meshes) > 1:
                 gs.raise_exception("Mesh file with multiple sub-meshes are not supported.")
@@ -269,6 +311,8 @@ class ParticleEntity(Entity):
         elif isinstance(self._morph, (gs.options.morphs.Primitive, gs.options.morphs.Mesh)):
             particles = self._vmesh.particlize(self._particle_size, self.sampler)
             particles = particles.astype(gs.np_float, order="C", copy=False)
+        elif isinstance(self._morph, gs.options.morphs.Particles):
+            particles = np.array(self._morph.positions)
         elif isinstance(self._morph, gs.options.morphs.Nowhere):
             particles = pu.nowhere_particles(self._morph.n_particles)
         else:
@@ -327,7 +371,8 @@ class ParticleEntity(Entity):
                 np.array(self._morph.pos, dtype=gs.np_float),
                 np.array(self._morph.quat, dtype=gs.np_float),
             )
-            self._vmesh.apply_transform(gu.trans_quat_to_T(pos, quat))
+            if self._vmesh is not None:
+                self._vmesh.apply_transform(gu.trans_quat_to_T(pos, quat))
             # transform particles
             particles = gu.transform_by_trans_quat(particles, pos, quat)
 
@@ -339,7 +384,7 @@ class ParticleEntity(Entity):
                     f"max: {particles.max(0)}\n"
                 )
 
-            if self._need_skinning:
+            if self._need_skinning and self._vmesh is not None:
                 self._vverts = np.asarray(self._vmesh.verts, dtype=gs.np_float)
                 self._vfaces = np.asarray(self._vmesh.faces, dtype=gs.np_int)
             else:

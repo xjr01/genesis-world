@@ -1,9 +1,9 @@
 import os
-import sys
 import subprocess
+import sys
 from pathlib import Path
-import pytest
 
+import pytest
 
 EXAMPLES_DIR = Path(__file__).parents[1] / "examples"
 
@@ -14,6 +14,7 @@ ALLOW_PATTERNS = {
     "drone/interactive_drone.py",
     "drone/fly_route.py",
     "fluid/**/*.py",
+    "ipbstf.py",
     "ipc/**/*.py",
     "kinematic/**/*.py",
     "rendering/**/*.py",

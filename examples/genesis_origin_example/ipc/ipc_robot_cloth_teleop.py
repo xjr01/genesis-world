@@ -89,7 +89,7 @@ def main():
         repo_type="dataset",
         repo_id="Genesis-Intelligence/assets",
         revision="8aa8fcd60500b9f3a36c356080224bdb1be9ee59",
-        allow_patterns="/IPC/grid20x20.obj",
+        allow_patterns="IPC/grid20x20.obj",
         max_workers=1,
     )
     scene.add_entity(

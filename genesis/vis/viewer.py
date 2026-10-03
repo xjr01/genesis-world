@@ -46,7 +46,8 @@ class Viewer(RBC):
         self._realtime_factor = options.realtime_factor
         self._camera_init_pos = np.asarray(options.camera_pos, dtype=gs.np_float)
         self._camera_init_lookat = np.asarray(options.camera_lookat, dtype=gs.np_float)
-        self._camera_up = np.asarray(options.camera_up, dtype=gs.np_float)
+        self._camera_world_up = np.asarray(options.camera_up, dtype=gs.np_float)
+        self._camera_up = self._camera_world_up.copy()
         self._camera_fov = options.camera_fov
 
         self._enable_help_text = options.enable_help_text
@@ -57,7 +58,7 @@ class Viewer(RBC):
             self._plugins.append(ImGuiOverlayPlugin())
 
         # Validate viewer options
-        if any(e.shape != (3,) for e in (self._camera_init_pos, self._camera_init_lookat, self._camera_up)):
+        if any(e.shape != (3,) for e in (self._camera_init_pos, self._camera_init_lookat, self._camera_world_up)):
             gs.raise_exception("ViewerOptions.camera_(pos|lookat|up) must be sequences of length 3.")
 
         self._pyrender_viewer = None
@@ -134,6 +135,7 @@ class Viewer(RBC):
                         shadow=self.context.shadow,
                         plane_reflection=self.context.plane_reflection,
                         env_separate_rigid=self.context.env_separate_rigid,
+                        world_up_axis=self._camera_world_up,
                         enable_help_text=self._enable_help_text,
                         plugins=self._plugins,
                         viewer_flags={

@@ -3,56 +3,61 @@ import os
 import pickle
 import sys
 import time
-import trimesh
+from typing import Callable, Iterable, Literal, TYPE_CHECKING, overload
 import weakref
-from typing import TYPE_CHECKING, Callable, Iterable, Literal, overload
 
 import numpy as np
 import torch
+
+import trimesh
+
 import quadrants as qd
-from quadrants.lang import impl
 
 import genesis as gs
-import genesis.utils.geom as gu
-import genesis.utils.mesh as mu
 from genesis.engine.force_fields import ForceField
 from genesis.engine.materials.base import EntityT, Material
 from genesis.engine.states.solvers import SimState
 from genesis.options import (
-    KinematicOptions,
     BaseCouplerOptions,
     DEMOptions,
     FLIPOptions,
-    LegacyCouplerOptions,
     FEMOptions,
+    IPBFOptions,
+    IPBSTFOptions,
+    KinematicOptions,
+    LegacyCouplerOptions,
     MPMOptions,
     PBDOptions,
+    PBDUnifiedOptions,
+    PBSTFOptions,
     ProfilingOptions,
     RigidOptions,
     SFOptions,
-    SimOptions,
     SPHOptions,
+    SimOptions,
     ToolOptions,
     ViewerOptions,
     VisOptions,
 )
 from genesis.options.morphs import Morph
-from genesis.options.surfaces import Surface
-from genesis.options.renderers import Rasterizer, RendererOptions
 from genesis.options.recorders import RecorderOptions
+from genesis.options.renderers import Rasterizer, RendererOptions
+from genesis.options.surfaces import Surface
 from genesis.recorders import RecorderManager
 from genesis.repr_base import RBC
+import genesis.utils.geom as gu
+import genesis.utils.mesh as mu
+from genesis.utils.misc import sanitize_index, tensor_to_array
 from genesis.utils.tools import FPSTracker
-from genesis.utils.misc import tensor_to_array, sanitize_index
-from genesis.vis import Visualizer
 from genesis.utils.warnings import warn_once
+from genesis.vis import Visualizer
 
 if TYPE_CHECKING:
     from genesis.engine.entities.base_entity import Entity
     from genesis.engine.entities.rigid_entity import RigidEntity
     from genesis.engine.sensors.base_sensor import Sensor
-    from genesis.recorders import Recorder
     from genesis.options.sensors.options import SensorOptions, SensorT
+    from genesis.recorders import Recorder
 
 
 @gs.assert_initialized
@@ -85,6 +90,12 @@ class Scene(RBC):
         The options configuring the dem_solver (``scene.sim.DEMSolver``).
     flip_options : gs.options.FLIPOptions
         The options configuring the flip_solver (``scene.sim.FLIPSolver``).
+    ipbf_options : gs.options.IPBFOptions
+        Options for the implicit position-based fluid (IPBF) solver.
+    ipbstf_options : gs.options.IPBSTFOptions
+        The options configuring the implicit position-based surface-tension fluid (IPBSTF) solver.
+    pbstf_options : gs.options.PBSTFOptions
+        The options configuring the fluid-only pbstf_solver (``scene.sim.PBSTFSolver``).
     vis_options : gs.options.VisOptions
         The options configuring the visualization system (``scene.visualizer``). Visualizer controls both the interactive viewer and the cameras.
     viewer_options : gs.options.ViewerOptions
@@ -108,9 +119,12 @@ class Scene(RBC):
         sph_options: SPHOptions | None = None,
         fem_options: FEMOptions | None = None,
         sf_options: SFOptions | None = None,
-        pbd_options: PBDOptions | None = None,
+        pbd_options: PBDOptions | PBDUnifiedOptions | None = None,
         dem_options: DEMOptions | None = None,
         flip_options: FLIPOptions | None = None,
+        ipbf_options: IPBFOptions | None = None,
+        ipbstf_options: IPBSTFOptions | None = None,
+        pbstf_options: PBSTFOptions | None = None,
         vis_options: VisOptions | None = None,
         viewer_options: ViewerOptions | None = None,
         profiling_options: ProfilingOptions | None = None,
@@ -134,6 +148,9 @@ class Scene(RBC):
         pbd_options = pbd_options or PBDOptions()
         dem_options = dem_options or DEMOptions()
         flip_options = flip_options or FLIPOptions()
+        ipbf_options = ipbf_options or IPBFOptions()
+        ipbstf_options = ipbstf_options or IPBSTFOptions()
+        pbstf_options = pbstf_options or PBSTFOptions()
         vis_options = vis_options or VisOptions()
         viewer_options = viewer_options or ViewerOptions()
         profiling_options = profiling_options or ProfilingOptions()
@@ -157,6 +174,9 @@ class Scene(RBC):
             pbd_options,
             dem_options,
             flip_options,
+            ipbf_options,
+            ipbstf_options,
+            pbstf_options,
             vis_options,
             viewer_options,
             profiling_options,
@@ -175,6 +195,9 @@ class Scene(RBC):
         self.pbd_options = pbd_options.model_copy_from(sim_options)
         self.dem_options = dem_options.model_copy_from(sim_options)
         self.flip_options = flip_options.model_copy_from(sim_options)
+        self.ipbf_options = ipbf_options.model_copy_from(sim_options)
+        self.ipbstf_options = ipbstf_options.model_copy_from(sim_options)
+        self.pbstf_options = pbstf_options.model_copy_from(sim_options)
         self.profiling_options = profiling_options
 
         self.vis_options = vis_options
@@ -196,6 +219,9 @@ class Scene(RBC):
             pbd_options=self.pbd_options,
             dem_options=self.dem_options,
             flip_options=self.flip_options,
+            ipbf_options=self.ipbf_options,
+            ipbstf_options=self.ipbstf_options,
+            pbstf_options=self.pbstf_options,
         )
 
         # visualizer
@@ -237,9 +263,12 @@ class Scene(RBC):
         sph_options: SPHOptions,
         fem_options: FEMOptions,
         sf_options: SFOptions,
-        pbd_options: PBDOptions,
+        pbd_options: PBDOptions | PBDUnifiedOptions,
         dem_options: DEMOptions,
         flip_options: FLIPOptions,
+        ipbf_options: IPBFOptions,
+        ipbstf_options: IPBSTFOptions,
+        pbstf_options: PBSTFOptions,
         vis_options: VisOptions,
         viewer_options: ViewerOptions,
         profiling_options: ProfilingOptions,
@@ -272,8 +301,17 @@ class Scene(RBC):
         if not isinstance(sf_options, SFOptions):
             gs.raise_exception("`sf_options` should be an instance of `SFOptions`.")
 
-        if not isinstance(pbd_options, PBDOptions):
-            gs.raise_exception("`pbd_options` should be an instance of `PBDOptions`.")
+        if not isinstance(pbd_options, (PBDOptions, PBDUnifiedOptions)):
+            gs.raise_exception("`pbd_options` requires `PBDOptions` or `PBDUnifiedOptions`.")
+
+        if not isinstance(ipbf_options, IPBFOptions):
+            gs.raise_exception("`ipbf_options` should be an instance of `IPBFOptions`.")
+
+        if not isinstance(ipbstf_options, IPBSTFOptions):
+            gs.raise_exception("`ipbstf_options` should be an instance of `IPBSTFOptions`.")
+
+        if not isinstance(pbstf_options, PBSTFOptions):
+            gs.raise_exception("`pbstf_options` should be an instance of `PBSTFOptions`.")
 
         if not isinstance(dem_options, DEMOptions):
             gs.raise_exception("`dem_options` should be an instance of `DEMOptions`.")
@@ -420,6 +458,12 @@ class Scene(RBC):
         else:
             morph_for_checks = morph
 
+        if isinstance(morph_for_checks, gs.morphs.TetrahedralMesh) and (
+            not isinstance(material, (gs.materials.FEM.Base, gs.materials.PBD.Elastic))
+            or isinstance(material, gs.materials.FEM.Cloth)
+        ):
+            gs.raise_exception("TetrahedralMesh morphs require a volumetric FEM or PBD elastic material.")
+
         if isinstance(material, gs.materials.Rigid):
             # small sdf res is sufficient for primitives regardless of size
             if isinstance(morph_for_checks, gs.morphs.Primitive):
@@ -458,6 +502,9 @@ class Scene(RBC):
                 gs.materials.MPM.Sand,
                 gs.materials.MPM.Snow,
                 gs.materials.SPH.Liquid,
+                gs.materials.IPBF.Liquid,
+                gs.materials.IPBSTF.Liquid,
+                gs.materials.PBSTF.Liquid,
             ),
         ):
             if surface.vis_mode is None:
@@ -486,22 +533,39 @@ class Scene(RBC):
                     f"Unsupported `surface.vis_mode` for material {material}: '{surface.vis_mode}'. Expected one of: ['particle', 'recon']."
                 )
 
-        elif isinstance(material, (gs.materials.PBD.Base, gs.materials.MPM.Base, gs.materials.SPH.Base)):
+        elif isinstance(
+            material,
+            (
+                gs.materials.IPBF.Base,
+                gs.materials.IPBSTF.Base,
+                gs.materials.MPM.Base,
+                gs.materials.PBD.Base,
+                gs.materials.PBSTF.Base,
+                gs.materials.SPH.Base,
+            ),
+        ):
             if surface.vis_mode is None:
                 surface.vis_mode = "visual"
 
-            if surface.vis_mode not in ("visual", "particle", "recon"):
+            vis_modes = ("visual", "particle", "recon")
+            if isinstance(material, gs.materials.PBD.Base):
+                vis_modes += ("collision",)
+            if isinstance(material, gs.materials.PBD.Elastic) and isinstance(self.pbd_options, PBDUnifiedOptions):
+                vis_modes += ("tetrahedral",)
+            if surface.vis_mode not in vis_modes:
                 gs.raise_exception(
-                    f"Unsupported `surface.vis_mode` for material {material}: '{surface.vis_mode}'. Expected one of: ['visual', 'particle', 'recon']."
+                    f"Unsupported `surface.vis_mode` for material {material}: '{surface.vis_mode}'. "
+                    f"Expected one of: {vis_modes}."
                 )
 
         elif isinstance(material, gs.materials.FEM.Base):
             if surface.vis_mode is None:
                 surface.vis_mode = "visual"
 
-            if surface.vis_mode not in ("visual",):
+            if surface.vis_mode not in ("visual", "tetrahedral"):
                 gs.raise_exception(
-                    f"Unsupported `surface.vis_mode` for material {material}: '{surface.vis_mode}'. Expected one of: ['visual']."
+                    f"Unsupported `surface.vis_mode` for material {material}: '{surface.vis_mode}'. Expected one of: "
+                    "['visual', 'tetrahedral']."
                 )
 
         elif isinstance(material, gs.materials.Hybrid):  # determine the visual of the outer soft part
@@ -832,7 +896,8 @@ class Scene(RBC):
         ----------
         material : gs.materials.Material
             The material of the fluid to be emitted. Must be an instance of `gs.materials.MPM.Base`,
-            `gs.materials.SPH.Base`, `gs.materials.PBD.Particle` or `gs.materials.PBD.Liquid`.
+            `gs.materials.SPH.Base`, `gs.materials.PBD.Particle`, `gs.materials.PBD.Liquid` or
+            `gs.materials.IPBSTF.Base` or `gs.materials.PBSTF.Base`.
         max_particles : int
             The maximum number of particles that can be emitted by the emitter. Particles will be recycled once this
             limit is reached.
@@ -850,11 +915,21 @@ class Scene(RBC):
             gs.raise_exception("Emitter is not supported in differentiable mode.")
 
         if not isinstance(
-            material, (gs.materials.MPM.Base, gs.materials.SPH.Base, gs.materials.PBD.Particle, gs.materials.PBD.Liquid)
+            material,
+            (
+                gs.materials.MPM.Base,
+                gs.materials.SPH.Base,
+                gs.materials.PBD.Particle,
+                gs.materials.PBD.Liquid,
+                gs.materials.IPBF.Base,
+                gs.materials.IPBSTF.Base,
+                gs.materials.PBSTF.Base,
+            ),
         ):
             gs.raise_exception(
                 "Non-supported material for emitter. Supported materials are: `gs.materials.MPM.Base`, "
-                "`gs.materials.SPH.Base`, `gs.materials.PBD.Particle`, `gs.materials.PBD.Liquid`."
+                "`gs.materials.SPH.Base`, `gs.materials.PBD.Particle`, `gs.materials.PBD.Liquid`, "
+                "`gs.materials.IPBSTF.Base`, `gs.materials.PBSTF.Base`."
             )
 
         if surface is None:
@@ -1820,6 +1895,21 @@ class Scene(RBC):
     def flip_solver(self):
         """The scene's `flip_solver`, managing all the `FLIPEntity` in the scene."""
         return self._sim.flip_solver
+
+    @property
+    def ipbf_solver(self):
+        """Implicit position-based fluid solver."""
+        return self._sim.ipbf_solver
+
+    @property
+    def ipbstf_solver(self):
+        """The scene's implicit position-based fluid solver."""
+        return self._sim.ipbstf_solver
+
+    @property
+    def pbstf_solver(self):
+        """The scene's fluid-only position-based surface-tension solver."""
+        return self._sim.pbstf_solver
 
     @property
     def segmentation_idx_dict(self):
