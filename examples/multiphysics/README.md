@@ -13,7 +13,7 @@ are:
 
 | Scenario | Construction | Control |
 |---|---|---|
-| Coffee pouring and cleanup | `examples.pbstf_coffee_water.build_scene` | `step_scene` |
+| Coffee pouring and cleanup | `examples.multiphysics.coffee_water.build_scene` | `CoffeeWaterController.step` |
 | Table wiping | `examples.multiphysics.table_wiping.build_scene` | `TableWipingController.step` |
 | Litter scooping | `examples.multiphysics.litter_scoop.build_scene` | `LitterScoopController.step` |
 | Garment folding | `examples.multiphysics.garment_folding.build_scene` | `GarmentFoldingController.step` |
@@ -29,6 +29,7 @@ Run the scenarios with:
 ```bash
 python -m examples.multiphysics.garment_folding.run --task half --steps 1
 python -m examples.multiphysics.butter_spreading.run --steps 1
+python -m examples.multiphysics.coffee_water.run --steps 1 --check-motion
 ```
 
 The butter scenario uses the public `gs.materials.MPM.HerschelBulkleyButter` and

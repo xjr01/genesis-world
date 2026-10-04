@@ -248,8 +248,14 @@ def init(
             num_compile_threads=int(qd_num_cpu_threads),
         )
     else:
+        # Quadrants otherwise defaults kernel compilation to a single worker on some Windows installations. Large
+        # solver kernels (notably MPM P2G/G2P and IPC contact) can then take tens of minutes despite an idle many-core
+        # CPU. Keep CPU execution single-threaded as before, but compile independent kernels in parallel. Sixteen is a
+        # conservative cap that avoids oversubscribing high-core-count workstations; QD_NUM_THREADS remains the
+        # explicit override for constrained or dedicated build machines.
         qd_init_kwargs.update(
             cpu_max_num_threads=1,
+            num_compile_threads=min(os.cpu_count() or 1, 16),
         )
 
     if seed is not None:

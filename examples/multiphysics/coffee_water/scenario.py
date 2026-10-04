@@ -2,8 +2,7 @@ from dataclasses import dataclass, field
 
 from .assets import CoffeeWaterAssets
 from .boundaries import CoffeeWaterBoundaryConfig
-from .config import CoffeeWaterMaterialConfig, CoffeeWaterSolverConfig
-from .task import CoffeeWaterTaskConfig
+from .config import CoffeeWaterMaterialConfig, CoffeeWaterSolverConfig, CoffeeWaterTaskConfig
 
 
 @dataclass(frozen=True)

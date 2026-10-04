@@ -1,14 +1,33 @@
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+from .config import CoffeeWaterTaskConfig
+from .implementation import MotionTarget, SceneObservation, observe_scene, step_scene, update_motion
+
+if TYPE_CHECKING:
+    from .scene import CoffeeWaterRuntime
 
 
-@dataclass(frozen=True)
-class CoffeeWaterTaskConfig:
-    """Robot grasp geometry and task timing independent of assets and fluid numerics."""
+@dataclass
+class CoffeeWaterController:
+    config: CoffeeWaterTaskConfig
+    step_index: int = 0
+    observation: SceneObservation | None = None
+    ik_error: float | None = None
 
-    cup_grip_height: float = 0.09
-    cup_grip_opening: float = 0.034
-    recovery_grip_opening: float = 0.032
-    rod_grip_height: float = 0.15
-    tool_center: tuple[float, float, float] = (0.14747, 0.001786, 0.0)
-    parallel_start: float = 6.4
-    motion_end: float = 28.0
+    def reset(self, runtime: "CoffeeWaterRuntime"):
+        if self.config != runtime.config.task:
+            raise ValueError("Controller task configuration must match the scene task configuration.")
+        self.step_index = 0
+        self.observation = observe_scene(runtime)
+        self.ik_error = None
+
+    def step(self, runtime: "CoffeeWaterRuntime") -> MotionTarget:
+        if self.observation is None:
+            self.reset(runtime)
+        time = (self.step_index + 1) * runtime.config.solver.control_dt
+        target, self.ik_error = update_motion(runtime, time, self.observation)
+        step_scene(runtime)
+        self.observation = observe_scene(runtime)
+        self.step_index += 1
+        return target

@@ -20,9 +20,10 @@ table, sand bed or shovel. A scenario groups these objects only for convenient c
 
 ### Coffee pouring and cleanup
 
-`examples.pbstf_coffee_water` is the validated executable. Its PBSTF, liquid material, task assets and collider
-configuration live under `examples.multiphysics.coffee_water`. `examples.multiflow.pbstf_coffee_water` forwards to
-the same implementation.
+`examples.multiphysics.coffee_water.build_scene(config)` accepts `CoffeeWaterScenarioConfig` and returns named liquid,
+cup, robot, rod and sponge handles. `CoffeeWaterController.step(runtime)` applies the coordinated pour, stir and wipe
+motion and advances one control step. `examples.pbstf_coffee_water` and `examples.multiflow.pbstf_coffee_water` are
+executable forwarding paths for the same package implementation.
 
 ### Table wiping
 
