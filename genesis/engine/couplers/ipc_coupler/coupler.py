@@ -45,7 +45,15 @@ if TYPE_CHECKING or UIPC_AVAILABLE:
         StableNeoHookean,
         StrainLimitingBaraffWitkinShell,
     )
-    from uipc.core import Engine, World, Scene, AffineBodyStateAccessorFeature, ContactElement, SubsceneElement
+    from uipc.core import (
+        Engine,
+        World,
+        Scene,
+        AffineBodyStateAccessorFeature,
+        FiniteElementStateAccessorFeature,
+        ContactElement,
+        SubsceneElement,
+    )
     from uipc.geometry import GeometrySlot, SimplicialComplex, SimplicialComplexSlot
     from uipc.gui import SceneGUI
 
@@ -150,6 +158,11 @@ class IPCCoupler(RBC):
         self._ipc_cloth_contacts: dict["FEMEntity", ContactElement] = {}
         self._ipc_abd_contacts: dict["RigidEntity", ContactElement] = {}
         self._ipc_ground_contacts: dict["RigidEntity", ContactElement] = {}
+
+        # ==== FEM Geometry & State ====
+        self._fem_state_feature: FiniteElementStateAccessorFeature | None = None
+        self._fem_state_geom: SimplicialComplex | None = None
+        self._fem_vertex_offsets: dict["FEMEntity", list[int]] = {}
 
         # ==== Entity Coupling Configuration ====
         self._coup_type_by_entity: dict["RigidEntity", COUPLING_TYPE] = {}
@@ -710,6 +723,51 @@ class IPCCoupler(RBC):
         assert gs.logger is not None
         assert self._ipc_world is not None
 
+        if self.fem_solver.is_active:
+            self._fem_state_feature = cast(
+                FiniteElementStateAccessorFeature,
+                self._ipc_world.features().find(FiniteElementStateAccessorFeature),
+            )
+            if self._fem_state_feature is None:
+                gs.raise_exception("IPC finite-element state accessor is unavailable.")
+
+            vertex_count = self._fem_state_feature.vertex_count()
+            expected_vertex_count = sum(entity.n_vertices for entity in self.fem_solver.entities) * self.sim._B
+            if vertex_count != expected_vertex_count:
+                gs.raise_exception(
+                    f"FEM vertex count mismatch: feature has {vertex_count}, expected {expected_vertex_count}."
+                )
+
+            self._fem_vertex_offsets = {
+                entity: [-1] * self.sim._B for entity in self.fem_solver.entities
+            }
+            visitor = SceneVisitor(self._ipc_scene)
+            for fem_geom_slot in visitor.geometries():
+                if not isinstance(fem_geom_slot, SimplicialComplexSlot):
+                    continue
+                fem_geom = fem_geom_slot.geometry()
+                meta = read_ipc_geometry_metadata(fem_geom)
+                if meta is None:
+                    continue
+                solver_type, env_idx, i_e = meta
+                if solver_type not in ("fem", "cloth"):
+                    continue
+
+                offset_attr = fem_geom.meta().find(uipc.builtin.backend_fem_vertex_offset)
+                if offset_attr is None:
+                    gs.raise_exception("IPC FEM geometry has no backend vertex offset.")
+                offset = int(np.asarray(uipc.view(offset_attr)).reshape(-1)[0])
+                entity = cast("FEMEntity", self.fem_solver.entities[i_e])
+                self._fem_vertex_offsets[entity][env_idx] = offset
+
+            for entity, offsets in self._fem_vertex_offsets.items():
+                if any(offset < 0 or offset + entity.n_vertices > vertex_count for offset in offsets):
+                    gs.raise_exception(f"Invalid IPC FEM vertex offsets for entity {entity.uid}.")
+
+            self._fem_state_geom = self._fem_state_feature.create_geometry()
+            self._fem_state_geom.vertices().create(uipc.builtin.position, np.zeros(3, dtype=np.float64))
+            self._fem_state_geom.vertices().create(uipc.builtin.velocity, np.zeros(3, dtype=np.float64))
+
         # No ABD bodies, feature not needed
         abd_links = list(self._abd_slots_by_link.keys())
         n_abd_links = len(abd_links)
@@ -812,7 +870,7 @@ class IPCCoupler(RBC):
         self._ipc_world.retrieve()
 
         # Step 4: Retrieve states
-        self._retrieve_fem_states()
+        self._retrieve_fem_states(f)
         self._retrieve_rigid_states()
 
         # Step 5: Post-advance processing (per entity type)
@@ -1003,42 +1061,40 @@ class IPCCoupler(RBC):
                 velocity=None, dofs_idx=slice(entity.dof_start, entity.dof_start + 6), skip_forward=True
             )
 
-    def _retrieve_fem_states(self):
+    def _retrieve_fem_states(self, f):
         # IPC world advance/retrieve is handled at Scene level
         # This method handles both volumetric FEM (3D) and cloth (2D) post-processing
 
         if not self.fem_solver.is_active:
             return
+        if self._fem_state_feature is None or self._fem_state_geom is None:
+            gs.raise_exception("IPC finite-element state accessor was not initialized.")
 
-        # Gather FEM states (both volumetric and cloth) using metadata filtering
-        visitor = SceneVisitor(self._ipc_scene)
+        self._fem_state_feature.copy_to(self._fem_state_geom)
+        position_attr = self._fem_state_geom.vertices().find(uipc.builtin.position)
+        velocity_attr = self._fem_state_geom.vertices().find(uipc.builtin.velocity)
+        if position_attr is None or velocity_attr is None:
+            gs.raise_exception("IPC FEM state geometry has no position/velocity attribute.")
+        positions = position_attr.view().reshape(-1, 3)
+        velocities = velocity_attr.view().reshape(-1, 3)
 
-        # Collect FEM and cloth geometries using metadata
-        fem_positions_by_entity: dict["FEMEntity", list[np.ndarray]] = {
-            entity: [np.array([]) for _ in range(self.sim._B)] for entity in self.fem_solver.entities
-        }
-        for fem_geom_slot in visitor.geometries():
-            if not isinstance(fem_geom_slot, SimplicialComplexSlot):
-                continue
-
-            fem_geom = fem_geom_slot.geometry()
-            if fem_geom.dim() not in (2, 3):
-                continue
-            meta = read_ipc_geometry_metadata(fem_geom)
-            if meta is None:
-                continue
-            solver_type, env_idx, i_e = meta
-            if solver_type not in ("fem", "cloth"):
-                continue
-
-            entity = cast("FEMEntity", self.fem_solver.entities[i_e])
-            (transformed_geom,) = uipc.geometry.apply_transform(fem_geom)
-            fem_positions_by_entity[entity][env_idx] = transformed_geom.positions().view().reshape(-1, 3)
-
-        # Update FEM entities using filtered geometries
-        for entity, geom_positions in fem_positions_by_entity.items():
-            geom_positions = np.stack(geom_positions, axis=0, dtype=gs.np_float)
-            entity.set_pos(0, geom_positions)
+        # IPC owns FEM integration. Mirror both parts of its dynamic state into Genesis so public entity state,
+        # checkpoints and downstream couplers observe the same motion as IPC.
+        for entity, offsets in self._fem_vertex_offsets.items():
+            entity_positions = np.stack(
+                [positions[offset : offset + entity.n_vertices] for offset in offsets],
+                axis=0,
+                dtype=gs.np_float,
+            )
+            entity_velocities = np.stack(
+                [velocities[offset : offset + entity.n_vertices] for offset in offsets],
+                axis=0,
+                dtype=gs.np_float,
+            )
+            # IPC has already advanced from frame f to the committed frame f + 1. Writing the old frame and letting
+            # FEM integrate once more would either discard velocity or advance positions twice.
+            entity.set_pos(f + 1, entity_positions)
+            entity.set_vel(f + 1, entity_velocities)
 
     def _retrieve_rigid_states(self):
         """

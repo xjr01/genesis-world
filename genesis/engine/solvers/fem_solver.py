@@ -1408,6 +1408,12 @@ class FEMSolver(Solver):
 
     def substep_post_coupling(self, f):
         if self.is_active:
+            # IPCCoupler owns FEM integration and writes the complete committed position/velocity state to frame
+            # f + 1. Running the native FEM position update afterwards would integrate the IPC velocity a second time.
+            from genesis.engine.couplers import IPCCoupler
+
+            if isinstance(self.sim._coupler, IPCCoupler):
+                return
             self.compute_pos(f)
             if self._constraints_initialized:
                 self.apply_hard_constraints(f)

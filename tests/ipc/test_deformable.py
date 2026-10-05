@@ -26,6 +26,38 @@ if TYPE_CHECKING:
     from genesis.engine.couplers import IPCCoupler
 
 
+@pytest.mark.required
+def test_fem_public_state_includes_ipc_velocity(show_viewer):
+    dt = 0.01
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(dt=dt, gravity=(0.0, 0.0, -9.8)),
+        coupler_options=gs.options.IPCCouplerOptions(contact_enable=False),
+        show_viewer=show_viewer,
+    )
+    body = scene.add_entity(
+        morph=gs.morphs.Box(pos=(0.0, 0.0, 0.5), size=(0.1, 0.1, 0.1)),
+        material=gs.materials.FEM.Elastic(E=5.0e4, nu=0.45, rho=1000.0),
+    )
+    scene.build()
+
+    position_before = tensor_to_array(body.get_state().pos).copy()
+    scene.step()
+    state_after = body.get_state()
+    position_after = tensor_to_array(state_after.pos)
+    velocity_after = tensor_to_array(state_after.vel)
+
+    assert np.linalg.norm(velocity_after, axis=-1).max() > 0.0
+    assert_allclose(velocity_after, (position_after - position_before) / dt, atol=1e-4)
+
+    scene.reset()
+    state_reset = body.get_state()
+    assert_allclose(tensor_to_array(state_reset.pos), position_before, atol=1e-6)
+    assert_allclose(tensor_to_array(state_reset.vel), 0.0, atol=1e-6)
+
+    scene.step()
+    assert_allclose(tensor_to_array(body.get_state().vel), velocity_after, atol=1e-5)
+
+
 @pytest.mark.slow  # ~250s
 @pytest.mark.required
 @pytest.mark.parametrize("coup_type", ["two_way_soft_constraint", "external_articulation"])
