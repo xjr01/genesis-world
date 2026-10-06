@@ -8,7 +8,7 @@ from .hybrid_entity import HybridEntity
 from .ipbf_entity import IPBFEntity
 from .ipbstf_entity import IPBSTFEntity
 from .mpm_entity import MPMEntity
-from .pbd_entity import PBD2DEntity, PBD3DEntity, PBDFreeParticleEntity, PBDParticleEntity
+from .pbd_entity import PBD2DEntity, PBD3DEntity, PBD3DSolidEntity, PBDFreeParticleEntity, PBDParticleEntity
 from .pbstf_entity import PBSTFEntity
 from .rigid_entity import KinematicEntity, RigidEntity
 from .sf_entity import SFParticleEntity

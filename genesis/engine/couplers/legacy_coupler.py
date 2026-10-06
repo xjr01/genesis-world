@@ -964,10 +964,17 @@ class LegacyCoupler(RBC):
         collider_static_config: qd.template(),
     ):
         for i_p, i_b in qd.ndrange(self.pbd_solver._n_particles, self.sph_solver._B):
-            if self.pbd_solver.particles_ng_reordered[i_p, i_b].active:
+            if self.pbd_solver.particles_ng_reordered[i_p, i_b].active and not (
+                self.pbd_solver.particles_ng_reordered[i_p, i_b].is_native_owned
+            ):
                 # NOTE: Couldn't figure out a good way to handle collision with non-free particle. Such collision is not phsically plausible anyway.
                 for i_g in range(self.rigid_solver.n_geoms):
-                    if geoms_info.needs_coup[i_g]:
+                    # Dormant fragment-shadow links carry the runtime contact switch off (see
+                    # is_contact_enabled in array_class.py): their geoms respond to no PBD particle while the
+                    # fragment is still PBD-owned, which also excludes a native fragment's own derived particles.
+                    if geoms_info.needs_coup[i_g] and links_state.is_contact_enabled[
+                        geoms_info.link_idx[i_g], i_b
+                    ]:
                         (
                             self.pbd_solver.particles_reordered[i_p, i_b].pos,
                             self.pbd_solver.particles_reordered[i_p, i_b].vel,
@@ -1096,25 +1103,35 @@ class LegacyCoupler(RBC):
         if signed_dist < self.pbd_solver.particle_size / 2:  # skip non-penetration particles
             stiffness = 1.0  # value in [0, 1]
 
-            # we don't consider friction for now
-            # friction = 0.15
-            # vel_rigid = self.rigid_solver._func_vel_at_point(
-            #     pos_world=pos_world,
-            #     link_idx=geoms_info.link_idx[geom_idx],
-            #     i_b=batch_idx,
-            #     links_state=links_state,
-            # )
-            # rvel = vel - vel_rigid
-            # rvel_normal_magnitude = rvel.dot(contact_normal)  # negative if inward
-            # rvel_tan = rvel - rvel_normal_magnitude * contact_normal
-            # rvel_tan_norm = rvel_tan.norm(gs.EPS)
-
             #################### rigid -> particle ####################
 
             energy_loss = 0.0  # value in [0, 1]
-            new_pos = pos_world + stiffness * contact_normal * (self.pbd_solver.particle_size / 2 - signed_dist)
+            penetration = self.pbd_solver.particle_size / 2 - signed_dist
+            contact_delta = stiffness * contact_normal * penetration
+            new_pos = pos_world + contact_delta
             prev_pos = self.pbd_solver.particles_reordered[i, batch_idx].ipos
-            new_vel = (new_pos - prev_pos) / self.pbd_solver._substep_dt
+            if self.pbd_solver.particles_reordered[i, batch_idx].free and (
+                self.pbd_solver.particles_info_reordered[i, batch_idx].material_type == self.pbd_solver.MATERIAL.SOLID
+            ):
+                friction_delta = self._func_pbd_solid_geom_friction(
+                    i,
+                    batch_idx,
+                    geom_idx,
+                    new_pos,
+                    prev_pos,
+                    contact_normal,
+                    penetration,
+                    links_state,
+                    geoms_info,
+                )
+                contact_delta += friction_delta
+                new_pos = pos_world + contact_delta
+            if self.pbd_solver.particles_reordered[i, batch_idx].free and (
+                self.pbd_solver.particles_info_reordered[i, batch_idx].material_type == self.pbd_solver.MATERIAL.SOLID
+            ):
+                new_vel = vel + contact_delta / self.pbd_solver._substep_dt
+            else:
+                new_vel = (new_pos - prev_pos) / self.pbd_solver._substep_dt
 
             #################### particle -> rigid ####################
             if geoms_info.is_coup_reaction_enabled[geom_idx]:
@@ -1125,6 +1142,48 @@ class LegacyCoupler(RBC):
                 )
 
         return new_pos, new_vel, contact_normal
+
+    @qd.func
+    def _func_pbd_solid_geom_friction(
+        self,
+        i,
+        batch_idx,
+        geom_idx,
+        new_pos,
+        prev_pos,
+        contact_normal,
+        penetration,
+        links_state: array_class.LinksState,
+        geoms_info: array_class.GeomsInfo,
+    ):
+        """Tangential friction for a solid PBD particle against a rigid geom.
+
+        Applies the unified particle physics contact friction (Macklin et al. 2014, eq. 23/24), the
+        same model as `pbd_solver._func_apply_ball_friction`: the tangential displacement relative to
+        the geom since the substep start is canceled when it fits inside the static cone and otherwise
+        scaled by `mu_k * penetration / |dpos_tan|`. The pair coefficient combines the particle's
+        material friction with the geom's coupling friction by maximum, like a rigid geom pair, and is
+        used directly. A zero-friction pair produces zero tangential correction. The geom receives
+        the opposite reaction force from the same contact correction.
+        """
+        vel_rigid = self.rigid_solver._func_vel_at_point(
+            pos_world=new_pos, link_idx=geoms_info.link_idx[geom_idx], i_b=batch_idx, links_state=links_state
+        )
+        dv = (new_pos - prev_pos) - vel_rigid * self.pbd_solver._substep_dt
+        dpos_tan = -(dv - contact_normal * contact_normal.dot(dv))
+        dpos_tan_norm = dpos_tan.norm()
+        mu_s = qd.max(
+            self.pbd_solver.particles_info_reordered[i, batch_idx].mu_s, geoms_info.coup_friction[geom_idx]
+        )
+        mu_k = qd.max(
+            self.pbd_solver.particles_info_reordered[i, batch_idx].mu_k, geoms_info.coup_friction[geom_idx]
+        )
+        # the slip scale divides by the tangential displacement, which sits far below sqrt(f32
+        # epsilon); the guard is an explicit tiny constant, not the squared-epsilon `.norm(eps)`
+        correction = dpos_tan
+        if dpos_tan_norm >= mu_s * penetration:
+            correction *= qd.min(1.0, mu_k * penetration / qd.max(dpos_tan_norm, 1e-30))
+        return correction
 
     def preprocess(self, f):
         # Implicit finite element method (FEM) constraints participate in inertia assembly before the coupling phase.

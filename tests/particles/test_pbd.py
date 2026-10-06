@@ -1,3 +1,5 @@
+import math
+
 import numpy as np
 import torch
 
@@ -700,3 +702,321 @@ def test_one_way_rigid_surface_collision(n_envs, is_regular_grid, options_type, 
         assert_allclose(particles_pos[..., 1:], particles_initial[None, :, 1:], atol=1e-6)
     if n_envs:
         assert_allclose(particles_pos[0], particles_initial, atol=1e-6)
+
+
+@pytest.mark.required
+@pytest.mark.precision("32")
+@pytest.mark.parametrize("n_envs", [0, 2])
+def test_solid_fracture_and_plasticity(n_envs, show_viewer):
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=2e-3,
+            substeps=5,
+        ),
+        pbd_options=gs.options.PBDOptions(
+            particle_size=0.005,
+            lower_bound=(-1.0, -1.0, 0.0),
+            upper_bound=(1.0, 1.0, 0.6),
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(0.8, -0.8, 0.5),
+            camera_lookat=(0.05, 0.0, 0.15),
+        ),
+        show_viewer=show_viewer,
+    )
+    scene.add_entity(
+        morph=gs.morphs.Plane(),
+        material=gs.materials.Rigid(),
+    )
+    # bar snapped onto a corner: two rigid fragments held by one breakable seam
+    bar = scene.add_entity(
+        morph=gs.morphs.Box(
+            lower=(-0.01, -0.01, 0.12),
+            upper=(0.01, 0.01, 0.24),
+            quat=(0.9239, 0.0, 0.3827, 0.0),
+        ),
+        material=gs.materials.PBD.Solid(
+            sampler="regular",
+            stiffness=1.0,
+            fracture_threshold=0.05,
+            fragment_seeds=[(0.0, 0.0, -0.025), (0.0, 0.0, 0.025)],
+        ),
+    )
+    plastic = scene.add_entity(
+        morph=gs.morphs.Box(
+            lower=(0.60, -0.04, 0.2),
+            upper=(0.68, 0.04, 0.28),
+        ),
+        material=gs.materials.PBD.Solid(
+            sampler="regular",
+            stiffness=1.0,
+            yield_threshold=0.4,
+            plastic_creep=0.05,
+        ),
+    )
+    camera = scene.add_camera(
+        res=(128, 128),
+        pos=(0.3, -0.5, 0.35),
+        lookat=(0.05, 0.0, 0.2),
+        near=0.01,
+    )
+    scene.build(n_envs=n_envs)
+    solver = scene.pbd_solver
+    initial_snapshot = scene.get_state()
+    n_bonds = solver.n_bonds
+    z0 = tensor_to_array(bar.get_particles_pos()).reshape((-1, bar.n_particles, 3))[..., 2].mean(axis=-1)
+
+    # the fragments' render meshes are closed and their volumes sum to the original box volume
+    vverts_rest = bar._vverts.reshape((-1, 3, 3))
+    frag_of_tri = bar._vvert_fragments.reshape((-1, 3))[:, 0]
+    vol_sum = 0.0
+    for f in np.unique(frag_of_tri):
+        tris_f = vverts_rest[frag_of_tri == f]
+        keys, inverse = np.unique(tris_f.reshape(-1, 3), axis=0, return_inverse=True)
+        welded = keys[inverse.reshape(-1, 3)]
+        vol_sum += np.einsum("ij,ij->i", welded[:, 0], np.cross(welded[:, 1], welded[:, 2])).sum() / 6.0
+        welded_edges = np.sort(inverse.reshape(-1, 3)[:, [0, 1, 1, 2, 2, 0]].reshape(-1, 2), axis=1)
+        assert (np.unique(welded_edges, axis=0, return_counts=True)[1] == 2).all()
+    assert_allclose(vol_sum, 0.02 * 0.02 * 0.12, rtol=0.02, atol=1e-9)
+
+    # the displayed mesh follows particle edits and scene reset without needing a step
+    bar_vv = slice(bar.vvert_start, bar.vvert_start + bar.n_vverts)
+    v_rest = qd_to_numpy(solver.get_state_render()[0], transpose=True)[:, bar_vv].copy()
+    cap_faces = bar._vfaces[bar._vvert_seams[bar._vfaces[:, 0]] >= 0]
+    assert cap_faces.shape[0] > 0
+    cap_triangles = v_rest[:, cap_faces]
+    cap_edges = cap_triangles[..., 1:, :] - cap_triangles[..., 0, None, :]
+    assert_equal(np.linalg.norm(np.cross(cap_edges[..., 0, :], cap_edges[..., 1, :]), axis=-1), 0.0)
+    image_rest = camera.render()[0]
+    bar.set_particles_pos(tensor_to_array(bar.get_particles_pos()) + np.array([0.05, 0.0, 0.0]))
+    v_moved = qd_to_numpy(solver.get_state_render()[0], transpose=True)[:, bar_vv].copy()
+    assert_allclose(v_moved - v_rest, np.array([[0.05, 0.0, 0.0]]), atol=1e-6)
+    assert not np.array_equal(camera.render()[0], image_rest)
+    scene.reset()
+    v_reset = qd_to_numpy(solver.get_state_render()[0], transpose=True)[:, bar_vv].copy()
+    assert_allclose(v_reset, v_rest, atol=1e-6)
+    assert_equal(camera.render()[0], image_rest)
+
+    # Uneven overlapping memberships must conserve mass-weighted translation in one projection.
+    memberships = qd_to_numpy(solver.particle_cluster_ptr.member_count)
+    assert np.ptp(memberships[plastic.particle_start : plastic.particle_end]) > 0
+    p_plastic = tensor_to_array(plastic.get_particles_pos())
+    deformation = np.zeros_like(p_plastic)
+    deformation[..., 0] = 0.003 * np.sin(np.arange(plastic.n_particles))
+    plastic.set_particles_pos(p_plastic + deformation)
+    p_before = tensor_to_array(solver.get_state(0).pos).astype(np.float64)
+    mass = qd_to_numpy(solver.particles_info.mass).astype(np.float64)
+    solver._kernel_solve_shape_matching(0)
+    p_after = tensor_to_array(solver.get_state(0).pos).astype(np.float64)
+    com_shift = ((p_after - p_before) * mass[:, None]).sum(axis=-2) / mass.sum()
+    assert_allclose(com_shift, 0.0, atol=2e-7)
+    scene.reset(initial_snapshot)
+
+    # An unloaded stationary solid must retain its seams and cannot acquire systematic velocity.
+    solver.set_gravity((0.0, 0.0, 0.0))
+    p_static = tensor_to_array(solver.get_state(0).pos).copy()
+    for _ in range(20):
+        scene.step()
+    assert_allclose(tensor_to_array(solver.get_state(0).pos), p_static, atol=5e-6)
+    assert_allclose(tensor_to_array(solver.get_state(0).vel), 0.0, atol=1e-3)
+    assert qd_to_numpy(solver.bonds_state.alive, transpose=True).all()
+    assert (qd_to_numpy(solver.seams_state.damage, transpose=True) == 0.0).all()
+    scene.reset(initial_snapshot)
+    solver.set_gravity((0.0, 0.0, -9.81))
+
+    for _ in range(30):
+        scene.step()
+
+    # free fall: the seam holds and the centroid follows the analytic trajectory
+    assert qd_to_numpy(solver.bonds_state.alive, transpose=True).all()
+    assert (qd_to_numpy(solver.seams_state.damage, transpose=True) == 0.0).all()
+    assert not qd_to_numpy(solver.seams_state.is_dead, transpose=True).any()
+    z_fall = tensor_to_array(bar.get_particles_pos()).reshape((-1, bar.n_particles, 3))[..., 2].mean(axis=-1)
+    assert_allclose(z0 - z_fall, 0.5 * 9.81 * (30 * scene.dt) ** 2, atol=2e-3)
+
+    bar.set_particles_vel((0.0, 0.0, -4.0))
+    for _ in range(80):
+        scene.step()
+
+    # the slam snaps the bar: the seam opens fully and the two fragments separate
+    alive = qd_to_numpy(solver.bonds_state.alive, transpose=True)
+    assert (alive.sum(axis=-1) < n_bonds).all()
+    alive_count = qd_to_numpy(solver.seams_state.alive_count, transpose=True)
+    seams_dead = qd_to_numpy(solver.seams_state.is_dead, transpose=True)
+    assert (alive_count == 0).any(axis=-1).all()
+    # Fully broken seams record death atomically; displayed caps also require separated components.
+    assert (seams_dead == (alive_count == 0)).all()
+    frag = qd_to_numpy(solver.particles_info.fragment)
+    pos = tensor_to_array(bar.get_particles_pos()).reshape((-1, bar.n_particles, 3))
+    bar_frag = frag[bar.particle_start : bar.particle_end]
+    frag_ids = np.unique(bar_frag)
+    frag_cm = [pos[:, bar_frag == f].mean(axis=-2) for f in frag_ids]
+    assert (np.linalg.norm(frag_cm[0] - frag_cm[1], axis=-1) > 0.1).all()
+
+    # fragments stay rigid: no rendered face stretched, no tunneling, no NaN
+    assert np.isfinite(pos).all()
+    assert (pos[..., 2].min(axis=-1) >= -1e-3).all()
+    vverts_pos, _, _ = solver.get_state_render()
+    vverts_pos = qd_to_numpy(vverts_pos, transpose=True)
+    bar_vv = vverts_pos[:, bar.vvert_start : bar.vvert_start + bar.n_vverts]
+    cap_triangles = bar_vv[:, cap_faces]
+    cap_edges = cap_triangles[..., 1:, :] - cap_triangles[..., 0, None, :]
+    assert (np.linalg.norm(np.cross(cap_edges[..., 0, :], cap_edges[..., 1, :]), axis=-1) > 0.0).all()
+    e_rest = np.linalg.norm(bar._vverts[bar._vfaces[:, 1]] - bar._vverts[bar._vfaces[:, 0]], axis=-1)
+    e_now = np.linalg.norm(bar_vv[..., bar._vfaces[:, 1], :] - bar_vv[..., bar._vfaces[:, 0], :], axis=-1)
+    assert (e_now / np.maximum(e_rest, 1e-12) < 1.5).all()
+
+    # the plastic box dented without breaking: rest shape crept measurably
+    rest = qd_to_numpy(solver.particles_solid_rest, transpose=True)
+    rest_drift = np.abs(rest[:, plastic.particle_start : plastic.particle_end] - plastic.init_particles[None]).max(
+        axis=(-2, -1)
+    )
+    assert (rest_drift > 1e-4).all()
+    pos_plastic = tensor_to_array(plastic.get_particles_pos()).reshape((-1, plastic.n_particles, 3))
+    assert np.isfinite(pos_plastic).all()
+    assert (pos_plastic[..., 2].min(axis=-1) >= -1e-3).all()
+    extent_plastic = pos_plastic[..., 2].max(axis=-1) - pos_plastic[..., 2].min(axis=-1)
+    assert (extent_plastic < 0.09).all()
+
+    deformed_snapshot = scene.get_state()
+    deformed_state = solver.get_state(0)
+    scene.reset(initial_snapshot)
+    assert_equal(solver.get_state(0).solid_rest[:, plastic.particle_start : plastic.particle_end], plastic.init_particles)
+    deformed_snapshot.serializable()
+    scene.reset(deformed_snapshot)
+    assert_equal(solver.get_state(0).solid_rest, deformed_state.solid_rest)
+    assert_equal(solver.get_state(0).cluster_rest_cm, deformed_state.cluster_rest_cm)
+    assert_equal(solver.get_state(0).seams_is_dead, deformed_state.seams_is_dead)
+
+    # reset restores the intact bodies, and they survive a few more steps unbroken
+    scene.reset(initial_snapshot)
+    assert qd_to_numpy(solver.bonds_state.alive, transpose=True).all()
+    assert not qd_to_numpy(solver.seams_state.is_dead, transpose=True).any()
+    restored_vertices = qd_to_numpy(solver.get_state_render()[0], transpose=True)[:, bar.vvert_start : bar.vvert_end]
+    cap_triangles = restored_vertices[:, cap_faces]
+    cap_edges = cap_triangles[..., 1:, :] - cap_triangles[..., 0, None, :]
+    assert_equal(np.linalg.norm(np.cross(cap_edges[..., 0, :], cap_edges[..., 1, :]), axis=-1), 0.0)
+    pos_reset = tensor_to_array(bar.get_particles_pos()).reshape((-1, bar.n_particles, 3))
+    assert_allclose(pos_reset[..., 2].mean(axis=-1), z0, atol=1e-6)
+    for _ in range(10):
+        scene.step()
+    assert qd_to_numpy(solver.bonds_state.alive, transpose=True).all()
+
+    snapshot = scene.get_state()
+    rest_snapshot = solver.get_state(0)
+    pos_snapshot = bar.get_particles_pos().clone()
+    render_snapshot = qd_to_numpy(solver.get_state_render()[0], transpose=True).copy()
+    bar_vverts = slice(bar.vvert_start, bar.vvert_start + bar.n_vverts)
+    envs_idx = n_envs - 1 if n_envs else None
+    offset = torch.tensor([0.05, 0.0, 0.0], dtype=gs.tc_float, device=gs.device)
+    bar.set_particles_pos(bar.get_particles_pos(envs_idx=envs_idx) + offset, envs_idx=envs_idx)
+    render_moved = qd_to_numpy(solver.get_state_render()[0], transpose=True).copy()
+    assert_allclose(render_moved[-1, bar_vverts] - render_snapshot[-1, bar_vverts], [0.05, 0.0, 0.0], atol=1e-6)
+    if n_envs:
+        assert_equal(render_moved[0], render_snapshot[0])
+
+    snapshot.serializable()
+    scene.reset(snapshot, envs_idx=envs_idx)
+    state_restored = solver.get_state(0)
+    assert_allclose(bar.get_particles_pos(), pos_snapshot, atol=1e-6)
+
+    assert_allclose(qd_to_numpy(solver.get_state_render()[0], transpose=True), render_snapshot, atol=1e-6)
+    assert_equal(state_restored.solid_rest, rest_snapshot.solid_rest)
+    assert_equal(state_restored.cluster_rest_cm, rest_snapshot.cluster_rest_cm)
+    assert_equal(state_restored.bonds_alive, rest_snapshot.bonds_alive)
+    assert_equal(state_restored.seams_alive_count, rest_snapshot.seams_alive_count)
+    assert_equal(state_restored.seams_damage, rest_snapshot.seams_damage)
+    assert_equal(state_restored.seams_is_dead, rest_snapshot.seams_is_dead)
+
+    bar.set_particles_pos([float("nan"), 0.0, 0.2], envs_idx=envs_idx)
+    with pytest.raises(gs.GenesisException, match="non-finite"):
+        solver.check_errno()
+    with pytest.raises(gs.GenesisException, match="non-finite"):
+        scene.step()
+    scene.reset(snapshot, envs_idx=envs_idx)
+    solver.check_errno()
+    assert_allclose(bar.get_particles_pos(), pos_snapshot, atol=1e-6)
+
+
+
+@pytest.mark.required
+@pytest.mark.parametrize("n_envs", [0, 2])
+@pytest.mark.parametrize("contact", ["table", "wall"])
+def test_solid_contact_friction(n_envs, contact, show_viewer):
+    # A single layer of particles removes tipping from the sliding and sticking checks.
+    is_table = contact == "table"
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=1.0 / 256.0 if is_table else 0.002,
+            substeps=2 if is_table else 1,
+            gravity=(0.0, 0.0, -9.81) if is_table else (0.0, 0.0, 0.0),
+        ),
+        rigid_options=gs.options.RigidOptions(gravity=(0.0, 0.0, 0.0)),
+        pbd_options=gs.options.PBDOptions(
+            particle_size=0.01,
+            lower_bound=(-2.0, -2.0, -2.0),
+            upper_bound=(2.0, 2.0, 2.0),
+        ),
+        show_viewer=show_viewer,
+    )
+    coefficients = ((0.0, 0.0), (0.2, 0.0), (0.2, 1.0), (0.2, 0.8)) if is_table else ((0.0, 0.0), (0.8, 0.8))
+    entities = []
+    platform = None
+    for i, (particle_mu, geom_mu) in enumerate(coefficients):
+        y = -0.6 + i * 0.4
+        is_moving = is_table and i == 3
+        rigid = scene.add_entity(
+            morph=gs.morphs.Box(
+                pos=(0.0, y, 0.15) if is_table else (-0.05, y, 0.4),
+                size=(0.9, 0.25, 0.1) if is_table else (0.1, 0.25, 0.8),
+                fixed=not is_moving,
+            ),
+            material=gs.materials.Rigid(rho=1e6, coup_friction=geom_mu, coup_softness=0.0),
+        )
+        if is_moving:
+            platform = rigid
+        entities.append(
+            scene.add_entity(
+                morph=gs.morphs.Box(
+                    pos=(0.0, y, 0.225) if is_table else (0.003, y, 0.3),
+                    size=(0.08, 0.08, 0.01) if is_table else (0.01, 0.08, 0.08),
+                ),
+                material=gs.materials.PBD.Solid(
+                    sampler="regular",
+                    static_friction=particle_mu,
+                    kinetic_friction=particle_mu,
+                    fracture_threshold=1.0,
+                    fragment_seeds=[(0.0, 0.0, 0.0)],
+                ),
+            )
+        )
+    scene.build(n_envs=n_envs)
+    if is_table:
+        # Preserve the settling duration while using exact binary displacement increments.
+        for _ in range(math.ceil(0.075 / scene.dt)):
+            scene.step(update_visualizer=False)
+        for i, entity in enumerate(entities):
+            entity.set_particles_vel((0.0, 0.0, 0.0) if i == 3 else (1.0, 0.0, 0.0))
+        platform.set_dofs_velocity([0.4, 0.0, 0.0, 0.0, 0.0, 0.0])
+    else:
+        for entity in entities:
+            entity.set_particles_vel((-0.5, 0.0, 0.5))
+    stopping_step = math.ceil(1.0 / (9.81 * scene.dt)) if is_table else None
+    for i in range(65 if is_table else 20):
+        scene.step(update_visualizer=False)
+        if is_table and i + 1 == stopping_step:
+            # The surface coefficient sets the stopping time ceil(v / (mu * g * dt)).
+            assert_allclose(entities[2].get_particles_vel(), 0.0, atol=1e-5)
+    velocities = [
+        tensor_to_array(entity.get_particles_vel()).reshape((-1, entity.n_particles, 3)) for entity in entities
+    ]
+    if is_table:
+        assert_allclose(velocities[0], [1.0, 0.0, 0.0], atol=1e-5)
+        assert_allclose(velocities[1][..., 0].mean(axis=-1), 1.0 - 0.2 * 9.81 * 65 * scene.dt, atol=2e-4)
+        assert_allclose(velocities[2], 0.0, atol=1e-5)
+        platform_velocity = tensor_to_array(platform.get_vel()).reshape((-1, 3))
+        assert_allclose(velocities[3][..., 0].mean(axis=-1), platform_velocity[:, 0], atol=1e-5)
+    else:
+        # Each particle preserves tangential motion at zero friction, including zero torque.
+        assert_allclose(velocities[0][..., 2], 0.5, atol=1e-5)
+        assert_allclose(velocities[1][..., 2], 0.0, atol=1e-5)

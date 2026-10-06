@@ -314,17 +314,20 @@ def sdf_func_true_sdf(geom_idx, pos_sdf, sdf_info: array_class.SDFInfo):
     """
     geom_sdf_res = sdf_info.geoms_info.sdf_res[geom_idx]
     base = qd.min(qd.floor(pos_sdf, gs.qd_int), geom_sdf_res - 2)
-    signed_dist = gs.qd_float(0.0)
-    for offset in qd.grouped(qd.ndrange(2, 2, 2)):
-        pos_cell = base + offset
-        w_xyz = 1 - qd.abs(pos_sdf - pos_cell)
-        w = w_xyz[0] * w_xyz[1] * w_xyz[2]
-        signed_dist = (
-            signed_dist
-            + w * sdf_info.geoms_sdf_val[sdf_func_ravel_cell_idx(pos_cell, geom_idx, geom_sdf_res, sdf_info)]
-        )
-
-    return signed_dist
+    values = qd.Vector.zero(gs.qd_float, 8)
+    for x, y, z in qd.static(qd.ndrange(2, 2, 2)):
+        pos_cell = base + qd.Vector([x, y, z])
+        values[4*x + 2*y + z] = sdf_info.geoms_sdf_val[
+            sdf_func_ravel_cell_idx(pos_cell, geom_idx, geom_sdf_res, sdf_info)
+        ]
+    fraction = pos_sdf - base
+    z00 = values[0] + (values[1] - values[0]) * fraction[2]
+    z01 = values[2] + (values[3] - values[2]) * fraction[2]
+    z10 = values[4] + (values[5] - values[4]) * fraction[2]
+    z11 = values[6] + (values[7] - values[6]) * fraction[2]
+    y0 = z00 + (z01 - z00) * fraction[1]
+    y1 = z10 + (z11 - z10) * fraction[1]
+    return y0 + (y1 - y0) * fraction[0]
 
 
 @qd.func

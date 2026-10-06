@@ -1198,6 +1198,10 @@ class PBDOptions(Options):
         Maximum number of iterations for the solving density constraints. Defaults to 1.
     max_viscosity_solver_iterations : int, optional
         Maximum number of iterations for the solving viscosity constraints. Defaults to 1.
+    max_shape_matching_solver_iterations : int, optional
+        Maximum number of iterations for solving shape-matching constraints of `PBD.Solid` entities per substep.
+        More iterations make intact bodies stiffer at higher compute cost; fracture detection is unaffected.
+        Defaults to 2.
     particle_size : float, optional
         Particle diameter in meters. Defaults to 1e-2.
     hash_grid_res : tuple, optional
@@ -1257,6 +1261,7 @@ class PBDOptions(Options):
     max_volume_solver_iterations: PositiveInt = 1
     max_density_solver_iterations: PositiveInt = 1
     max_viscosity_solver_iterations: PositiveInt = 1
+    max_shape_matching_solver_iterations: PositiveInt = 2
     particle_size: PositiveFloat = 1e-2
     hash_grid_res: Vec3FType | None = None
     hash_grid_cell_size: PositiveFloat | None = None

@@ -2,6 +2,9 @@ import numpy as np
 import torch
 
 import igl
+import manifold3d
+from scipy.spatial import cKDTree
+from typing import NamedTuple
 import trimesh
 
 import quadrants as qd
@@ -12,7 +15,12 @@ from genesis.engine.entities.particle_entity import ParticleEntity
 from genesis.options.solvers import PBDOptions, PBDUnifiedOptions
 import genesis.utils.geom as gu
 import genesis.utils.mesh as mu
+from genesis.utils.array_class import V_ANNOTATION
 from genesis.utils.misc import broadcast_tensor
+
+
+# Chunk length for nearest-particle queries at build time; bounds query memory on large visual meshes
+_NEAREST_QUERY_CHUNK = 1 << 16
 
 
 @qd.kernel
@@ -27,6 +35,26 @@ def kernel_bind_pbd_surface_vertices(
         vverts_info[i_v].support_idxs.fill(particle_start + particles_idx[i_v_])
         vverts_info[i_v].support_weights.fill(0.0)
         vverts_info[i_v].support_weights[0] = 1.0
+
+
+@qd.kernel
+def kernel_add_pbd_seams(
+    seam_start: int,
+    cluster_start: int,
+    seam_clusters: qd.types.ndarray(ndim=2),
+    seam_counts: qd.types.ndarray(ndim=1),
+    solver: V_ANNOTATION,
+    n_seams: int,
+    n_envs: int,
+):
+    for i_s_ in range(n_seams):
+        i_s = i_s_ + seam_start
+        solver.seams_info[i_s].i_c = seam_clusters[i_s_, 0] + cluster_start
+        solver.seams_info[i_s].j_c = seam_clusters[i_s_, 1] + cluster_start
+    for i_s_, i_b in qd.ndrange(n_seams, n_envs):
+        i_s = i_s_ + seam_start
+        solver.seams_state[i_s, i_b].alive_count = seam_counts[i_s_]
+        solver.seams_state[i_s, i_b].is_dead = seam_counts[i_s_] == 0
 
 
 class PBDBaseEntity(ParticleEntity):
@@ -66,10 +94,18 @@ class PBDBaseEntity(ParticleEntity):
                 ]
             )
 
+    def _revoke_native_fragment_ownership(self, particles_idx_local, envs_idx):
+        # A native-owned fragment's particle arrays are a derived view; the PBD-fragment bridge exports them and
+        # returns the fragment to PBD ownership so the following setter writes take effect on the real state.
+        bridge = self._sim._pbd_rigid_fragment_bridge
+        if bridge is not None:
+            bridge.revoke_native_ownership(self, particles_idx_local, envs_idx)
+
     @gs.assert_built
     def set_particles_pos(self, poss, particles_idx_local=None, envs_idx=None):
         envs_idx = self._scene._sanitize_envs_idx(envs_idx)
         particles_idx_local = self._sanitize_particles_idx_local(particles_idx_local, envs_idx)
+        self._revoke_native_fragment_ownership(particles_idx_local, envs_idx)
         particles_idx = particles_idx_local + self._particle_start
         poss = self._sanitize_particles_tensor(poss, gs.tc_float, particles_idx, envs_idx, (3,))
         self.solver._kernel_set_particles_pos(particles_idx, envs_idx, poss)
@@ -86,6 +122,7 @@ class PBDBaseEntity(ParticleEntity):
     def set_particles_vel(self, vels, particles_idx_local=None, envs_idx=None):
         envs_idx = self._scene._sanitize_envs_idx(envs_idx)
         particles_idx_local = self._sanitize_particles_idx_local(particles_idx_local, envs_idx)
+        self._revoke_native_fragment_ownership(particles_idx_local, envs_idx)
         particles_idx = particles_idx_local + self._particle_start
         vels = self._sanitize_particles_tensor(vels, gs.tc_float, particles_idx, envs_idx, (3,))
         self.solver._kernel_set_particles_vel(particles_idx, envs_idx, vels)
@@ -102,6 +139,7 @@ class PBDBaseEntity(ParticleEntity):
     def set_particles_active(self, actives, particles_idx_local=None, envs_idx=None):
         envs_idx = self._scene._sanitize_envs_idx(envs_idx)
         particles_idx_local = self._sanitize_particles_idx_local(particles_idx_local, envs_idx)
+        self._revoke_native_fragment_ownership(particles_idx_local, envs_idx)
         particles_idx = particles_idx_local + self._particle_start
         actives = self._sanitize_particles_tensor(actives, gs.tc_bool, particles_idx, envs_idx)
         self.solver._kernel_set_particles_active(particles_idx, envs_idx, actives)
@@ -120,6 +158,7 @@ class PBDBaseEntity(ParticleEntity):
             gs.raise_exception("PBDUnifiedSolver supports fixed particles and one-way rigid contact.")
         envs_idx = self._scene._sanitize_envs_idx(envs_idx)
         particles_idx_local = self._sanitize_particles_idx_local(particles_idx_local, envs_idx)
+        self._revoke_native_fragment_ownership(particles_idx_local, envs_idx)
         particles_idx = particles_idx_local + self._particle_start
         self._sim._coupler.kernel_attach_pbd_to_rigid_link(
             particles_idx, envs_idx, link_idx, self._scene.rigid_solver.dyn_state.links
@@ -654,6 +693,727 @@ class PBD3DEntity(PBDTetEntity):
     def elem_end(self):
         """The ending index of the elements in the global solver."""
         return self._elem_start + self.n_elems
+
+
+# Tolerance for cap-plane provenance validation, in world-space meters.
+_CAP_PLANE_TOL = 2e-6
+
+
+class FragmentVisualMesh(NamedTuple):
+    triangles: np.ndarray
+    owners: np.ndarray
+    seam_keys: np.ndarray
+    source_faces: np.ndarray
+
+
+def _cut_fragment_meshes(vertices, faces, centers):
+    """Intersect a closed surface with each convex Voronoi cell of `centers`.
+
+    Original-face provenance distinguishes the exterior from newly generated cuts. Every interior
+    face is then associated with the center pair defining its plane, including junction faces. The
+    same center partition assigns the solid particles, so both representations have one boundary.
+    """
+    source_id = manifold3d.Manifold.reserve_ids(1)
+    solid = manifold3d.Manifold(
+        manifold3d.Mesh64(
+            vertices.astype(np.float64),
+            faces.astype(np.uint64),
+            run_index=np.array([0, 3 * len(faces)], dtype=np.uint64),
+            run_original_id=np.array([source_id], dtype=np.uint32),
+            face_id=np.arange(len(faces), dtype=np.uint64),
+        )
+    )
+    if solid.status() != manifold3d.Error.NoError or solid.volume() <= 0.0:
+        gs.raise_exception("PBD.Solid requires a closed, outward-wound visual mesh for splitting.")
+    triangles = []
+    owners = []
+    seams = []
+    source_faces = []
+    for k in range(len(centers)):
+        other = np.nonzero(np.arange(len(centers)) != k)[0]
+        normal = centers[k] - centers[other]
+        lengths = np.linalg.norm(normal, axis=1)
+        if (lengths <= gs.EPS).any():
+            gs.raise_exception("PBD.Solid requires distinct fragment centers.")
+        normal /= lengths[:, None]
+        offset = np.einsum("ij,ij->i", normal, (centers[k] + centers[other]) / 2)
+        cut = solid
+        cap_ids = []
+        cap_neighbors = []
+        for neighbor, plane_n, plane_d in zip(other, normal, offset):
+            cut = cut.trim_by_plane(tuple(plane_n), float(plane_d))
+            new_ids = np.setdiff1d(cut.to_mesh64().run_original_id, [source_id, *cap_ids])
+            cap_ids.extend(new_ids)
+            cap_neighbors.extend([neighbor] * len(new_ids))
+        if cut.status() != manifold3d.Error.NoError or cut.volume() <= 0.0:
+            gs.raise_exception(f"PBD.Solid visual fragment {k} is empty or invalid.")
+        mesh = cut.to_mesh64()
+        tris = mesh.vert_properties[mesh.tri_verts]
+        original_ids = np.repeat(mesh.run_original_id, np.diff(mesh.run_index) // 3)
+        source_idx = np.array(mesh.face_id, dtype=gs.np_int)
+        is_triangle = (
+            (tris[:, 0] != tris[:, 1]).any(axis=1)
+            & (tris[:, 1] != tris[:, 2]).any(axis=1)
+            & (tris[:, 2] != tris[:, 0]).any(axis=1)
+        )
+        tris, original_ids, source_idx = tris[is_triangle], original_ids[is_triangle], source_idx[is_triangle]
+        is_cap = original_ids != source_id
+        seam_keys = np.full(len(tris), -1, dtype=gs.np_int)
+        if is_cap.any():
+            cap_ids = np.array(cap_ids)
+            cap_neighbors = np.array(cap_neighbors)
+            order = np.argsort(cap_ids)
+            neighbor = cap_neighbors[order[np.searchsorted(cap_ids[order], original_ids[is_cap])]]
+            plane_n = centers[k] - centers[neighbor]
+            plane_n /= np.linalg.norm(plane_n, axis=1)[:, None]
+            plane_d = np.einsum("ij,ij->i", plane_n, (centers[k] + centers[neighbor]) / 2)
+            dev = np.abs(np.einsum("tvj,tj->tv", tris[is_cap], plane_n) - plane_d[:, None]).max(axis=1)
+            if (dev > _CAP_PLANE_TOL).any():
+                gs.raise_exception("PBD.Solid generated a cap outside its recorded fragment interface plane.")
+            seam_keys[is_cap] = np.minimum(k, neighbor) * len(centers) + np.maximum(k, neighbor)
+        source_idx[is_cap] = -1
+        triangles.append(tris)
+        owners.append(np.full(len(tris), k, dtype=gs.np_int))
+        seams.append(seam_keys)
+        source_faces.append(source_idx)
+    return FragmentVisualMesh(
+        np.concatenate(triangles), np.concatenate(owners), np.concatenate(seams), np.concatenate(source_faces)
+    )
+
+
+def _surface_vertex_uvs(tris, source_verts, source_faces, source_uvs, source_face_ids):
+    """Interpolate cut exterior UVs in their original source triangles using boolean provenance."""
+    source_corners = source_faces[source_face_ids]
+    barycentric = trimesh.triangles.points_to_barycentric(
+        np.repeat(source_verts[source_corners], 3, axis=0), tris.reshape(-1, 3)
+    ).reshape(-1, 3, 3)
+    return np.einsum("fvj,fju->fvu", barycentric, source_uvs[source_corners]).reshape(-1, 2)
+
+
+class PBD3DSolidEntity(PBDBaseEntity):
+    """
+    PBD rigid / fracturable solid entity represented by shape-matching particle clusters.
+
+    An unbreakable body (`fracture_threshold` = 0) is held by overlapping clusters and supports
+    plasticity. A fracturable body is pre-split into rigid fragments (one cluster each) joined by
+    breakable bonds; fragments are fixed at build time and never share particles.
+
+    Parameters
+    ----------
+    scene : Scene
+        The simulation scene this entity is part of.
+    solver : Solver
+        The PBD solver instance managing this entity.
+    material : Material
+        Solid material defining density, cluster layout, and fracture / plasticity thresholds.
+    morph : Morph
+        Morph object specifying shape and initial transform (position and rotation).
+    surface : Surface
+        Surface or texture representation.
+    particle_size : float
+        Target size for particle spacing.
+    idx : int
+        Unique index of this entity within the scene.
+    particle_start : int
+        Starting index of this entity's particles in the global particle buffer.
+    cluster_start : int
+        Starting index of this entity's clusters in the global cluster buffer.
+    cluster_member_start : int
+        Starting index of this entity's memberships in the global cluster membership buffer.
+    bond_start : int
+        Starting index of this entity's bonds in the global bond buffer.
+    seam_start : int
+        Starting index of this entity's seams in the global seam buffer.
+    fragment_start : int
+        Starting index of this entity's fragments in the global fragment numbering.
+    vvert_start : int
+        Starting index of this entity's visual vertices.
+    vface_start : int
+        Starting index of this entity's visual faces.
+    """
+
+    def __init__(
+        self,
+        scene,
+        solver,
+        material,
+        morph,
+        surface,
+        particle_size,
+        idx,
+        particle_start,
+        cluster_start,
+        cluster_member_start,
+        bond_start,
+        seam_start,
+        fragment_start,
+        vvert_start,
+        vface_start,
+        name: str | None = None,
+    ):
+        self._cluster_start = cluster_start
+        self._cluster_member_start = cluster_member_start
+        self._bond_start = bond_start
+        self._seam_start = seam_start
+        self._fragment_start = fragment_start
+        super().__init__(
+            scene,
+            solver,
+            material,
+            morph,
+            surface,
+            particle_size,
+            idx,
+            particle_start,
+            vvert_start,
+            vface_start,
+            name=name,
+        )
+        self._material_type = int(self.solver.MATERIAL.SOLID)
+
+    def sample(self):
+        """Sample volume particles, build shape-matching clusters, and flatten the visual mesh."""
+        self.init_sampler()
+        if not isinstance(self._morph, (gs.options.morphs.Primitive, gs.options.morphs.Mesh)):
+            gs.raise_exception("PBD.Solid supports Primitive and Mesh morphs.")
+
+        particles = self._vmesh.particlize(self._particle_size, self.sampler)
+        particles = particles.astype(gs.np_float, order="C", copy=False)
+        if particles.size == 0:
+            gs.raise_exception("Entity has zero particles.")
+
+        pos, quat = gu.transform_pos_quat_by_trans_quat(
+            np.array(self._morph.offset_pos, dtype=gs.np_float),
+            np.array(self._morph.offset_quat, dtype=gs.np_float),
+            np.array(self._morph.pos, dtype=gs.np_float),
+            np.array(self._morph.quat, dtype=gs.np_float),
+        )
+        self._sampled_pos = pos
+        self._sampled_quat = quat
+        self._vmesh.apply_transform(gu.trans_quat_to_T(pos, quat))
+        particles = gu.transform_by_trans_quat(particles, pos, quat)
+
+        if not self._solver.boundary.is_inside(particles):
+            gs.raise_exception(
+                "Entity has particles outside solver boundary.\n\n"
+                f"Current boundary:\n{self._solver.boundary}\n\nEntity to be added:\nmin: {particles.min(0)}\n"
+                f"max: {particles.max(0)}\n"
+            )
+
+        if self._vmesh.volume < 1e-12:
+            gs.raise_exception("PBD.Solid requires a mesh with nonzero (closed) volume.")
+
+        self._particles = np.asarray(particles, dtype=gs.np_float, order="C")
+        self._n_particles = len(self._particles)
+        self._init_particles_offset = gs.tensor(self._particles) - gs.tensor(pos)
+        self._particle_mass = self._vmesh.volume * self.material.rho / self._n_particles
+
+        if self.material.fracture_threshold > 0.0:
+            if self.material.yield_threshold > 0.0 or self.material.plastic_creep > 0.0:
+                gs.raise_exception(
+                    "PBD.Solid: plasticity (yield_threshold / plastic_creep) is only supported for "
+                    "unbreakable bodies (fracture_threshold = 0)."
+                )
+            self._partition_fragments()
+            self._build_fragment_clusters()
+            if self._n_fragments > 1:
+                self._build_bonds()
+            else:
+                self._bond_particles = np.zeros((0, 2), dtype=gs.np_int)
+                self._bond_rest = np.zeros(0, dtype=gs.np_float)
+                self._bond_seams = np.zeros(0, dtype=gs.np_int)
+                self._seam_counts = np.zeros(0, dtype=gs.np_int)
+                self._seam_keys = np.zeros(0, dtype=np.int64)
+                self._max_particle_bonds = 0
+        else:
+            self._n_fragments = 1
+            self._particle_fragments = np.zeros(self._n_particles, dtype=gs.np_int)
+            self._build_clusters()
+            self._bond_particles = np.zeros((0, 2), dtype=gs.np_int)
+            self._bond_rest = np.zeros(0, dtype=gs.np_float)
+            self._bond_seams = np.zeros(0, dtype=gs.np_int)
+            self._seam_counts = np.zeros(0, dtype=gs.np_int)
+            self._seam_keys = np.zeros(0, dtype=np.int64)
+            self._max_particle_bonds = 0
+
+        self._split_vmesh()
+        self._flatten_vmesh()
+        self._bind_vverts()
+
+        gs.logger.info(
+            f"Sampled ~~<{self._n_particles:,}>~~ particles into ~~<{self.n_clusters:,}>~~ clusters, "
+            f"~~<{self.n_bonds:,}>~~ bonds."
+        )
+
+    def _partition_fragments(self):
+        """Assign every particle to one rigid fragment by Voronoi seeds or k-means partition."""
+        seeds = self.material.fragment_seeds
+        if seeds is not None:
+            centers = np.asarray(seeds, dtype=gs.np_float).reshape((-1, 3))
+            centers = gu.transform_by_trans_quat(centers, self._sampled_pos, self._sampled_quat).astype(np.float64)
+            dist = np.linalg.norm(self._particles[:, None, :] - centers[None, :, :], axis=2)
+            fragments = np.argmin(dist, axis=1)
+            n_fragments = len(centers)
+        else:
+            n_fragments = self.material.n_fragments
+            if n_fragments > self._n_particles:
+                gs.raise_exception("PBD.Solid cannot have more fragments than sampled particles.")
+            fragments = self._kmeans_partition(n_fragments)
+
+        if (np.bincount(fragments, minlength=n_fragments) == 0).any():
+            gs.raise_exception(
+                "PBD.Solid fragment partition produced an empty fragment; move `fragment_seeds` inside the body."
+            )
+        self._fragment_centers = centers if seeds is not None else self._fragment_centers
+        self._n_fragments = n_fragments
+        self._particle_fragments = fragments.astype(gs.np_int)
+
+    def _kmeans_partition(self, n_fragments):
+        """Deterministic k-means (fixed-seed k-means++ initialization) over the sampled particles."""
+        rng = np.random.default_rng(0)
+        centers = [self._particles[rng.integers(self._n_particles)]]
+        for _ in range(1, n_fragments):
+            dist2 = np.min(np.sum(np.square(self._particles[:, None, :] - np.asarray(centers)[None]), axis=2), axis=1)
+            centers.append(self._particles[rng.choice(self._n_particles, p=dist2 / dist2.sum())])
+        centers = np.asarray(centers)
+        for _ in range(20):
+            dist = np.linalg.norm(self._particles[:, None, :] - centers[None, :, :], axis=2)
+            fragments = np.argmin(dist, axis=1)
+            for k in range(n_fragments):
+                members = self._particles[fragments == k]
+                if len(members) > 0:
+                    centers[k] = members.mean(axis=0, dtype=np.float64)
+                else:
+                    centers[k] = self._particles[np.argmax(np.min(dist, axis=1))]
+        self._fragment_centers = centers.astype(np.float64)
+        return np.argmin(np.linalg.norm(self._particles[:, None, :] - self._fragment_centers[None], axis=2), axis=1)
+
+    def _build_cell_grid(self, cell_size):
+        """Bin particles into a uniform grid, returning cell ids, per-cell particle slices, and a cell lookup."""
+        cell_coords = np.floor(self._particles / cell_size).astype(np.int64)
+        unique_cells, inverse = np.unique(cell_coords, axis=0, return_inverse=True)
+        order = np.argsort(inverse, kind="stable")
+        cell_slices = np.searchsorted(inverse[order], np.arange(len(unique_cells) + 1))
+        cell_lookup = {tuple(cell): i for i, cell in enumerate(unique_cells)}
+        return unique_cells, order, cell_slices, cell_lookup
+
+    def _gather_cell_particles(self, cell, layers, grid):
+        """Particles in the (2*layers+1)^3 cell neighborhood of `cell`; `layers` must cover the query radius."""
+        _unique_cells, order, cell_slices, cell_lookup = grid
+        offsets = np.array(np.meshgrid(*[range(-layers, layers + 1)] * 3, indexing="ij")).reshape(3, -1).T
+        indices = []
+        for offset in offsets:
+            i_cell = cell_lookup.get(tuple(cell + offset))
+            if i_cell is not None:
+                indices.append(order[cell_slices[i_cell] : cell_slices[i_cell + 1]])
+        return np.concatenate(indices)
+
+    def _neighbor_pairs(self, radius):
+        """All particle pairs within `radius`, each listed once, via a spatial grid with cell size `radius`."""
+        unique_cells, order, cell_slices, cell_lookup = self._build_cell_grid(radius)
+
+        pairs = []
+        for i_cell, cell in enumerate(unique_cells):
+            members_i = order[cell_slices[i_cell] : cell_slices[i_cell + 1]]
+            candidates = self._gather_cell_particles(cell, 1, (unique_cells, order, cell_slices, cell_lookup))
+            dist2 = np.sum(
+                np.square(self._particles[members_i, None, :] - self._particles[candidates][None, :, :]), axis=2
+            )
+            ii, jj = np.nonzero(dist2 <= radius * radius)
+            pair_ij = np.stack([members_i[ii], candidates[jj]], axis=1)
+            pairs.append(pair_ij[pair_ij[:, 0] < pair_ij[:, 1]])
+        return np.concatenate(pairs)
+
+    def _split_vmesh(self):
+        """Cut true thin-wall fragment solids on the same Voronoi centers assigning their particles.
+
+        Each cut face carries its neighboring fragment's seam. Interfaces with no sampled bond retain
+        a zero-bond seam, so both cap sides remain addressable and appear when their clusters separate.
+        """
+        tmesh = self._vmesh.trimesh
+        if self._n_fragments == 1:
+            self._vface_fragments = np.zeros(len(tmesh.faces), dtype=gs.np_int)
+            self._surf_tris = None
+            self._wall_verts = np.zeros((0, 3), dtype=gs.np_float)
+            self._wall_fragments = np.zeros(0, dtype=gs.np_int)
+            self._wall_seams = np.zeros(0, dtype=gs.np_int)
+            return
+
+        visual = _cut_fragment_meshes(tmesh.vertices, tmesh.faces, self._fragment_centers)
+        is_cap = visual.seam_keys >= 0
+        bond_keys = self._seam_keys[self._bond_seams]
+        self._seam_keys = np.unique(np.concatenate([self._seam_keys, visual.seam_keys[is_cap]]))
+        self._bond_seams = np.searchsorted(self._seam_keys, bond_keys).astype(gs.np_int)
+        self._seam_counts = np.bincount(self._bond_seams, minlength=len(self._seam_keys)).astype(gs.np_int)
+
+        self._wall_verts = visual.triangles[is_cap].reshape(-1, 3)
+        self._wall_fragments = visual.owners[is_cap]
+        self._wall_seams = np.searchsorted(self._seam_keys, visual.seam_keys[is_cap]).astype(gs.np_int)
+        self._surf_tris = visual.triangles[~is_cap]
+        self._surf_fragments = visual.owners[~is_cap]
+        uvs = self._vmesh.uvs
+        if uvs is not None and len(uvs) == len(tmesh.vertices):
+            self._surf_uvs = _surface_vertex_uvs(
+                visual.triangles[~is_cap],
+                tmesh.vertices,
+                tmesh.faces,
+                uvs,
+                visual.source_faces[~is_cap],
+            )
+        else:
+            self._surf_uvs = None
+        self._vface_fragments = np.concatenate([self._surf_fragments, self._wall_fragments])
+
+    def _flatten_vmesh(self):
+        """Duplicate visual vertices per face corner so that fragments can separate without stretching faces."""
+        if self._surf_tris is None:
+            tmesh = self._vmesh.trimesh
+            corners = np.asarray(tmesh.faces, dtype=gs.np_int).reshape(-1)
+            flat_verts = np.asarray(tmesh.vertices, dtype=gs.np_float)[corners]
+            flat_fragments = np.repeat(self._vface_fragments, 3)
+            flat_seams = np.full(len(corners), -1, dtype=gs.np_int)
+            uvs = self._vmesh.uvs
+            flat_uvs = uvs[corners] if uvs is not None and len(uvs) == len(tmesh.vertices) else None
+        else:
+            flat_verts = np.concatenate([self._surf_tris.reshape(-1, 3), self._wall_verts])
+            flat_fragments = np.concatenate([np.repeat(self._surf_fragments, 3), np.repeat(self._wall_fragments, 3)])
+            flat_seams = np.concatenate(
+                [np.full(len(self._surf_fragments) * 3, -1, dtype=gs.np_int), np.repeat(self._wall_seams, 3)]
+            )
+            if self._surf_uvs is not None:
+                flat_uvs = np.concatenate([self._surf_uvs, np.zeros((len(self._wall_verts), 2), dtype=gs.np_float)])
+            else:
+                flat_uvs = None
+
+        flat_faces = np.arange(len(flat_verts), dtype=gs.np_int).reshape((-1, 3))
+        self._vmesh = gs.Mesh.from_attrs(verts=flat_verts, faces=flat_faces, surface=self.surface, uvs=flat_uvs)
+        self._vverts = flat_verts
+        self._vfaces = flat_faces
+        self._vvert_fragments = flat_fragments.astype(gs.np_int)
+        self._vvert_seams = flat_seams
+
+    def _bind_vverts(self):
+        """Bind every visual vertex to the rigid transform of one cluster.
+
+        In fracturable mode the cluster is the owning fragment's, so faces follow their shard. Otherwise the
+        nearest cluster to each face centroid keeps every face rigid while still following local (plastic)
+        deformation.
+        """
+        if self.material.fracture_threshold > 0.0:
+            self._vvert_clusters = self._vvert_fragments
+        else:
+            face_centroids = self._vverts[self._vfaces].mean(axis=1)
+            dist = np.linalg.norm(face_centroids[:, None, :] - self._cluster_rest_cm[None, :, :], axis=2)
+            self._vvert_clusters = np.repeat(np.argmin(dist, axis=1), 3).astype(gs.np_int)
+        self._vvert_offsets = (self._vverts - self._cluster_rest_cm[self._vvert_clusters]).astype(gs.np_float)
+
+    def _build_clusters(self):
+        """Group particles into overlapping clusters on a lattice of cluster centers.
+
+        Each occupied lattice cell of size `cluster_spacing_factor * particle_size` owns one cluster covering
+        every particle within `cluster_radius_factor * particle_size` of its center. Near-degenerate clusters
+        (few members or a rank-deficient rest covariance, e.g. flat slivers) are dropped; a particle left outside
+        every surviving cluster is attached to its nearest one, so every particle always carries a shape-matching
+        correction.
+        """
+        spacing = self.material.cluster_spacing_factor * self._particle_size
+        radius = self.material.cluster_radius_factor * self._particle_size
+        layers = int(np.ceil(radius / spacing))
+        grid = self._build_cell_grid(spacing)
+
+        member_particles = []
+        for cell in grid[0]:
+            center = (cell + 0.5) * spacing
+            candidates = self._gather_cell_particles(cell, layers, grid)
+            members = candidates[np.linalg.norm(self._particles[candidates] - center, axis=1) <= radius]
+            if len(members) < 4:
+                continue
+            offsets = self._particles[members] - self._particles[members].mean(axis=0, dtype=np.float64)
+            cov = offsets.T @ offsets
+            eigvals = np.linalg.eigvalsh(cov)
+            if eigvals[0] < 1e-6 * eigvals[2]:
+                continue
+            member_particles.append(members.astype(gs.np_int))
+
+        if not member_particles:
+            gs.raise_exception(
+                "PBD.Solid produced no valid clusters; increase `cluster_radius_factor` or decrease `particle_size`."
+            )
+
+        # a particle outside every surviving cluster would silently fall freely (no shape-matching correction at
+        # all), so attach each uncovered particle to its nearest surviving cluster
+        covered = np.zeros(self._n_particles, dtype=bool)
+        for members in member_particles:
+            covered[members] = True
+        if not covered.all():
+            centers = np.array(
+                [self._particles[members].mean(axis=0, dtype=np.float64) for members in member_particles]
+            )
+            orphans = np.nonzero(~covered)[0]
+            nearest = np.argmin(np.linalg.norm(self._particles[orphans][:, None] - centers[None], axis=2), axis=1)
+            member_particles = [
+                np.append(members, orphans[nearest == i_c]).astype(gs.np_int)
+                for i_c, members in enumerate(member_particles)
+            ]
+
+        self._set_clusters(member_particles)
+
+    def _build_fragment_clusters(self):
+        """One rigid cluster per fragment; pre-split shards never break internally."""
+        self._set_clusters(
+            [np.nonzero(self._particle_fragments == k)[0].astype(gs.np_int) for k in range(self._n_fragments)]
+        )
+
+    def _set_clusters(self, member_particles):
+        """Finalize cluster rest centroids and membership arrays from per-cluster member lists."""
+        if not member_particles or any(len(members) == 0 for members in member_particles):
+            gs.raise_exception("PBD.Solid cannot construct an empty shape-matching cluster.")
+        # f64 mean: f32 accumulation over a large member set biases the rest centroid at the 1e-6 m scale,
+        # and the shape-matching goals then inherit that bias as a steady phantom force
+        self._cluster_rest_cm = np.array(
+            [self._particles[members].mean(axis=0, dtype=np.float64) for members in member_particles],
+            dtype=gs.np_float,
+        )
+        self._cluster_member_counts = np.array([len(members) for members in member_particles], dtype=gs.np_int)
+        self._cluster_member_starts = np.zeros(len(self._cluster_member_counts), dtype=gs.np_int)
+        self._cluster_member_starts[1:] = np.cumsum(self._cluster_member_counts)[:-1]
+        self._cluster_member_particles = np.concatenate(member_particles)
+
+        # dual map: particle -> its clusters (the count also normalizes stacked cluster corrections)
+        particle_member_count = np.bincount(self._cluster_member_particles, minlength=self._n_particles)
+        if (particle_member_count == 0).any():
+            gs.raise_exception("PBD.Solid left particles outside every cluster; increase `cluster_radius_factor`.")
+        self._particle_member_starts = np.zeros(self._n_particles, dtype=gs.np_int)
+        self._particle_member_starts[1:] = np.cumsum(particle_member_count)[:-1]
+        self._particle_member_counts = particle_member_count.astype(gs.np_int)
+        self._particle_cluster_ids = np.zeros(len(self._cluster_member_particles), dtype=gs.np_int)
+        offsets_running = self._particle_member_starts.copy()
+        for i_c, members in enumerate(member_particles):
+            self._particle_cluster_ids[offsets_running[members]] = i_c
+            offsets_running[members] += 1
+
+    def _build_bonds(self):
+        """Link cross-fragment neighbor particles with breakable bonds; one seam per adjacent fragment pair.
+
+        The visual cut subsequently adds any actual cell interfaces held by no sampled bond, remapping
+        bond seam indices so caps and physical connections retain the same fragment-pair identifiers.
+        """
+        pairs = self._neighbor_pairs(self.material.bond_radius_factor * self._particle_size)
+        frag_i = self._particle_fragments[pairs[:, 0]]
+        frag_j = self._particle_fragments[pairs[:, 1]]
+        cross = frag_i != frag_j
+        pairs, frag_i, frag_j = pairs[cross], frag_i[cross], frag_j[cross]
+        if len(pairs) == 0:
+            gs.raise_exception("PBD.Solid fragments are disconnected; increase `bond_radius_factor`.")
+
+        rest = np.linalg.norm(self._particles[pairs[:, 0]] - self._particles[pairs[:, 1]], axis=1)
+        bond_key = np.minimum(frag_i, frag_j) * self._n_fragments + np.maximum(frag_i, frag_j)
+        order = np.argsort(bond_key, kind="stable")
+        self._bond_particles = pairs[order].astype(gs.np_int)
+        self._bond_rest = rest[order].astype(gs.np_float)
+
+        self._seam_keys = np.unique(bond_key)
+        self._bond_seams = np.searchsorted(self._seam_keys, bond_key[order]).astype(gs.np_int)
+        self._seam_counts = np.bincount(self._bond_seams, minlength=len(self._seam_keys)).astype(gs.np_int)
+
+        # Maximum number of bonds incident to a particle.
+        bond_count = np.bincount(self._bond_particles.reshape(-1), minlength=self._n_particles)
+        self._max_particle_bonds = int(bond_count.max())
+
+    def _add_particles_to_solver(self):
+        self._kernel_add_solid_particles_to_solver(
+            f=self._scene.sim.cur_substep_local,
+            particles=self._particles,
+            fragments=self._particle_fragments,
+        )
+        self._kernel_add_clusters_to_solver(
+            cluster_rest_cm=self._cluster_rest_cm,
+            cluster_member_start=self._cluster_member_starts,
+            cluster_member_count=self._cluster_member_counts,
+            cluster_member_particles=self._cluster_member_particles,
+            particle_member_start=self._particle_member_starts,
+            particle_member_count=self._particle_member_counts,
+            particle_cluster_ids=self._particle_cluster_ids,
+        )
+        if self.n_seams > 0:
+            seam_clusters = np.stack(
+                (self._seam_keys // self._n_fragments, self._seam_keys % self._n_fragments), axis=1
+            ).astype(gs.np_int)
+            kernel_add_pbd_seams(
+                self._seam_start,
+                self._cluster_start,
+                seam_clusters,
+                self._seam_counts,
+                self.solver,
+                self.n_seams,
+                self._sim._B,
+            )
+        if self.n_bonds > 0:
+            self._kernel_add_bonds_to_solver(
+                bond_particles=self._bond_particles,
+                bond_rest=self._bond_rest,
+                bond_seams=self._bond_seams,
+            )
+
+    def _add_vverts_to_solver(self):
+        # support skinning still provides the render active flag; cluster binding owns solid face motion
+        super()._add_vverts_to_solver()
+        self._kernel_add_solid_vverts_to_solver(
+            clusters=self._vvert_clusters,
+            offsets=self._vvert_offsets,
+            seams=self._vvert_seams,
+        )
+
+    @qd.kernel
+    def _kernel_add_solid_particles_to_solver(
+        self,
+        f: qd.i32,
+        particles: qd.types.ndarray(),
+        fragments: qd.types.ndarray(),
+    ):
+        for i_p_ in range(self.n_particles):
+            i_p = i_p_ + self._particle_start
+            for i in qd.static(range(3)):
+                self.solver.particles_info[i_p].pos_rest[i] = particles[i_p_, i]
+            self.solver.particles_info[i_p].material_type = self._material_type
+            self.solver.particles_info[i_p].mass = self._particle_mass
+            self.solver.particles_info[i_p].mu_s = self.material.static_friction
+            self.solver.particles_info[i_p].mu_k = self.material.kinetic_friction
+            self.solver.particles_info[i_p].fragment = fragments[i_p_] + self._fragment_start
+
+        for i_p_, i_b in qd.ndrange(self.n_particles, self._sim._B):
+            i_p = i_p_ + self._particle_start
+            for i in qd.static(range(3)):
+                self.solver.particles[i_p, i_b].pos[i] = particles[i_p_, i]
+                self.solver.particles_solid_rest[i_p, i_b][i] = particles[i_p_, i]
+            self.solver.particles[i_p, i_b].vel = qd.Vector.zero(gs.qd_float, 3)
+            self.solver.particles[i_p, i_b].dpos = qd.Vector.zero(gs.qd_float, 3)
+            self.solver.particles[i_p, i_b].free = True
+            self.solver.particles_ng[i_p, i_b].active = True
+
+    @qd.kernel
+    def _kernel_add_clusters_to_solver(
+        self,
+        cluster_rest_cm: qd.types.ndarray(element_dim=1),
+        cluster_member_start: qd.types.ndarray(),
+        cluster_member_count: qd.types.ndarray(),
+        cluster_member_particles: qd.types.ndarray(),
+        particle_member_start: qd.types.ndarray(),
+        particle_member_count: qd.types.ndarray(),
+        particle_cluster_ids: qd.types.ndarray(),
+    ):
+        for i_c_ in range(self.n_clusters):
+            i_c = i_c_ + self._cluster_start
+            self.solver.clusters_info[i_c].member_start = cluster_member_start[i_c_] + self._cluster_member_start
+            self.solver.clusters_info[i_c].member_count = cluster_member_count[i_c_]
+            self.solver.clusters_info[i_c].stiffness = self.material.stiffness
+            self.solver.clusters_info[i_c].yield_threshold = self.material.yield_threshold * self._particle_size
+            self.solver.clusters_info[i_c].plastic_creep = self.material.plastic_creep
+
+        for i_c_, i_b in qd.ndrange(self.n_clusters, self._sim._B):
+            i_c = i_c_ + self._cluster_start
+            for i in qd.static(range(3)):
+                self.solver.clusters_rest[i_c, i_b].cm[i] = cluster_rest_cm[i_c_][i]
+                self.solver.clusters_state[i_c, i_b].cm[i] = cluster_rest_cm[i_c_][i]
+            self.solver.clusters_state[i_c, i_b].rot = qd.Matrix.identity(gs.qd_float, 3)
+            if i_b == 0:
+                for i_m_local in range(cluster_member_count[i_c_]):
+                    i_m = cluster_member_start[i_c_] + i_m_local + self._cluster_member_start
+                    self.solver.cluster_member_clusters[i_m] = i_c
+
+        for i_m_ in range(self.n_cluster_members):
+            i_m = i_m_ + self._cluster_member_start
+            self.solver.cluster_member_particles[i_m] = cluster_member_particles[i_m_] + self._particle_start
+
+        for i_p_ in range(self.n_particles):
+            i_p = i_p_ + self._particle_start
+            self.solver.particle_cluster_ptr[i_p].member_start = (
+                particle_member_start[i_p_] + self._cluster_member_start
+            )
+            self.solver.particle_cluster_ptr[i_p].member_count = particle_member_count[i_p_]
+        for i_m_ in range(self.n_cluster_members):
+            i_m = i_m_ + self._cluster_member_start
+            self.solver.particle_cluster_ids[i_m] = particle_cluster_ids[i_m_] + self._cluster_start
+
+    @qd.kernel
+    def _kernel_add_bonds_to_solver(
+        self,
+        bond_particles: qd.types.ndarray(),
+        bond_rest: qd.types.ndarray(),
+        bond_seams: qd.types.ndarray(),
+    ):
+        for i_l_ in range(self.n_bonds):
+            i_l = i_l_ + self._bond_start
+            self.solver.bonds_info[i_l].i_p = bond_particles[i_l_, 0] + self._particle_start
+            self.solver.bonds_info[i_l].j_p = bond_particles[i_l_, 1] + self._particle_start
+            self.solver.bonds_info[i_l].rest = bond_rest[i_l_]
+            self.solver.bonds_info[i_l].stiffness = self.material.stiffness
+            self.solver.bonds_info[i_l].threshold = self.material.fracture_threshold
+            self.solver.bonds_info[i_l].seam = bond_seams[i_l_] + self._seam_start
+
+        for i_l_, i_b in qd.ndrange(self.n_bonds, self._sim._B):
+            self.solver.bonds_state[i_l_ + self._bond_start, i_b].alive = True
+
+    @qd.kernel
+    def _kernel_add_solid_vverts_to_solver(
+        self,
+        clusters: qd.types.ndarray(),
+        offsets: qd.types.ndarray(),
+        seams: qd.types.ndarray(),
+    ):
+        for i_vv_ in range(self.n_vverts):
+            i_vv = i_vv_ + self._vvert_start
+            self.solver.vverts_info[i_vv].is_solid = True
+            self.solver.vverts_solid_cluster[i_vv] = clusters[i_vv_] + self._cluster_start
+            for k in qd.static(range(3)):
+                self.solver.vverts_solid_offset[i_vv][k] = offsets[i_vv_, k]
+            if seams[i_vv_] >= 0:
+                self.solver.vverts_solid_seam[i_vv] = seams[i_vv_] + self._seam_start
+
+    @property
+    def n_clusters(self):
+        """Number of shape-matching clusters."""
+        return len(self._cluster_member_counts)
+
+    @property
+    def n_cluster_members(self):
+        """Total number of cluster-particle memberships."""
+        return len(self._cluster_member_particles)
+
+    @property
+    def n_bonds(self):
+        """Number of breakable bonds linking this entity's fragments."""
+        return len(self._bond_rest)
+
+    @property
+    def n_seams(self):
+        """Number of fragment interfaces, including interfaces held by no sampled bond."""
+        return len(self._seam_counts)
+
+    @property
+    def seam_start(self):
+        """Starting index of this entity's interfaces in the solver seam arrays."""
+        return self._seam_start
+
+    @property
+    def n_fragments(self):
+        """Number of rigid fragments this entity is split into."""
+        return self._n_fragments
+
+    @property
+    def max_particle_bonds(self):
+        """Maximum number of bonds incident to one particle."""
+        return self._max_particle_bonds
+
+    @property
+    def cluster_start(self):
+        """The starting index of the clusters in the global solver."""
+        return self._cluster_start
+
+    @property
+    def cluster_end(self):
+        """The ending index of the clusters in the global solver."""
+        return self._cluster_start + self.n_clusters
 
 
 @qd.data_oriented

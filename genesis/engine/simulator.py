@@ -28,6 +28,7 @@ from genesis.options.solvers import (
 from genesis.repr_base import RBC
 
 from .couplers import IPCCoupler, LegacyCoupler, SAPCoupler
+from .couplers.pbd_rigid_fragments import PBDRigidFragmentBridge
 from .entities import HybridEntity
 from .sensors import SensorManager
 from .solvers import (
@@ -201,6 +202,9 @@ class Simulator(RBC):
         # sensors
         self._sensor_manager = SensorManager(self)
 
+        # PBD-fragment lifecycle bridge (see engine/couplers/pbd_rigid_fragments.py); None keeps every hook inert.
+        self._pbd_rigid_fragment_bridge: PBDRigidFragmentBridge | None = None
+
     def _add_entity(self, morph: Morph, material, surface, visualize_contact=False, name: str | None = None):
         if isinstance(material, gs.materials.Tool):
             entity = self.tool_solver.add_entity(self.n_entities, material, morph, surface, name=name)
@@ -248,6 +252,11 @@ class Simulator(RBC):
         self._B = self.scene._B
         self._para_level = self.scene._para_level
 
+        # The bridge registers its FREE shadow links from the static partition (built at add_entity time) before
+        # any solver allocates fields; ownership stays unique because rigid builds ahead of PBD in the loop below.
+        if self._pbd_rigid_fragment_bridge is not None:
+            self._pbd_rigid_fragment_bridge.register_shadow_links()
+
         # solvers
         # IPCCoupler needs full substep flow for pre/post coupling phases
         self._rigid_only = self.rigid_solver.is_active and not isinstance(self._coupler, (SAPCoupler, IPCCoupler))
@@ -258,6 +267,11 @@ class Simulator(RBC):
                 if not isinstance(solver, RigidSolver):
                     self._rigid_only = False
         self._coupler.build()
+
+        # After every solver built (its default lifecycle flags are in place), the bridge turns its registered
+        # fragments into shadows: driven gate on, native contacts off, followed pose seeded from the initial state.
+        if self._pbd_rigid_fragment_bridge is not None:
+            self._pbd_rigid_fragment_bridge.enter_shadow_lifecycle()
 
         if self.n_envs > 0 and self.sf_solver.is_active:
             gs.raise_exception("Batching is not supported for SF solver as of now.")
@@ -334,10 +348,16 @@ class Simulator(RBC):
             self.ipbf_solver.check_errno()
         if self.pbstf_solver.is_active and self._cur_substep_global % RATE_CHECK_ERRNO == 0:
             self.pbstf_solver.check_errno()
+        if self.pbd_solver.is_active and self._cur_substep_global % RATE_CHECK_ERRNO == 0:
+            self.pbd_solver.check_errno()
 
         if self._rigid_only and not self._requires_grad:  # "Only Advance!" --Thomas Wade :P
             for _ in range(self._substeps):
+                if self._pbd_rigid_fragment_bridge is not None:
+                    self._pbd_rigid_fragment_bridge.substep_head(self.cur_substep_local)
                 self.rigid_solver.substep(self.cur_substep_local)
+                if self._pbd_rigid_fragment_bridge is not None:
+                    self._pbd_rigid_fragment_bridge.substep_tail(self.cur_substep_local)
                 self._cur_substep_global += 1
         else:
             self.process_input(in_backward=in_backward)
@@ -376,10 +396,16 @@ class Simulator(RBC):
             solver.process_input_grad()
 
     def substep(self, f):
+        # The bridge owns shadow-link poses and commits handoffs before any solver advances, so ownership is unique
+        # even though rigid steps ahead of PBD inside substep_pre_coupling.
+        if self._pbd_rigid_fragment_bridge is not None:
+            self._pbd_rigid_fragment_bridge.substep_head(f)
         self._coupler.preprocess(f)
         self.substep_pre_coupling(f)
         self._coupler.couple(f)
         self.substep_post_coupling(f)
+        if self._pbd_rigid_fragment_bridge is not None:
+            self._pbd_rigid_fragment_bridge.substep_tail(f)
 
     def sub_step_grad(self, f):
         self.substep_post_coupling_grad(f)
