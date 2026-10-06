@@ -29,14 +29,9 @@ class LitterScoopController:
                 math.sin(0.5 * assets.blade_angle),
                 0.0,
             )
-            runtime.scene.dem_solver.set_tilt_box_obstacle(
-                assets.blade_half_extents,
-                assets.blade_initial_pos,
-                quat=blade_quat,
-                handle=(assets.handle_length, assets.handle_half_thickness, assets.handle_angle),
-            )
-            runtime.shovel.set_pos(assets.blade_initial_pos)
-            runtime.shovel.set_quat(blade_quat)
+            runtime.scene.dem_solver.set_sdf_obstacle_pose(assets.blade_initial_pos, blade_quat)
+            runtime.scene.dem_solver.set_sdf_obstacle_vel((0.0, 0.0, 0.0))
+            runtime.synchronize_shovel()
 
     def get_state(self) -> LitterScoopControllerState:
         return LitterScoopControllerState(step_index=self.step_index)
@@ -45,8 +40,7 @@ class LitterScoopController:
         if self.config != runtime.config.task:
             raise ValueError("Controller task configuration must match the scene task configuration.")
         self.step_index = state.step_index
-        runtime.shovel.set_pos(runtime.scene.dem_solver.get_tilt_box_pos()[0])
-        runtime.shovel.set_quat(runtime.scene.dem_solver.get_tilt_box_quat()[0])
+        runtime.synchronize_shovel()
 
     def before_step(self, runtime: LitterScoopRuntime):
         task = self.config
@@ -56,23 +50,21 @@ class LitterScoopController:
         lift = rotate + task.rotate_steps
         hold = lift + task.lift_steps
         if self.step_index == descend:
-            runtime.scene.dem_solver.set_tilt_box_vel(task.descend_velocity)
+            runtime.scene.dem_solver.set_sdf_obstacle_vel(task.descend_velocity)
         elif self.step_index == insert:
-            runtime.scene.dem_solver.set_tilt_box_vel(task.insert_velocity)
+            runtime.scene.dem_solver.set_sdf_obstacle_vel(task.insert_velocity)
         elif self.step_index == rotate:
-            runtime.scene.dem_solver.set_tilt_box_vel(
+            runtime.scene.dem_solver.set_sdf_obstacle_vel(
                 task.rotate_velocity,
                 omega=task.rotate_angular_velocity,
             )
         elif self.step_index == lift:
-            runtime.scene.dem_solver.set_tilt_box_vel(task.lift_velocity)
+            runtime.scene.dem_solver.set_sdf_obstacle_vel(task.lift_velocity)
         elif self.step_index == hold:
-            runtime.scene.dem_solver.set_tilt_box_vel((0.0, 0.0, 0.0))
-
-        runtime.shovel.set_pos(runtime.scene.dem_solver.get_tilt_box_pos()[0])
-        runtime.shovel.set_quat(runtime.scene.dem_solver.get_tilt_box_quat()[0])
+            runtime.scene.dem_solver.set_sdf_obstacle_vel((0.0, 0.0, 0.0))
 
     def step(self, runtime: LitterScoopRuntime):
         self.before_step(runtime)
         runtime.scene.step()
+        runtime.synchronize_shovel()
         self.step_index += 1

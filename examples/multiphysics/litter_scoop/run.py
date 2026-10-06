@@ -1,4 +1,5 @@
 import argparse
+import csv
 import time
 from pathlib import Path
 
@@ -16,6 +17,9 @@ def main():
     parser = argparse.ArgumentParser(description="Coupled DEM/FLIP litter-scoop scenario")
     parser.add_argument("--steps", type=int)
     parser.add_argument("--progress-every", type=int, default=50)
+    parser.add_argument(
+        "--record-segment-steps", type=int, default=60, help="Native steps per finalized video segment."
+    )
     parser.add_argument("--vis", action="store_true")
     parser.add_argument("--record", action="store_true")
     parser.add_argument("--output", type=Path, default=Path("out/litter_scoop"))
@@ -24,6 +28,8 @@ def main():
         parser.error("--steps must be non-negative")
     if args.progress_every < 0:
         parser.error("--progress-every must be non-negative")
+    if args.record_segment_steps <= 0:
+        parser.error("--record-segment-steps must be positive")
 
     gs.init(backend=gs.gpu, logging_level="warning")
     config = LitterScoopScenarioConfig()
@@ -32,18 +38,45 @@ def main():
     print(f"litter_scoop timing: build_seconds={build_seconds:.3f}", flush=True)
     controller = LitterScoopController(config.task)
     steps = config.task.total_steps if args.steps is None else args.steps
+    args.output.mkdir(parents=True, exist_ok=True)
     if runtime.camera is not None:
-        args.output.mkdir(parents=True, exist_ok=True)
-        runtime.camera.start_recording(save_to_filename=str(args.output / "litter-scoop.mp4"), fps=30)
+        runtime.camera.start_recording(save_to_filename=str(args.output / "litter-scoop-segment-000000.mp4"), fps=30)
     try:
         simulation_started = time.perf_counter()
-        for step in range(steps):
-            controller.step(runtime)
-            if args.progress_every and ((step + 1) % args.progress_every == 0 or step + 1 == steps):
-                print(
-                    f"litter_scoop progress: step={step + 1}/{steps}, simulated_time={runtime.scene.cur_t:.6f}s",
-                    flush=True,
-                )
+        with (args.output / "litter-scoop-metrics.csv").open("w", newline="", encoding="ascii") as metrics:
+            writer = csv.writer(metrics)
+            writer.writerow(("step", "time_s", "wall_s", "sand_min_z", "sand_max_z", "sand_rms_speed", "water_max_z"))
+            for step in range(steps):
+                controller.step(runtime)
+                if (step + 1) % 50 == 0 or step == 0 or step + 1 == steps:
+                    sand_pos = runtime.sand.get_particles_pos()
+                    sand_vel = runtime.sand.get_particles_vel()
+                    water_pos = runtime.water.get_particles_pos()
+                    water_vel = runtime.water.get_particles_vel()
+                    if not all(torch.isfinite(values).all() for values in (sand_pos, sand_vel, water_pos, water_vel)):
+                        raise RuntimeError(f"Litter-scoop state contains non-finite values at step {step + 1}.")
+                    writer.writerow(
+                        (
+                            step + 1,
+                            runtime.scene.cur_t,
+                            time.perf_counter() - simulation_started,
+                            sand_pos[..., 2].min().item(),
+                            sand_pos[..., 2].max().item(),
+                            torch.sqrt(torch.square(sand_vel).sum(dim=-1).mean()).item(),
+                            water_pos[..., 2].max().item(),
+                        )
+                    )
+                    metrics.flush()
+                if runtime.camera is not None and (step + 1) % args.record_segment_steps == 0 and step + 1 < steps:
+                    runtime.camera.stop_recording()
+                    runtime.camera.start_recording(
+                        save_to_filename=str(args.output / f"litter-scoop-segment-{step + 1:06d}.mp4"), fps=30
+                    )
+                if args.progress_every and ((step + 1) % args.progress_every == 0 or step + 1 == steps):
+                    print(
+                        f"litter_scoop progress: step={step + 1}/{steps}, simulated_time={runtime.scene.cur_t:.6f}s",
+                        flush=True,
+                    )
     finally:
         if runtime.camera is not None:
             runtime.camera.stop_recording()
@@ -58,4 +91,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    finally:
+        gs.destroy()

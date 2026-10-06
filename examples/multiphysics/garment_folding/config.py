@@ -15,6 +15,7 @@ class GarmentFoldingSolverConfig:
     contact_resistance: float = 1.0e7
     newton_semi_implicit_enable: bool = False
     newton_max_iterations: int = 50
+    newton_min_iterations: int = 1
     n_linesearch_iterations: int = 16
     newton_tolerance: float = 1.0e-2
     newton_translation_tolerance: float = 1.0e-3
@@ -23,6 +24,7 @@ class GarmentFoldingSolverConfig:
     constraint_strength_rotation: float = 100.0
     two_way_coupling: bool = False
     is_rigid_rigid_contact_enabled: bool = False
+    enable_genesis_rigid_collision: bool = True
 
 
 @dataclass(frozen=True)
@@ -59,6 +61,7 @@ class GarmentFoldingAssets:
     robot: str | None = None
     robot_pos: tuple[float, float, float] = (0.0, 0.0, 0.0)
     robot_coupling_links: tuple[str, ...] = ()
+    robot_watertighten: int | None = 5
     trajectory: str | None = None
     expected_trajectory_frames: int | None = None
     hem_left: tuple[float, float, float] = (-0.145, -0.22, 0.0625)
@@ -112,6 +115,7 @@ class GarmentFoldingTaskConfig:
     regrasp_gap: float = 0.003
     action_fps: float = 60.0
     physics_steps_per_action: int = 2
+    settle_steps: int = 0
 
     @property
     def resolved_duration(self) -> float:
@@ -145,6 +149,10 @@ def create_scene527_config(asset_root: str | Path) -> GarmentFoldingScenarioConf
             n_linesearch_iterations=8,
             constraint_strength_translation=300.0,
             constraint_strength_rotation=1000.0,
+            is_rigid_rigid_contact_enabled=True,
+            # Rigid geometry participates in IPC contact.  Genesis' separate rigid SDF collider has no dynamic
+            # rigid-rigid work in this fixed/kinematic scene and only duplicates a costly preprocessing path.
+            enable_genesis_rigid_collision=False,
         ),
         material=GarmentFoldingMaterialConfig(
             cloth_young_modulus=20000.0,
@@ -167,6 +175,9 @@ def create_scene527_config(asset_root: str | Path) -> GarmentFoldingScenarioConf
             expected_garment_faces=55068,
             robot="assets/robots/dual_x5_2025_ipc_v1/dual_x5_2025_ipc.urdf",
             robot_pos=(0.0, 0.0, 0.17),
+            # The source scene uses its authored exact finger collision meshes.  Re-wrapping them changes contact
+            # geometry, so opt out of Genesis' newer default alpha wrap.
+            robot_watertighten=None,
             robot_coupling_links=(
                 "left_link15",
                 "left_link16",
@@ -185,5 +196,5 @@ def create_scene527_config(asset_root: str | Path) -> GarmentFoldingScenarioConf
             camera_pos=(1.55, -1.45, 1.65),
             camera_lookat=(0.64, 0.0, 0.86),
         ),
-        task=GarmentFoldingTaskConfig(task="scene527"),
+        task=GarmentFoldingTaskConfig(task="scene527", settle_steps=60),
     )

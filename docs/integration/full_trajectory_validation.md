@@ -36,9 +36,9 @@ $env:TMP = $cacheRoot + '\tmp'
 | Scenario | Command | Steps | Simulated time | Result |
 |---|---|---:|---:|---|
 | Table wiping | `python -m examples.multiphysics.table_wiping.run` | 5,000 | 10.000000 s | FINAL RERUN QUEUED |
-| Garment folding (half fold) | `python -m examples.multiphysics.garment_folding.run --task half` | 801 | 16.020000 s | PASS |
-| Coupled litter scooping | `python -m examples.multiphysics.litter_scoop.run` | 766 | 12.766667 s | FINAL RERUN QUEUED |
-| Coffee pouring, stirring and cleanup | `python -m examples.multiphysics.coffee_water.run` | pending | pending | RUNNING |
+| Garment folding (half fold) | `python -m examples.multiphysics.garment_folding.run --task half` | 801 | 16.020000 s | REVALIDATION REQUIRED |
+| Coupled litter scooping | `python -m examples.multiphysics.litter_scoop.run` | 766 | 12.766667 s | RUNNING (OPEN-SLOT MESH) |
+| Coffee pouring, stirring and cleanup | `python -m examples.multiphysics.coffee_water.run` | 14,000 | 28.000000 s | RUNNING |
 | Butter spreading | `python -m examples.multiphysics.butter_spreading.run` | 114,287 | 4.000045 s | PENDING |
 
 The earlier table run completed successfully in about five minutes. Its controller was subsequently changed to keep
@@ -48,6 +48,34 @@ minutes and simulated 373,219 DEM particles with 19,064 FLIP particles. Its fina
 checkpoint fields participate in the scenario's initial-state registration. Coffee, butter, final table and final
 litter must not be marked PASS until their default commands reach their built-in terminal assertions and exit
 successfully.
+
+## 2026-10-07 correction batch
+
+The earlier lightweight half-fold PASS is historical: shell energy conventions now match the inherited material
+calibration, so that default needs a fresh full run. Scene527 completed its separate 60-step settling regression
+and an eight-step checkpoint continuation, with videos and finite FEM state. Its full 8,746-native-step folding
+trajectory is running from the inspected checkpoint; it has not reached its terminal step.
+
+Coffee completed 500 control steps (1 second), with 50 decoded video frames at 50 FPS. Active particle count,
+mass and water-in-cup count remained 213,162, 0.5043063 kg and 142,312 respectively. Cold construction took
+636.213 seconds and simulation took 1,997.870 seconds. The 28-second run restarted from zero with the warm
+cache and took 102.585 seconds to construct; all original physical checks remain enabled.
+
+Litter now uses the matching open-slot mesh SDF rather than the analytic box proxy. Its default recorded run
+constructed in 162.399 seconds and completed its first native step with finite sand/water state. Full insertion,
+lifting and sieving remain pending. Videos finalize in 60-native-step segments under
+`out/litter_scoop/mesh_slots_default_20261007`.
+
+Focused configuration/controller/boundary/shell tests passed 32 cases. The CPU mesh-obstacle regression passed
+both unbatched and two-environment cases: grains remain supported by a solid strip while grains above a slot fall
+through, and moving obstacle pose/velocity survive Scene restoration. Disabling obstacle restoration deliberately
+caused the position assertion to fail (100 micrometers versus the saved 50 micrometers); restoring the implementation
+passed both cases again. An inactive FLIP solver now permits the standalone DEM multi-environment test; active
+FLIP remains single-environment.
+
+Scenario/test Ruff checks, syntax compilation and `git diff --check` passed. Whole-engine lint retains existing
+diagnostics verified against HEAD: 30 in the IPC coupler, three in DEM and five in FLIP. No cache directories,
+recordings or checkpoints belong in the correction commit; the paired 42 MB SDF asset does.
 
 ## Construction and one-step smoke tests
 

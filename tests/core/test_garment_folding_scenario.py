@@ -99,9 +99,14 @@ def test_scene527_profile_uses_portable_bundle_paths_and_calibrated_physics(tmp_
     assert config.assets.expected_garment_vertices == 27811
     assert config.assets.expected_garment_faces == 55068
     assert config.assets.expected_trajectory_frames == 4373
+    assert config.assets.robot_watertighten is None
     assert config.task.task == "scene527"
     assert config.task.uses_robot_trajectory
+    assert config.task.settle_steps == 60
     assert config.solver.dt == pytest.approx(1.0 / 120.0)
+    assert config.solver.newton_min_iterations == 1
+    assert config.solver.is_rigid_rigid_contact_enabled
+    assert not config.solver.enable_genesis_rigid_collision
     assert config.solver.contact_d_hat == 0.0015
     assert config.material.cloth_self_friction == 2.0
 

@@ -7,6 +7,7 @@ import genesis as gs
 from genesis.engine.boundaries import CubeBoundary
 from genesis.engine.entities import DEMEntity
 from genesis.utils.geom import SpatialHasher, qd_transform_by_quat_fast
+from genesis.utils.misc import qd_to_numpy
 
 from .base_solver import Solver
 
@@ -473,18 +474,29 @@ class DEMSolver(Solver):
         self.sdfo_omega.from_numpy(np.tile(np.asarray(omega, dtype=gs.np_float), (self._B, 1)))
 
     @gs.assert_built
+    def set_sdf_obstacle_pose(self, pos, quat):
+        """Set the mesh obstacle pose, broadcasting over environments; retain its velocity setpoints."""
+        pos = np.broadcast_to(np.asarray(pos, dtype=gs.np_float), (self._B, 3))
+        quat = np.broadcast_to(np.asarray(quat, dtype=gs.np_float), (self._B, 4))
+        lengths = np.linalg.norm(quat, axis=-1, keepdims=True)
+        if not np.isfinite(pos).all() or not np.isfinite(quat).all() or (lengths == 0).any():
+            gs.raise_exception("Mesh obstacle pose must be finite with nonzero quaternions.")
+        self.sdfo_pos.from_numpy(np.ascontiguousarray(pos))
+        self.sdfo_quat.from_numpy(np.ascontiguousarray(quat / lengths))
+
+    @gs.assert_built
     def get_sdf_obstacle_pos(self):
         """
         Current world position of the mesh-SDF obstacle's local-frame origin (per env, shape (n_envs, 3)).
         """
-        return self.sdfo_pos.to_numpy()
+        return qd_to_numpy(self.sdfo_pos, transpose=True, copy=True)
 
     @gs.assert_built
     def get_sdf_obstacle_quat(self):
         """
         Current orientation of the mesh-SDF obstacle as a quaternion (w, x, y, z) (per env, shape (n_envs, 4)).
         """
-        return self.sdfo_quat.to_numpy()
+        return qd_to_numpy(self.sdfo_quat, transpose=True, copy=True)
 
     @gs.assert_built
     def query_sdf_obstacle(self, points):
@@ -1387,6 +1399,10 @@ class DEMSolver(Solver):
                 state.tilt_quat,
                 state.tilt_vel,
                 state.tilt_omega,
+                state.sdf_pos,
+                state.sdf_quat,
+                state.sdf_vel,
+                state.sdf_omega,
             )
 
     @qd.kernel
@@ -1401,6 +1417,10 @@ class DEMSolver(Solver):
         tilt_quat: qd.types.ndarray(),
         tilt_vel: qd.types.ndarray(),
         tilt_omega: qd.types.ndarray(),
+        sdf_pos: qd.types.ndarray(),
+        sdf_quat: qd.types.ndarray(),
+        sdf_vel: qd.types.ndarray(),
+        sdf_omega: qd.types.ndarray(),
     ):
         for i_p, i_b in qd.ndrange(self._n_particles, self._B):
             for j in qd.static(range(3)):
@@ -1419,8 +1439,12 @@ class DEMSolver(Solver):
                 self.tilt_pos[i_b][j] = tilt_pos[i_b, j]
                 self.tilt_vel[i_b][j] = tilt_vel[i_b, j]
                 self.tilt_omega[i_b][j] = tilt_omega[i_b, j]
+                self.sdfo_pos[i_b][j] = sdf_pos[i_b, j]
+                self.sdfo_vel[i_b][j] = sdf_vel[i_b, j]
+                self.sdfo_omega[i_b][j] = sdf_omega[i_b, j]
             for j in qd.static(range(4)):
                 self.tilt_quat[i_b][j] = tilt_quat[i_b, j]
+                self.sdfo_quat[i_b][j] = sdf_quat[i_b, j]
 
     def get_state(self, f):
         if self.is_active:
@@ -1437,6 +1461,10 @@ class DEMSolver(Solver):
                 state.tilt_quat,
                 state.tilt_vel,
                 state.tilt_omega,
+                state.sdf_pos,
+                state.sdf_quat,
+                state.sdf_vel,
+                state.sdf_omega,
             )
         else:
             state = None
@@ -1463,6 +1491,10 @@ class DEMSolver(Solver):
         tilt_quat: qd.types.ndarray(),
         tilt_vel: qd.types.ndarray(),
         tilt_omega: qd.types.ndarray(),
+        sdf_pos: qd.types.ndarray(),
+        sdf_quat: qd.types.ndarray(),
+        sdf_vel: qd.types.ndarray(),
+        sdf_omega: qd.types.ndarray(),
     ):
         for i_p, i_b in qd.ndrange(self._n_particles, self._B):
             for j in qd.static(range(3)):
@@ -1475,8 +1507,12 @@ class DEMSolver(Solver):
                 tilt_pos[i_b, j] = self.tilt_pos[i_b][j]
                 tilt_vel[i_b, j] = self.tilt_vel[i_b][j]
                 tilt_omega[i_b, j] = self.tilt_omega[i_b][j]
+                sdf_pos[i_b, j] = self.sdfo_pos[i_b][j]
+                sdf_vel[i_b, j] = self.sdfo_vel[i_b][j]
+                sdf_omega[i_b, j] = self.sdfo_omega[i_b][j]
             for j in qd.static(range(4)):
                 tilt_quat[i_b, j] = self.tilt_quat[i_b][j]
+                sdf_quat[i_b, j] = self.sdfo_quat[i_b][j]
 
     @qd.kernel
     def _kernel_set_particles_pos(

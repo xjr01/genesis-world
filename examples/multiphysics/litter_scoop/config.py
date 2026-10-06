@@ -34,18 +34,15 @@ class LitterScoopAssets:
     """Geometry, poses and visualization choices belonging to the litter-scoop task."""
 
     shovel_mesh: str = "examples/sand_water_coupling/assets/litter_scoop_aligned.glb"
+    shovel_sdf: str = "examples/sand_water_coupling/assets/litter_scoop_sdf_slots.npz"
     sand_pos: tuple[float, float, float] = (0.0, 0.0, 0.081)
     sand_size: tuple[float, float, float] = (0.68, 0.58, 0.16)
     droplet_pos: tuple[float, float, float] = (0.02, 0.0, 0.205)
     droplet_radius: float = 0.04
     wall_thickness: float = 0.01
     wall_height: float = 0.18
-    blade_half_extents: tuple[float, float, float] = (0.15, 0.117, 0.01)
     blade_angle: float = math.radians(40.0)
     blade_initial_pos: tuple[float, float, float] = (-0.20, 0.0, 0.369)
-    handle_length: float = 0.3
-    handle_half_thickness: float = 0.015
-    handle_angle: float = math.radians(40.0)
     camera_res: tuple[int, int] = (1280, 720)
     camera_pos: tuple[float, float, float] = (1.05, -1.05, 0.75)
     camera_lookat: tuple[float, float, float] = (0.0, 0.0, 0.18)

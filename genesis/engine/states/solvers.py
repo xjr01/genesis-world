@@ -511,6 +511,10 @@ class DEMSolverState:
         self._tilt_quat = gs.zeros((scene.sim._B, 4), **args)
         self._tilt_vel = gs.zeros((scene.sim._B, 3), **args)
         self._tilt_omega = gs.zeros((scene.sim._B, 3), **args)
+        self._sdf_pos = gs.zeros((scene.sim._B, 3), **args)
+        self._sdf_quat = gs.zeros((scene.sim._B, 4), **args)
+        self._sdf_vel = gs.zeros((scene.sim._B, 3), **args)
+        self._sdf_omega = gs.zeros((scene.sim._B, 3), **args)
         args["dtype"] = gs.tc_bool
         self._active = gs.zeros(shape, **args)
 
@@ -523,6 +527,10 @@ class DEMSolverState:
         self._tilt_quat = self._tilt_quat.detach()
         self._tilt_vel = self._tilt_vel.detach()
         self._tilt_omega = self._tilt_omega.detach()
+        self._sdf_pos = self._sdf_pos.detach()
+        self._sdf_quat = self._sdf_quat.detach()
+        self._sdf_vel = self._sdf_vel.detach()
+        self._sdf_omega = self._sdf_omega.detach()
         self._active = self._active.detach()
 
     @property
@@ -560,6 +568,22 @@ class DEMSolverState:
     @property
     def tilt_omega(self):
         return self._tilt_omega
+
+    @property
+    def sdf_pos(self):
+        return self._sdf_pos
+
+    @property
+    def sdf_quat(self):
+        return self._sdf_quat
+
+    @property
+    def sdf_vel(self):
+        return self._sdf_vel
+
+    @property
+    def sdf_omega(self):
+        return self._sdf_omega
 
 
 class FLIPSolverState:

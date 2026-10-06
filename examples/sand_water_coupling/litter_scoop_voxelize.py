@@ -8,13 +8,17 @@ Output: experiments/assets/litter_scoop_sdf.npz  (sdf_val (nx,ny,nz) numpy C-ord
 grid nodes are at origin + (i + 0.5) * cell, matching the kernel's -0.5 offset convention)
 """
 
+import hashlib
 import os
 import sys
 import time
+from pathlib import Path
 
 import numpy as np
-import trimesh
+
 import igl
+from scipy import ndimage
+import trimesh
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 MESH_GLB = os.path.join(HERE, "assets", "litter_scoop_aligned.glb")
@@ -74,9 +78,14 @@ def main():
         dx = np.maximum(PLATE_X[0] - pts[:, 0], pts[:, 0] - PLATE_X[1])
         dy = np.maximum(PLATE_Y[0] - pts[:, 1], pts[:, 1] - PLATE_Y[1])
         dz = np.maximum(PLATE_Z[0] - pts[:, 2], pts[:, 2] - PLATE_Z[1])
-        plate = np.sqrt(np.maximum(dx, 0)**2 + np.maximum(dy, 0)**2 + np.maximum(dz, 0)**2) + np.minimum(np.maximum(dx, np.maximum(dy, dz)), 0.0)
+        plate = np.sqrt(np.maximum(dx, 0) ** 2 + np.maximum(dy, 0) ** 2 + np.maximum(dz, 0) ** 2) + np.minimum(
+            np.maximum(dx, np.maximum(dy, dz)), 0.0
+        )
         sdf = np.minimum(sdf, plate.reshape(dims).astype(np.float32))
-        print(f"slots filled with a plate {PLATE_X}x{PLATE_Y}x{PLATE_Z}; sdf range now [{sdf.min():.4f}, {sdf.max():.4f}]", flush=True)
+        print(
+            f"slots filled with a plate {PLATE_X}x{PLATE_Y}x{PLATE_Z}; sdf range now [{sdf.min():.4f}, {sdf.max():.4f}]",
+            flush=True,
+        )
     else:
         print("noplate: keeping the true slotted pan floor", flush=True)
 
@@ -86,17 +95,18 @@ def main():
     # the sign topologically: cells with |phi| <= 1 cell are barriers; flood fill the rest from the
     # grid boundary — reachable => positive (outside), unreachable => negative (inside solid);
     # barrier cells inherit the sign of their nearest non-barrier cell.
-    from scipy import ndimage
-
     free = np.abs(sdf) > 1.0 * CELL
     lab, _ = ndimage.label(free)
     bnd = set(
         np.unique(
             np.concatenate(
                 [
-                    lab[0, :, :].ravel(), lab[-1, :, :].ravel(),
-                    lab[:, 0, :].ravel(), lab[:, -1, :].ravel(),
-                    lab[:, :, 0].ravel(), lab[:, :, -1].ravel(),
+                    lab[0, :, :].ravel(),
+                    lab[-1, :, :].ravel(),
+                    lab[:, 0, :].ravel(),
+                    lab[:, -1, :].ravel(),
+                    lab[:, :, 0].ravel(),
+                    lab[:, :, -1].ravel(),
                 ]
             )
         )
@@ -115,6 +125,8 @@ def main():
         dims=dims.astype(np.int32),
         origin=origin.astype(np.float32),
         cell=np.array([CELL, CELL, CELL], dtype=np.float32),
+        mesh_sha256=hashlib.sha256(Path(MESH_GLB).read_bytes()).hexdigest(),
+        has_open_slots=NO_PLATE,
     )
     print(f"saved {OUT_NPZ}", flush=True)
 

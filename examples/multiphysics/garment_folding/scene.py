@@ -1,3 +1,4 @@
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -110,6 +111,8 @@ def build_scene(
                 )
         if config.task.physics_steps_per_action < 1:
             raise ValueError("physics_steps_per_action must be positive.")
+        if config.task.settle_steps < 0:
+            raise ValueError("settle_steps must be non-negative.")
         if config.task.action_fps <= 0.0:
             raise ValueError("action_fps must be positive.")
         expected_dt = 1.0 / (config.task.action_fps * config.task.physics_steps_per_action)
@@ -138,6 +141,7 @@ def build_scene(
             contact_resistance=solver.contact_resistance,
             newton_semi_implicit_enable=solver.newton_semi_implicit_enable,
             newton_max_iterations=solver.newton_max_iterations,
+            newton_min_iterations=solver.newton_min_iterations,
             n_linesearch_iterations=solver.n_linesearch_iterations,
             newton_tolerance=solver.newton_tolerance,
             newton_translation_tolerance=solver.newton_translation_tolerance,
@@ -148,6 +152,7 @@ def build_scene(
             two_way_coupling=solver.two_way_coupling,
             enable_rigid_rigid_contact=solver.is_rigid_rigid_contact_enabled,
         ),
+        rigid_options=gs.options.RigidOptions(enable_collision=solver.enable_genesis_rigid_collision),
         viewer_options=gs.options.ViewerOptions(camera_pos=assets.camera_pos, camera_lookat=assets.camera_lookat),
         show_viewer=show_viewer,
     )
@@ -173,6 +178,7 @@ def build_scene(
     )
     robot = None
     if config.task.uses_robot_trajectory:
+        robot_load_started = time.perf_counter()
         robot = scene.add_entity(
             morph=gs.morphs.URDF(
                 file=str(robot_path),
@@ -182,6 +188,7 @@ def build_scene(
                 collision=True,
                 convexify=False,
                 decimate=False,
+                watertighten=assets.robot_watertighten,
             ),
             material=gs.materials.Rigid(
                 coup_type="two_way_soft_constraint",
@@ -191,6 +198,7 @@ def build_scene(
             ),
             surface=gs.surfaces.Plastic(color=(0.56, 0.61, 0.66, 1.0)),
         )
+        print(f"garment_folding timing: robot_load_seconds={time.perf_counter() - robot_load_started:.3f}", flush=True)
         genesis_joint_names = tuple(joint.name for joint in robot.joints if joint.n_qs)
         if set(genesis_joint_names) != set(source_joint_names):
             raise ValueError(
@@ -204,6 +212,16 @@ def build_scene(
             action_fps=config.task.action_fps,
             physics_steps_per_action=config.task.physics_steps_per_action,
         )
+        movable_qs = 0
+        for joint in robot.joints:
+            if joint.n_qs:
+                if np.any(joint.init_qpos != 0):
+                    raise ValueError("Scene527 requires neutral URDF joint defaults for IPC proxy construction.")
+                movable_qs += joint.n_qs
+        if movable_qs != joint_q.shape[1]:
+            raise RuntimeError(
+                f"Garment robot exposes {movable_qs} movable coordinates; trajectory has {joint_q.shape[1]}."
+            )
     else:
         robot_trajectory = None
 
@@ -212,6 +230,7 @@ def build_scene(
         if garment_texture is None
         else gs.surfaces.Default(diffuse_texture=gs.textures.ImageTexture(image_path=str(garment_texture)))
     )
+    garment_load_started = time.perf_counter()
     garment = scene.add_entity(
         morph=gs.morphs.Mesh(
             file=str(garment_mesh),
@@ -231,6 +250,7 @@ def build_scene(
         ),
         surface=garment_surface,
     )
+    print(f"garment_folding timing: garment_load_seconds={time.perf_counter() - garment_load_started:.3f}", flush=True)
     if assets.expected_garment_vertices is not None and garment.n_vertices != assets.expected_garment_vertices:
         raise ValueError(
             f"Garment mesh has {garment.n_vertices} vertices; expected {assets.expected_garment_vertices}."
@@ -279,13 +299,14 @@ def build_scene(
             fov=assets.camera_fov,
             GUI=False,
         )
+    scene_build_started = time.perf_counter()
     scene.build()
+    print(f"garment_folding timing: scene_build_seconds={time.perf_counter() - scene_build_started:.3f}", flush=True)
 
     if robot is not None:
         robot.set_qpos(robot_trajectory.joint_q[0], zero_velocity=True)
-        scene.reset(scene.get_state())
 
-    initial_positions = tensor_to_array(garment.get_state().pos).reshape(-1, 3)
+    initial_positions = tensor_to_array(garment.get_state().pos).reshape(-1, 3).copy()
     if config.task.uses_robot_trajectory:
         landmarks = None
         default_steps = robot_trajectory.physics_steps

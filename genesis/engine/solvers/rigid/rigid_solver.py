@@ -1233,7 +1233,8 @@ class RigidSolver(KinematicSolver):
             for geom, center in zip(geoms, geoms_center):
                 is_hollow = False
                 if (
-                    geom.type not in (gs.GEOM_TYPE.SPHERE, gs.GEOM_TYPE.PLANE, gs.GEOM_TYPE.TERRAIN)
+                    self._enable_collision
+                    and geom.type not in (gs.GEOM_TYPE.SPHERE, gs.GEOM_TYPE.PLANE, gs.GEOM_TYPE.TERRAIN)
                     and not geom.is_convex
                 ):
                     grid_pos = geom.T_mesh_to_sdf[:3, :3] @ center + geom.T_mesh_to_sdf[:3, 3]

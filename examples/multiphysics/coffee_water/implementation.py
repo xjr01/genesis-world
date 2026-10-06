@@ -856,6 +856,7 @@ def build_scene(
             quat=assets.robot_quat,
             file=assets.robot,
             convexify=False,
+            collision_links=assets.robot_collision_links,
             fixed=True,
         ),
         material=gs.materials.Rigid(
@@ -1039,16 +1040,29 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--particle-size", type=float, default=SOLVER_CONFIG.pbstf_particle_size)
     parser.add_argument("--steps", type=int)
+    parser.add_argument("--progress-every", type=int, default=100)
+    parser.add_argument("--record-segment-seconds", type=float, default=1.0)
     parser.add_argument("--vis", dest="is_viewer_shown", action="store_true")
     parser.add_argument("--record", dest="is_recording", action="store_true")
     parser.add_argument("--surface", dest="is_surface", action="store_true")
     parser.add_argument("--check-motion", dest="is_motion_only", action="store_true")
     parser.add_argument("--no-liquid", dest="is_liquid_enabled", action="store_false")
+    parser.add_argument(
+        "--profile-build",
+        action="store_true",
+        help="Show Genesis scene-build and kernel-compilation timers.",
+    )
     parser.add_argument("--output", type=Path, default=Path("out/pbstf_coffee_water"))
     args = parser.parse_args()
-    if args.particle_size <= 0 or (args.steps is not None and args.steps <= 0):
-        parser.error("--particle-size and --steps must be positive")
-    gs.init(backend=gs.cuda, precision="32", logging_level="warning")
+    if args.particle_size <= 0 or (args.steps is not None and args.steps <= 0) or args.record_segment_seconds <= 0:
+        parser.error("--particle-size, --steps, and --record-segment-seconds must be positive")
+    if args.progress_every < 0:
+        parser.error("--progress-every must be non-negative")
+    gs.init(
+        backend=gs.cuda,
+        precision="32",
+        logging_level="info" if args.profile_build else "warning",
+    )
     output = args.output
     output.mkdir(parents=True, exist_ok=True)
     demo = build_scene(
@@ -1063,11 +1077,13 @@ def main():
     print(f"coffee_water timing: build_seconds={build_seconds:.3f}", flush=True)
     dt = CONTROL_DT
     steps = args.steps if args.steps is not None else round(MOTION_END / dt)
+    record_segment_steps = max(1, round(args.record_segment_seconds / dt))
     initial_mass = None
     if demo.coffee is not None:
         initial_mass = tensor_to_array(demo.coffee.get_mass() + demo.water.get_mass()).sum()
     if demo.camera is not None:
-        demo.camera.start_recording(save_to_filename=str(output / "coffee-water.mp4"), fps=50)
+        demo.camera.start_recording(save_to_filename=str(output / "coffee-water-segment-00000.mp4"), fps=50)
+    record_segment_index = 0
     previous_phases = None
     observation = observe_scene(demo)
     checkpoint_steps = {round(time / dt) - 1 for time in (3.0, 4.0, 6.0, 6.4, 14.0, 20.0, MOTION_END)}
@@ -1122,7 +1138,26 @@ def main():
                 target, ik_error = update_motion(demo, time, observation)
                 step_scene(demo)
                 observation = observe_scene(demo)
+                if (
+                    demo.camera is not None
+                    and args.is_recording
+                    and (step + 1) % record_segment_steps == 0
+                    and step + 1 < steps
+                ):
+                    demo.camera.stop_recording()
+                    record_segment_index += 1
+                    demo.camera.start_recording(
+                        save_to_filename=str(output / f"coffee-water-segment-{record_segment_index:05d}.mp4"),
+                        fps=50,
+                    )
                 measurement = measure_motion(time, target, observation, demo.config)
+                if args.progress_every and ((step + 1) % args.progress_every == 0 or step + 1 == steps):
+                    print(
+                        f"coffee_water progress: step={step + 1}/{steps}, simulated_time={demo.scene.cur_t:.6f}s, "
+                        f"wall_seconds={wall_time.perf_counter() - simulation_started:.3f}, "
+                        f"right={target.right_phase.name}, left={target.left_phase.name}",
+                        flush=True,
+                    )
                 if measurement.hands_position_error[1] > 0.005 or (
                     target.right_phase not in (Phase.REACH_SPONGE, Phase.CATCH)
                     and measurement.hands_position_error[0] > 0.005

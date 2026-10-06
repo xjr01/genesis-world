@@ -22,6 +22,14 @@ def test_coffee_water_public_api():
     controller = CoffeeWaterController(config.task)
 
     assert controller.config is config.task
+    assert config.assets.robot_collision_links == (
+        "left_link16",
+        "left_link17",
+        "left_link18",
+        "right_link26",
+        "right_link27",
+        "right_link28",
+    )
     assert pbstf_coffee_water.build_scene is build_scene
     assert pbstf_coffee_water.CoffeeWaterRuntime is CoffeeWaterRuntime
 

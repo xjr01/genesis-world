@@ -1,6 +1,9 @@
+import hashlib
 import math
 from dataclasses import dataclass
 from pathlib import Path
+
+import numpy as np
 
 import genesis as gs
 from genesis.integrations import GranularFluidProperties, GranularFluidSetup, create_granular_fluid_setup
@@ -23,6 +26,11 @@ class LitterScoopRuntime:
     @property
     def control_dt(self) -> float:
         return self.config.solver.dt
+
+    def synchronize_shovel(self):
+        """Align the visual shovel with the mesh obstacle across all environments."""
+        self.shovel.set_pos(self.scene.dem_solver.get_sdf_obstacle_pos())
+        self.shovel.set_quat(self.scene.dem_solver.get_sdf_obstacle_quat())
 
 
 def build_scene(
@@ -138,15 +146,21 @@ def build_scene(
             fov=assets.camera_fov,
         )
 
-    scene.build()
-    scene.dem_solver.set_tilt_box_obstacle(
-        assets.blade_half_extents,
-        assets.blade_initial_pos,
-        quat=blade_quat,
-        handle=(assets.handle_length, assets.handle_half_thickness, assets.handle_angle),
-    )
+    with np.load(repository_root / assets.shovel_sdf) as sdf:
+        mesh_sha256 = hashlib.sha256((repository_root / assets.shovel_mesh).read_bytes()).hexdigest()
+        if sdf["mesh_sha256"].item() != mesh_sha256 or not sdf["has_open_slots"].item():
+            raise ValueError("Shovel collision data must match the visual mesh and preserve its slots.")
+        scene.build()
+        scene.dem_solver.set_sdf_obstacle(
+            sdf["sdf_val"],
+            sdf["dims"],
+            sdf["origin"],
+            sdf["cell"],
+            assets.blade_initial_pos,
+            quat=blade_quat,
+        )
     scene.reset(scene.get_state())
-    return LitterScoopRuntime(
+    runtime = LitterScoopRuntime(
         scene=scene,
         config=config,
         setup=setup,
@@ -155,3 +169,5 @@ def build_scene(
         shovel=shovel,
         camera=camera,
     )
+    scene.register_pre_step_callback(runtime.synchronize_shovel)
+    return runtime

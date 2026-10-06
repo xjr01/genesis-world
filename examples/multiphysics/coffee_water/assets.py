@@ -8,6 +8,14 @@ class CoffeeWaterAssets:
     cup: str = "meshes/drinking_glass/12-oz-glass.obj"
     cup_cavity: str = "meshes/drinking_glass/12-oz-glass-cavity.obj"
     robot: str = "urdf/sim1_acone/acone_collision.urdf"
+    robot_collision_links: tuple[str, ...] = (
+        "left_link16",
+        "left_link17",
+        "left_link18",
+        "right_link26",
+        "right_link27",
+        "right_link28",
+    )
     rod: str = "meshes/glass_stirring_rod/glass_rod.obj"
     coffee_cup_pos: tuple[float, float, float] = (-0.09, -0.045, 0.0)
     water_cup_pos: tuple[float, float, float] = (0.09, -0.045, 0.0)

@@ -1,5 +1,6 @@
 import logging
 import os
+import re
 import sys
 import tempfile
 import weakref
@@ -82,6 +83,50 @@ ABD_KAPPA = 100.0  # MPa unit
 # TODO: consider deriving from Genesis joint properties instead of hardcoding.
 STIFFNESS_DEFAULT = 1e4
 JOINT_STRENGTH_RATIO = 100.0
+
+
+def _uipc_version(version: str) -> tuple[int, int, int]:
+    match = re.match(r"^(\d+)\.(\d+)\.(\d+)", version)
+    if match is None:
+        raise RuntimeError(f"Cannot determine libuipc shell convention from version {version!r}.")
+    return tuple(int(component) for component in match.groups())
+
+
+def _uipc_uses_area_shell_measure(version: str) -> bool:
+    return _uipc_version(version) >= (0, 0, 26)
+
+
+def _shell_membrane_stiffness_for_uipc(
+    lame_lambda: float, lame_mu: float, thickness: float, version: str
+) -> tuple[float, float]:
+    weight = 2.0 * thickness if _uipc_uses_area_shell_measure(version) else 1.0
+    return lame_lambda * weight, lame_mu * weight
+
+
+def _shell_hinge_areas(positions: np.ndarray, faces: np.ndarray, edges: np.ndarray) -> np.ndarray:
+    """Sum the two incident rest-triangle areas in each bending hinge."""
+    triangles = positions[faces]
+    areas = 0.5 * np.linalg.norm(np.cross(triangles[:, 1] - triangles[:, 0], triangles[:, 2] - triangles[:, 0]), axis=1)
+    face_edges = np.sort(faces[:, ((0, 1), (1, 2), (2, 0))].reshape(-1, 2), axis=1)
+    sorted_edges = np.sort(edges, axis=1)
+    keys = sorted_edges[:, 0].astype(np.int64) * len(positions) + sorted_edges[:, 1]
+    order = np.argsort(keys)
+    face_keys = face_edges[:, 0].astype(np.int64) * len(positions) + face_edges[:, 1]
+    indices = order[np.searchsorted(keys[order], face_keys)]
+    return np.bincount(indices, weights=np.repeat(areas, 3), minlength=len(edges))
+
+
+def _shell_bending_stiffness_for_uipc(bending_stiffness: float, thickness: float, version: str) -> float:
+    """Map Genesis' legacy shell bending coefficient to the installed libuipc convention.
+
+    libuipc 0.0.26 changed ``DiscreteShellBending`` from a thickness-integrated
+    coefficient to a per-area coefficient. Scaling by thickness preserves that
+    part of the legacy calibration. From 0.0.28 the caller must additionally
+    incorporate each hinge's rest area, because its outer multiplier is removed.
+    """
+    if _uipc_uses_area_shell_measure(version):
+        return bending_stiffness * thickness
+    return bending_stiffness
 
 
 def _animate_rigid_link(coupler_ref, link, env_idx, info):
@@ -371,6 +416,16 @@ class IPCCoupler(RBC):
                     self._ipc_nks.apply_to(
                         mesh, moduli=moduli, mass_density=entity.material.rho, thickness=entity.material.thickness
                     )
+                    if _uipc_uses_area_shell_measure(uipc.__version__):
+                        # <=0.0.25 integrated both Lame coefficients over area * 2r.
+                        # New releases integrate over area and reinterpret lambda
+                        # as stretch stiffness. Set the effective coefficients
+                        # explicitly to preserve Genesis' existing calibration.
+                        stretch, shear = _shell_membrane_stiffness_for_uipc(
+                            moduli.lambda_(), moduli.mu(), entity.material.thickness, uipc.__version__
+                        )
+                        uipc.view(mesh.triangles().find("lambda"))[:] = stretch
+                        uipc.view(mesh.triangles().find("mu"))[:] = shear
 
                     # Apply bending stiffness if specified
                     if entity.material.bending_stiffness is not None:
@@ -378,7 +433,19 @@ class IPCCoupler(RBC):
                             self._ipc_dsb = DiscreteShellBending()
                             self._ipc_constitution_tabular.insert(self._ipc_dsb)
 
-                        self._ipc_dsb.apply_to(mesh, bending_stiffness=entity.material.bending_stiffness)
+                        bending_stiffness = _shell_bending_stiffness_for_uipc(
+                            entity.material.bending_stiffness,
+                            entity.material.thickness,
+                            uipc.__version__,
+                        )
+                        self._ipc_dsb.apply_to(mesh, bending_stiffness=bending_stiffness)
+                        if _uipc_version(uipc.__version__) >= (0, 0, 28):
+                            # 0.0.28 removes the outer hinge-area multiplier too.
+                            # Preserve the <=0.0.25 rest metric per edge, not by
+                            # applying a mesh-resolution-dependent average.
+                            edges = np.asarray(uipc.view(mesh.edges().topo())).reshape(-1, 2)
+                            hinge_areas = _shell_hinge_areas(verts, faces, edges)
+                            uipc.view(mesh.edges().find("bending_stiffness")).reshape(-1)[:] *= hinge_areas
                 else:
                     if self._ipc_stk is None:
                         self._ipc_stk = StableNeoHookean()
@@ -716,7 +783,14 @@ class IPCCoupler(RBC):
                     friction_ij = geometric_mean(info_i.friction, info_j.friction)
                 friction_ij = self._contact_pair_friction.get(frozenset((info_i.entity, info_j.entity)), friction_ij)
                 resistance_ij = harmonic_mean(info_i.resistance, info_j.resistance)
-                enabled = not (info_i.is_abd and info_j.is_abd) or self.options.enable_rigid_rigid_contact
+                both_abd = info_i.is_abd and info_j.is_abd
+                # One articulated robot shares a single ABD contact element across all of its coupled links.
+                # Enabling that element's self-pair makes adjacent palm/finger links collide with each other and can
+                # invalidate an otherwise legal neutral pose.  Preserve rigid contact between distinct entities
+                # (for example robot-table) without treating one articulation as a rigid self-collision system.
+                enabled = not both_abd or (
+                    self.options.enable_rigid_rigid_contact and info_i.entity is not info_j.entity
+                )
                 self._ipc_contact_tabular.insert(info_i.element, info_j.element, friction_ij, resistance_ij, enabled)
 
         # Register per-plane ground contact pairs
@@ -1034,9 +1108,7 @@ class IPCCoupler(RBC):
             if len(data.prev_links_transform) != len(articulation_state.prev_links_transform):
                 gs.raise_exception("IPC articulation checkpoint link topology mismatch.")
             data.ref_dof_prev[:] = articulation_state.ref_dof_prev
-            for transforms, saved_transforms in zip(
-                data.prev_links_transform, articulation_state.prev_links_transform
-            ):
+            for transforms, saved_transforms in zip(data.prev_links_transform, articulation_state.prev_links_transform):
                 if len(transforms) != len(saved_transforms):
                     gs.raise_exception("IPC articulation checkpoint environment topology mismatch.")
                 for env_idx, transform in enumerate(saved_transforms):
