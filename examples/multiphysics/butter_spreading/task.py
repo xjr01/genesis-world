@@ -57,14 +57,38 @@ def knife_pose(config: ButterSpreadingTaskConfig, time_s: float) -> tuple[float,
     return x_pos, 0.0, z_pos
 
 
+@dataclass(frozen=True)
+class ButterSpreadingControllerState:
+    """Task time kept outside the Scene clock so a restored checkpoint resumes its blade trajectory."""
+
+    step_index: int = 0
+
+
 @dataclass
 class ButterSpreadingController:
     config: ButterSpreadingTaskConfig
     dt: float
+    step_index: int = 0
+
+    def reset(self, runtime: "ButterSpreadingRuntime"):
+        if self.config != runtime.config.task or self.dt != runtime.config.solver.dt:
+            raise ValueError("Controller configuration must match the scene configuration.")
+        self.step_index = 0
+
+    def get_state(self) -> ButterSpreadingControllerState:
+        return ButterSpreadingControllerState(step_index=self.step_index)
+
+    def set_state(self, runtime: "ButterSpreadingRuntime", state: ButterSpreadingControllerState):
+        if not isinstance(state, ButterSpreadingControllerState):
+            raise TypeError("state must be a ButterSpreadingControllerState")
+        if self.config != runtime.config.task or self.dt != runtime.config.solver.dt:
+            raise ValueError("Controller configuration must match the scene configuration.")
+        self.step_index = state.step_index
 
     def step(self, runtime: "ButterSpreadingRuntime"):
-        current_local_pose = knife_pose(self.config, runtime.scene.cur_t)
-        next_local_pose = knife_pose(self.config, runtime.scene.cur_t + self.dt)
+        task_time = self.step_index * self.dt
+        current_local_pose = knife_pose(self.config, task_time)
+        next_local_pose = knife_pose(self.config, task_time + self.dt)
         current_pose = tuple(origin + value for origin, value in zip(runtime.task_origin, current_local_pose))
         next_pose = tuple(origin + value for origin, value in zip(runtime.task_origin, next_local_pose))
         center = (
@@ -76,3 +100,4 @@ class ButterSpreadingController:
         runtime.blade.set_pos(center, zero_velocity=False, relative=False, skip_forward=True)
         runtime.blade.set_dofs_velocity((*velocity, 0.0, 0.0, 0.0))
         runtime.scene.step()
+        self.step_index += 1

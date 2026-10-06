@@ -379,6 +379,16 @@ class DEMSolver(Solver):
         return self.tilt_quat.to_numpy()
 
     @gs.assert_built
+    def get_tilt_box_vel(self):
+        """Current linear velocity of the tilted box obstacle (per env, shape (n_envs, 3))."""
+        return self.tilt_vel.to_numpy()
+
+    @gs.assert_built
+    def get_tilt_box_omega(self):
+        """Current angular velocity of the tilted box obstacle (per env, shape (n_envs, 3))."""
+        return self.tilt_omega.to_numpy()
+
+    @gs.assert_built
     def set_sdf_obstacle(
         self, sdf_val, dims, origin, cell_size, pos, quat=(1.0, 0.0, 0.0, 0.0), vel=(0.0, 0.0, 0.0), sdf_grad=None
     ):
@@ -1367,7 +1377,17 @@ class DEMSolver(Solver):
 
     def set_state(self, f, state, envs_idx=None):
         if self.is_active:
-            self._kernel_set_state(f, state.pos, state.vel, state.active, state.ratio)
+            self._kernel_set_state(
+                f,
+                state.pos,
+                state.vel,
+                state.active,
+                state.ratio,
+                state.tilt_pos,
+                state.tilt_quat,
+                state.tilt_vel,
+                state.tilt_omega,
+            )
 
     @qd.kernel
     def _kernel_set_state(
@@ -1377,6 +1397,10 @@ class DEMSolver(Solver):
         vel: qd.types.ndarray(),
         active: qd.types.ndarray(),
         ratio: qd.types.ndarray(),
+        tilt_pos: qd.types.ndarray(),
+        tilt_quat: qd.types.ndarray(),
+        tilt_vel: qd.types.ndarray(),
+        tilt_omega: qd.types.ndarray(),
     ):
         for i_p, i_b in qd.ndrange(self._n_particles, self._B):
             for j in qd.static(range(3)):
@@ -1390,13 +1414,30 @@ class DEMSolver(Solver):
             self.particles[i_p, i_b].add_velocity.fill(0.0)
             self.particles[i_p, i_b].coupling_force.fill(0.0)
             self.particles[i_p, i_b].inv_mass_eff = 0.0
+        for i_b in range(self._B):
+            for j in qd.static(range(3)):
+                self.tilt_pos[i_b][j] = tilt_pos[i_b, j]
+                self.tilt_vel[i_b][j] = tilt_vel[i_b, j]
+                self.tilt_omega[i_b][j] = tilt_omega[i_b, j]
+            for j in qd.static(range(4)):
+                self.tilt_quat[i_b][j] = tilt_quat[i_b, j]
 
     def get_state(self, f):
         if self.is_active:
             from genesis.engine.states.solvers import DEMSolverState
 
             state = DEMSolverState(self.scene)
-            self._kernel_get_state(f, state.pos, state.vel, state.active, state.ratio)
+            self._kernel_get_state(
+                f,
+                state.pos,
+                state.vel,
+                state.active,
+                state.ratio,
+                state.tilt_pos,
+                state.tilt_quat,
+                state.tilt_vel,
+                state.tilt_omega,
+            )
         else:
             state = None
         return state
@@ -1418,6 +1459,10 @@ class DEMSolver(Solver):
         vel: qd.types.ndarray(),
         active: qd.types.ndarray(),
         ratio: qd.types.ndarray(),
+        tilt_pos: qd.types.ndarray(),
+        tilt_quat: qd.types.ndarray(),
+        tilt_vel: qd.types.ndarray(),
+        tilt_omega: qd.types.ndarray(),
     ):
         for i_p, i_b in qd.ndrange(self._n_particles, self._B):
             for j in qd.static(range(3)):
@@ -1425,6 +1470,13 @@ class DEMSolver(Solver):
                 vel[i_b, i_p, j] = self.particles[i_p, i_b].vel[j]
             active[i_b, i_p] = qd.cast(self.particles[i_p, i_b].active, gs.qd_bool)
             ratio[i_b, i_p] = self.particles[i_p, i_b].ratio
+        for i_b in range(self._B):
+            for j in qd.static(range(3)):
+                tilt_pos[i_b, j] = self.tilt_pos[i_b][j]
+                tilt_vel[i_b, j] = self.tilt_vel[i_b][j]
+                tilt_omega[i_b, j] = self.tilt_omega[i_b][j]
+            for j in qd.static(range(4)):
+                tilt_quat[i_b, j] = self.tilt_quat[i_b][j]
 
     @qd.kernel
     def _kernel_set_particles_pos(

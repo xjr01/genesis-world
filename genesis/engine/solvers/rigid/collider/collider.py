@@ -14,17 +14,13 @@ import torch
 import trimesh
 
 import genesis as gs
-
-import genesis.utils.array_class as array_class
-import genesis.engine.solvers.rigid.rigid_solver as rigid_solver
 from genesis.engine.materials.rigid import Rigid
-from genesis.utils.misc import assign_indexed_tensor, tensor_to_array, qd_to_torch, qd_to_numpy, indices_to_mask
+from genesis.engine.solvers.rigid import rigid_solver
+from genesis.utils import array_class
+from genesis.utils.misc import assign_indexed_tensor, indices_to_mask, qd_to_numpy, qd_to_torch, tensor_to_array
 from genesis.utils.sdf import SDF
 
-from . import mpr
-from . import gjk
-from . import support_field
-
+from . import gjk, mpr, narrowphase, support_field
 from .broadphase import func_broad_phase
 from .contact import (
     collider_kernel_get_contacts,
@@ -35,7 +31,6 @@ from .contact import (
     kernel_collider_clear,
     kernel_masked_collider_clear,
 )
-from . import narrowphase
 from .narrowphase import (
     CCD_ALGORITHM_CODE,
     func_narrow_phase_any_vs_terrain,
@@ -1009,7 +1004,9 @@ class Collider:
                 if not (as_tensor or n_envs == 0):
                     n_contacts_max = n_contacts.max().item()
                 sort_idx_view = qd_to_torch(self._collider_state.contact_sort_idx, transpose=True, copy=False)
-                gather_idx_flat = sort_idx_view[:, :n_contacts_max]
+                # torch.gather requires int64 indices on supported PyTorch releases even though the collider stores
+                # its compact permutation as Genesis integer data.
+                gather_idx_flat = sort_idx_view[:, :n_contacts_max].long()
                 gather_idx_vec = gather_idx_flat.unsqueeze(-1).expand(-1, -1, 3)
                 # Gather indices past each env's n_contacts are stale (the permutation only fills the live range), so
                 # the dense (n_envs, n_contacts_max) tensor has padding columns to reset to the per-field sentinel.

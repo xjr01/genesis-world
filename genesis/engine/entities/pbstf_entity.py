@@ -35,5 +35,14 @@ class PBSTFEntity(SPHEntity):
         self._queried_states.append(state)
         return state
 
+    @gs.assert_built
+    def get_particles_absorbed_collider_idx(self):
+        """Return the absorbing static-collider index for each particle, or -1 while unabsorbed."""
+        state = self.solver.get_state(self.sim.cur_substep_local)
+        if state.absorbed_collider_idx is None:
+            return None
+        indices = state.absorbed_collider_idx[..., self.particle_start : self.particle_end]
+        return indices if self.scene.n_envs else indices[0]
+
     def _get_morph_identifier(self) -> str:
         return f"pbstf_{ParticleEntity._get_morph_identifier(self)}"

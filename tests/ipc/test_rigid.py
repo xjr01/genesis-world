@@ -14,7 +14,7 @@ from uipc import builtin
 
 import genesis as gs
 import genesis.utils.geom as gu
-from genesis.utils.misc import tensor_to_array, geometric_mean, harmonic_mean
+from genesis.utils.misc import geometric_mean, harmonic_mean, tensor_to_array
 
 from ..conftest import TOL_SINGLE
 from ..utils import assert_allclose, get_hf_dataset
@@ -383,6 +383,32 @@ def test_contact_pair_friction_resistance(enable_rigid_rigid_contact):
             contact_resistance=25.0,
         ),
     )
+    asset_path = get_hf_dataset(pattern="IPC/grid20x20.obj")
+    cloth = scene.add_entity(
+        morph=gs.morphs.Mesh(
+            file=f"{asset_path}/IPC/grid20x20.obj",
+            scale=0.05,
+            pos=(0.6, 0.0, 0.12),
+        ),
+        material=gs.materials.FEM.Cloth(
+            friction_mu=0.36,
+            self_friction_mu=0.81,
+        ),
+    )
+    cloth_default = scene.add_entity(
+        morph=gs.morphs.Mesh(
+            file=f"{asset_path}/IPC/grid20x20.obj",
+            scale=0.05,
+            pos=(0.8, 0.0, 0.12),
+        ),
+        material=gs.materials.FEM.Cloth(
+            friction_mu=0.25,
+        ),
+    )
+    scene.set_ipc_contact_pair_friction(cloth, plane, friction=0.77)
+    scene.set_ipc_contact_pair_friction(cloth, rigid_a, friction=0.55)
+    with pytest.raises(gs.GenesisException, match="self-friction"):
+        scene.set_ipc_contact_pair_friction(cloth, cloth, friction=0.9)
 
     scene.build()
     assert scene.sim is not None
@@ -414,6 +440,13 @@ def test_contact_pair_friction_resistance(enable_rigid_rigid_contact):
             all(isinstance(entity, RigidEntity) and entity is not plane for entity in entities)
             and not enable_rigid_rigid_contact
         )
+
+    cloth_elem = coupler._ipc_cloth_contacts[cloth]
+    cloth_default_elem = coupler._ipc_cloth_contacts[cloth_default]
+    assert tab.at(cloth_elem.id(), cloth_elem.id()).friction_rate() == pytest.approx(0.81)
+    assert tab.at(cloth_default_elem.id(), cloth_default_elem.id()).friction_rate() == pytest.approx(0.25)
+    assert tab.at(cloth_elem.id(), coupler._ipc_ground_contacts[plane].id()).friction_rate() == pytest.approx(0.77)
+    assert tab.at(cloth_elem.id(), coupler._ipc_abd_contacts[rigid_a].id()).friction_rate() == pytest.approx(0.55)
 
 
 @pytest.mark.required

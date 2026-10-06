@@ -18,6 +18,7 @@ from genesis.utils.misc import geometric_mean, harmonic_mean, qd_to_numpy, tenso
 
 if TYPE_CHECKING:
     from genesis.engine.entities import FEMEntity, RigidEntity
+    from genesis.engine.entities.base_entity import Entity
     from genesis.engine.entities.rigid_entity import RigidJoint, RigidLink
     from genesis.engine.simulator import Simulator
     from genesis.engine.solvers import FEMSolver, RigidSolver
@@ -46,18 +47,26 @@ if TYPE_CHECKING or UIPC_AVAILABLE:
         StrainLimitingBaraffWitkinShell,
     )
     from uipc.core import (
-        Engine,
-        World,
-        Scene,
         AffineBodyStateAccessorFeature,
-        FiniteElementStateAccessorFeature,
         ContactElement,
+        Engine,
+        FiniteElementStateAccessorFeature,
+        Scene,
         SubsceneElement,
+        World,
     )
     from uipc.geometry import GeometrySlot, SimplicialComplex, SimplicialComplexSlot
     from uipc.gui import SceneGUI
 
-    from .data import COUPLING_TYPE, ABDLinkEntry, ArticulatedEntityData, IPCCouplingData
+    from .data import (
+        COUPLING_TYPE,
+        ABDLinkEntry,
+        ArticulatedEntityData,
+        IPCArticulationState,
+        IPCContactInfo,
+        IPCCouplerState,
+        IPCCouplingData,
+    )
     from .utils import (
         build_ipc_scene_config,
         compute_link_to_link_transform,
@@ -158,6 +167,7 @@ class IPCCoupler(RBC):
         self._ipc_cloth_contacts: dict["FEMEntity", ContactElement] = {}
         self._ipc_abd_contacts: dict["RigidEntity", ContactElement] = {}
         self._ipc_ground_contacts: dict["RigidEntity", ContactElement] = {}
+        self._contact_pair_friction: dict[frozenset["Entity"], float] = {}
 
         # ==== FEM Geometry & State ====
         self._fem_state_feature: FiniteElementStateAccessorFeature | None = None
@@ -190,6 +200,16 @@ class IPCCoupler(RBC):
     # ============================================================
     # Section 1: Configuration API
     # ============================================================
+
+    def set_contact_pair_friction(self, entity_a: "Entity", entity_b: "Entity", friction: float) -> None:
+        """Set the friction coefficient for one entity pair before building the simulator."""
+        if self._ipc_engine is not None:
+            gs.raise_exception("IPC contact pair friction must be configured before scene.build().")
+        if entity_a is entity_b:
+            gs.raise_exception("Use the material self-friction option for contact within one entity.")
+        if not np.isfinite(friction) or friction < 0.0:
+            gs.raise_exception("IPC contact pair friction must be finite and non-negative.")
+        self._contact_pair_friction[frozenset((entity_a, entity_b))] = float(friction)
 
     def build(self) -> None:
         """Build IPC system"""
@@ -673,39 +693,49 @@ class IPCCoupler(RBC):
         ``contact_resistance``, ``options.contact_resistance`` is used as the per-entity fallback.
         Ground pairs combine entity parameters with the plane entity's material friction.
         """
-        # Collect (ContactElement, friction_mu, resistance, is_abd) for all entity contact elements
-        contact_infos: list[tuple[ContactElement, float, float, bool]] = []
+        contact_infos: list[IPCContactInfo] = []
         for entity, elem in (*self._ipc_cloth_contacts.items(), *self._ipc_fem_contacts.items()):
             friction = entity.material.friction_mu
             resistance = entity.material.contact_resistance or self.options.contact_resistance
-            contact_infos.append((elem, friction, resistance, False))
+            contact_infos.append(IPCContactInfo(entity, elem, friction, resistance, False))
         for entity, elem in self._ipc_abd_contacts.items():
             friction = entity.material.coup_friction
             resistance = entity.material.contact_resistance or self.options.contact_resistance
-            contact_infos.append((elem, friction, resistance, True))
+            contact_infos.append(IPCContactInfo(entity, elem, friction, resistance, True))
 
         # Register entity-entity pairs (upper triangle including self-pairs)
-        for i, (elem_i, friction_i, resistance_i, is_abd_i) in enumerate(contact_infos):
-            for elem_j, friction_j, resistance_j, is_abd_j in contact_infos[i:]:
-                friction_ij = geometric_mean(friction_i, friction_j)
-                resistance_ij = harmonic_mean(resistance_i, resistance_j)
-                enabled = not (is_abd_i and is_abd_j) or self.options.enable_rigid_rigid_contact
-                self._ipc_contact_tabular.insert(elem_i, elem_j, friction_ij, resistance_ij, enabled)
+        for i, info_i in enumerate(contact_infos):
+            for info_j in contact_infos[i:]:
+                if (
+                    info_i.entity is info_j.entity
+                    and isinstance(info_i.entity.material, Cloth)
+                    and info_i.entity.material.self_friction_mu is not None
+                ):
+                    friction_ij = info_i.entity.material.self_friction_mu
+                else:
+                    friction_ij = geometric_mean(info_i.friction, info_j.friction)
+                friction_ij = self._contact_pair_friction.get(frozenset((info_i.entity, info_j.entity)), friction_ij)
+                resistance_ij = harmonic_mean(info_i.resistance, info_j.resistance)
+                enabled = not (info_i.is_abd and info_j.is_abd) or self.options.enable_rigid_rigid_contact
+                self._ipc_contact_tabular.insert(info_i.element, info_j.element, friction_ij, resistance_ij, enabled)
 
         # Register per-plane ground contact pairs
-        for entity, ground_elem in self._ipc_ground_contacts.items():
-            plane_friction = entity.material.coup_friction
-            plane_resistance = entity.material.contact_resistance or self.options.contact_resistance
-            for elem, friction, resistance, is_abd in contact_infos:
-                friction_ground = geometric_mean(friction, plane_friction)
-                resistance_ground = harmonic_mean(resistance, plane_resistance)
-                enabled = not is_abd or self.options.enable_rigid_ground_contact
-                self._ipc_contact_tabular.insert(ground_elem, elem, friction_ground, resistance_ground, enabled)
+        for ground_entity, ground_elem in self._ipc_ground_contacts.items():
+            plane_friction = ground_entity.material.coup_friction
+            plane_resistance = ground_entity.material.contact_resistance or self.options.contact_resistance
+            for info in contact_infos:
+                friction_ground = geometric_mean(info.friction, plane_friction)
+                friction_ground = self._contact_pair_friction.get(
+                    frozenset((ground_entity, info.entity)), friction_ground
+                )
+                resistance_ground = harmonic_mean(info.resistance, plane_resistance)
+                enabled = not info.is_abd or self.options.enable_rigid_ground_contact
+                self._ipc_contact_tabular.insert(ground_elem, info.element, friction_ground, resistance_ground, enabled)
             self._ipc_contact_tabular.insert(self._ipc_no_collision_contact, ground_elem, 0.0, 0.0, False)
 
         # Register no_collision pairs (always disabled)
-        for elem, *_ in contact_infos:
-            self._ipc_contact_tabular.insert(self._ipc_no_collision_contact, elem, 0.0, 0.0, False)
+        for info in contact_infos:
+            self._ipc_contact_tabular.insert(self._ipc_no_collision_contact, info.element, 0.0, 0.0, False)
         self._ipc_contact_tabular.insert(
             self._ipc_no_collision_contact, self._ipc_no_collision_contact, 0.0, 0.0, False
         )
@@ -738,9 +768,7 @@ class IPCCoupler(RBC):
                     f"FEM vertex count mismatch: feature has {vertex_count}, expected {expected_vertex_count}."
                 )
 
-            self._fem_vertex_offsets = {
-                entity: [-1] * self.sim._B for entity in self.fem_solver.entities
-            }
+            self._fem_vertex_offsets = {entity: [-1] * self.sim._B for entity in self.fem_solver.entities}
             visitor = SceneVisitor(self._ipc_scene)
             for fem_geom_slot in visitor.geometries():
                 if not isinstance(fem_geom_slot, SimplicialComplexSlot):
@@ -897,6 +925,125 @@ class IPCCoupler(RBC):
         gs.logger.debug("Resetting IPC coupler state")
         self._ipc_world.recover(0)
         self._ipc_world.retrieve()
+
+    def get_state(self) -> "IPCCouplerState":
+        """Return an independent copy of the native IPC dynamic state."""
+        fem_position = None
+        fem_velocity = None
+        if self._fem_state_feature is not None:
+            assert self._fem_state_geom is not None
+            self._fem_state_feature.copy_to(self._fem_state_geom)
+            position_attr = self._fem_state_geom.vertices().find(uipc.builtin.position)
+            velocity_attr = self._fem_state_geom.vertices().find(uipc.builtin.velocity)
+            if position_attr is None or velocity_attr is None:
+                gs.raise_exception("IPC FEM checkpoint state has no position/velocity attribute.")
+            fem_position = position_attr.view().copy()
+            fem_velocity = velocity_attr.view().copy()
+
+        abd_transform = None
+        abd_velocity = None
+        if self._abd_state_feature is not None:
+            assert self._abd_state_geom is not None
+            self._abd_state_feature.copy_to(self._abd_state_geom)
+            transform_attr = self._abd_state_geom.instances().find(uipc.builtin.transform)
+            velocity_attr = self._abd_state_geom.instances().find(uipc.builtin.velocity)
+            if transform_attr is None or velocity_attr is None:
+                gs.raise_exception("IPC affine-body checkpoint state has no transform/velocity attribute.")
+            abd_transform = transform_attr.view().copy()
+            abd_velocity = velocity_attr.view().copy()
+
+        articulations = tuple(
+            IPCArticulationState(
+                ref_dof_prev=data.ref_dof_prev.copy(),
+                prev_links_transform=tuple(
+                    tuple(None if transform is None else transform.copy() for transform in transforms)
+                    for transforms in data.prev_links_transform
+                ),
+            )
+            for data in self._articulation_data_by_entity.values()
+        )
+        return IPCCouplerState(fem_position, fem_velocity, abd_transform, abd_velocity, articulations)
+
+    def set_state(self, state: "IPCCouplerState", envs_idx=None) -> None:
+        """Restore a native IPC state captured by :meth:`get_state`."""
+        assert self._ipc_world is not None
+        if envs_idx is not None:
+            gs.raise_exception("IPC checkpoint restore requires all environments.")
+
+        self._ipc_world.recover(0)
+
+        if state.fem_position is not None or state.fem_velocity is not None:
+            if self._fem_state_feature is None or self._fem_state_geom is None:
+                gs.raise_exception("IPC checkpoint contains FEM state but the scene has no IPC FEM state accessor.")
+            if state.fem_position is None or state.fem_velocity is None:
+                gs.raise_exception("IPC FEM checkpoint requires both position and velocity.")
+            self._fem_state_feature.copy_to(self._fem_state_geom)
+            position_attr = self._fem_state_geom.vertices().find(uipc.builtin.position)
+            velocity_attr = self._fem_state_geom.vertices().find(uipc.builtin.velocity)
+            if position_attr is None or velocity_attr is None:
+                gs.raise_exception("IPC FEM restore state has no position/velocity attribute.")
+            if position_attr.view().shape != state.fem_position.shape:
+                gs.raise_exception(
+                    f"IPC FEM checkpoint topology mismatch: current={position_attr.view().shape}, "
+                    f"saved={state.fem_position.shape}."
+                )
+            if velocity_attr.view().shape != state.fem_velocity.shape:
+                gs.raise_exception(
+                    f"IPC FEM checkpoint velocity mismatch: current={velocity_attr.view().shape}, "
+                    f"saved={state.fem_velocity.shape}."
+                )
+            position_attr.view()[...] = state.fem_position
+            velocity_attr.view()[...] = state.fem_velocity
+            self._fem_state_feature.copy_from(self._fem_state_geom)
+
+        if state.abd_transform is not None or state.abd_velocity is not None:
+            if self._abd_state_feature is None or self._abd_state_geom is None:
+                gs.raise_exception(
+                    "IPC checkpoint contains affine-body state but the scene has no IPC affine-body state accessor."
+                )
+            if state.abd_transform is None or state.abd_velocity is None:
+                gs.raise_exception("IPC affine-body checkpoint requires both transform and velocity.")
+            self._abd_state_feature.copy_to(self._abd_state_geom)
+            transform_attr = self._abd_state_geom.instances().find(uipc.builtin.transform)
+            velocity_attr = self._abd_state_geom.instances().find(uipc.builtin.velocity)
+            if transform_attr is None or velocity_attr is None:
+                gs.raise_exception("IPC affine-body restore state has no transform/velocity attribute.")
+            if transform_attr.view().shape != state.abd_transform.shape:
+                gs.raise_exception(
+                    f"IPC affine-body checkpoint topology mismatch: current={transform_attr.view().shape}, "
+                    f"saved={state.abd_transform.shape}."
+                )
+            if velocity_attr.view().shape != state.abd_velocity.shape:
+                gs.raise_exception(
+                    f"IPC affine-body checkpoint velocity mismatch: current={velocity_attr.view().shape}, "
+                    f"saved={state.abd_velocity.shape}."
+                )
+            transform_attr.view()[...] = state.abd_transform
+            velocity_attr.view()[...] = state.abd_velocity
+            self._abd_state_feature.copy_from(self._abd_state_geom)
+
+        articulation_data = tuple(self._articulation_data_by_entity.values())
+        if len(articulation_data) != len(state.articulations):
+            gs.raise_exception(
+                f"IPC articulation checkpoint topology mismatch: current={len(articulation_data)}, "
+                f"saved={len(state.articulations)}."
+            )
+        for data, articulation_state in zip(articulation_data, state.articulations):
+            if data.ref_dof_prev.shape != articulation_state.ref_dof_prev.shape:
+                gs.raise_exception("IPC articulation checkpoint degree-of-freedom topology mismatch.")
+            if len(data.prev_links_transform) != len(articulation_state.prev_links_transform):
+                gs.raise_exception("IPC articulation checkpoint link topology mismatch.")
+            data.ref_dof_prev[:] = articulation_state.ref_dof_prev
+            for transforms, saved_transforms in zip(
+                data.prev_links_transform, articulation_state.prev_links_transform
+            ):
+                if len(transforms) != len(saved_transforms):
+                    gs.raise_exception("IPC articulation checkpoint environment topology mismatch.")
+                for env_idx, transform in enumerate(saved_transforms):
+                    transforms[env_idx] = None if transform is None else transform.copy()
+
+        self._ipc_world.retrieve()
+        self._retrieve_rigid_states()
 
     @property
     def is_active(self) -> bool:

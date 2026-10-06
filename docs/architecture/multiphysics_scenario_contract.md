@@ -29,7 +29,8 @@ executable forwarding paths for the same package implementation.
 
 `examples.multiphysics.table_wiping.build_scene(config)` accepts `TableWipingScenarioConfig` and returns named scene
 handles. `TableWipingController.step(runtime)` applies the task command and advances one scene step. The PBSTF
-surface-tension script remains available for the other exploratory cases.
+surface-tension script remains available for the other exploratory cases; the normalized wiping scenario constructs
+its own liquid, deformable sponge, table, robot and colliders and has no runtime import from that research script.
 
 ### Coupled litter scooping
 
@@ -72,13 +73,40 @@ changing total mass when sampling resolution changes.
 
 ## State and reset
 
-DEM snapshots include particle position, velocity, active state and absorbed-water ratio. FLIP snapshots include
-particle position, velocity, active state, MAC-grid face velocities and the previous fluid step duration. These fields
-are required so `scene.get_state()` and `scene.reset()` restore coupled motion instead of restoring only rendered
-particle positions.
+DEM snapshots include particle position, velocity, active state, absorbed-water ratio, and the scripted tilt-box pose
+and velocity. FLIP snapshots include particle position, velocity, active state, MAC-grid face velocities and the
+previous fluid step duration. These fields are required so `scene.get_state()`, `scene.restore(state)` and
+`scene.reset()` restore coupled motion instead of restoring only rendered particle positions.
 
 FLIP currently supports one environment per scene. UniRoboSim-Genesis must create one scene per independently reset
 FLIP environment until batched FLIP is implemented.
+
+Restart a normalized task by calling `runtime.scene.reset()` followed by `controller.reset(runtime)`. The first call
+restores physics state and the second clears task phase state and resynchronizes any scripted tool handle. Resuming a
+mid-task checkpoint additionally requires the matching controller phase state; a bare controller reset intentionally
+starts the task trajectory again at phase zero. Controllers expose `get_state()` and `set_state()` for that paired
+checkpoint. Restore the physics half with `runtime.scene.restore(scene_state)` so the Scene's registered restart state
+is not replaced by the checkpoint. `CoffeeWaterController.get_state(runtime)` additionally captures its coordinated
+robot joint target. Controllers whose trajectories are time-driven retain their own step index in ControllerState;
+checkpoint continuation therefore does not depend on the Scene clock, which is reset during physics-state restore.
+
+IPC scene checkpoints contain the native finite-element position and velocity buffers, affine-body transform and
+velocity buffers, and external-articulation continuation state. Restoring a checkpoint resets native IPC solver
+history before loading those buffers, so the first resumed step starts from the same coupled state as Genesis.
+
+## Adapter frame timing
+
+Every normalized runtime exposes `control_dt`, the simulated duration advanced by one controller call. This additive
+property leaves the existing `controller.step(runtime)` contract unchanged and retains each scenario's calibrated time
+step. A backend that chooses to present a uniform 60 FPS task clock may construct
+`ScenarioFrameRunner(controller, runtime)` and call `runner.step()` once per backend frame. The runner
+returns the native substep count executed for that frame and distributes fractional ratios without cumulative time
+drift. This preserves high-rate command updates for coffee, garment and butter while giving UniRoboSim one frame
+contract across all five scenarios.
+
+When the optional runner is used, store `runner.get_state()` beside the matching Scene and controller states for a
+resumable adapter checkpoint. Restore the Scene state, controller state and runner state in that order. A task restart
+resets them with `runtime.scene.reset()`, `controller.reset(runtime)` and `runner.reset()`.
 
 ## Reference scripts
 

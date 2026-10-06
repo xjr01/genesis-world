@@ -8,9 +8,11 @@ The default particle size resolves pouring and the wall film; larger particles c
 """
 
 import argparse
+import copy
 import csv
 import math
-from dataclasses import dataclass
+import time as wall_time
+from dataclasses import dataclass, fields
 from enum import IntEnum
 from pathlib import Path
 
@@ -178,6 +180,34 @@ class MotionState:
     left_withdraw_started: float | None = None
     sponge_grasp_offset: np.ndarray | None = None
 
+    def reset(self, right_start: ToolPose, cup_grasp: ToolPose):
+        self.right_phase = Phase.GRASP_CUP
+        self.phase_started = 0.0
+        self.right_start = right_start
+        self.right_target = right_start
+        self.cup_grasp = cup_grasp
+        self.right_velocity = None
+        self.catch_velocity = None
+        self.catch_acceleration = None
+        self.catch_goal = None
+        self.cup_hold_time = 0.0
+        self.rod_grasp = None
+        self.recovery_cup = None
+        self.water_before_reach = None
+        self.spilled_particles = 0
+        self.max_knock_tilt = 0.0
+        self.has_caught_cup = False
+        self.left_approach_started = None
+        self.left_withdraw_started = None
+        self.sponge_grasp_offset = None
+
+    def restore(self, state: "MotionState"):
+        """Restore a checkpoint without replacing the runtime-owned state object."""
+        if not isinstance(state, MotionState):
+            raise TypeError("state must be a MotionState")
+        for state_field in fields(self):
+            setattr(self, state_field.name, copy.deepcopy(getattr(state, state_field.name)))
+
 
 @dataclass(frozen=True)
 class CoffeeWaterRuntime:
@@ -202,6 +232,10 @@ class CoffeeWaterRuntime:
     qpos: gs.Tensor
     motion: MotionState
     is_motion_only: bool
+
+    @property
+    def control_dt(self) -> float:
+        return self.config.solver.control_dt
 
 
 def smooth_progress(time, start, end):
@@ -322,6 +356,7 @@ def motion_target(time, motion, observation, config=SCENARIO_CONFIG):
     right = grasp_pose(ToolPose(np.array(cup_pos), np.array(cup_quat)), motion.cup_grasp)
     right_opening = 0.044
     sponge_pos = np.array(assets.sponge_start)
+    sponge_grip_height = assets.sponge_size[1] - 0.005
     rod_pos = np.array(assets.rod_park)
     stir_angle = 0.0
     left_phase = Phase.REST
@@ -451,7 +486,6 @@ def motion_target(time, motion, observation, config=SCENARIO_CONFIG):
             if elapsed >= 1.6:
                 next_phase = Phase.APPROACH_SPONGE
         elif motion.right_phase == Phase.APPROACH_SPONGE:
-            sponge_grip_height = assets.sponge_size[1] - 0.005
             end = ToolPose(sponge_pos + (0.0, sponge_grip_height, 0.0), MOP_QUAT)
             right = interpolate_tool(motion.right_start, end, smooth_progress(elapsed, start=0.0, end=1.0))
             right_opening = 0.028
@@ -996,10 +1030,12 @@ def build_scene(
     )
     update_motion(demo, time=0.0)
     robot.set_qpos(demo.qpos)
+    scene.reset(scene.get_state())
     return demo
 
 
 def main():
+    process_started = wall_time.perf_counter()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--particle-size", type=float, default=SOLVER_CONFIG.pbstf_particle_size)
     parser.add_argument("--steps", type=int)
@@ -1012,7 +1048,7 @@ def main():
     args = parser.parse_args()
     if args.particle_size <= 0 or (args.steps is not None and args.steps <= 0):
         parser.error("--particle-size and --steps must be positive")
-    gs.init(backend=gs.cuda, precision="32", logging_level="info")
+    gs.init(backend=gs.cuda, precision="32", logging_level="warning")
     output = args.output
     output.mkdir(parents=True, exist_ok=True)
     demo = build_scene(
@@ -1023,6 +1059,8 @@ def main():
         is_motion_only=args.is_motion_only,
         is_liquid_enabled=args.is_liquid_enabled,
     )
+    build_seconds = wall_time.perf_counter() - process_started
+    print(f"coffee_water timing: build_seconds={build_seconds:.3f}", flush=True)
     dt = CONTROL_DT
     steps = args.steps if args.steps is not None else round(MOTION_END / dt)
     initial_mass = None
@@ -1040,6 +1078,7 @@ def main():
     measured_stir_angle = 0.0
     gripper_geoms_idx = tuple(field.geom_idx for field in demo.gripper_distance_fields)
     target = motion_target(0.0, demo.motion, observation, demo.config)
+    simulation_started = wall_time.perf_counter()
     try:
         with (output / "metrics.csv").open("w", newline="", encoding="ascii") as metrics:
             writer = csv.writer(metrics)
@@ -1162,19 +1201,34 @@ def main():
                         writer.writerow(motion_row + (None,) * 8)
                         metrics.flush()
                         continue
-                    state = demo.scene.pbstf_solver.get_state(demo.scene.sim.cur_substep_local)
-                    concentrations = tensor_to_array(state.c)
-                    positions = tensor_to_array(state.pos)
-                    velocities = tensor_to_array(state.vel)
+                    coffee_positions = tensor_to_array(demo.coffee.get_particles_pos())
+                    water_positions = tensor_to_array(demo.water.get_particles_pos())
+                    positions = np.concatenate((coffee_positions, water_positions), axis=-2)
+                    velocities = np.concatenate(
+                        (
+                            tensor_to_array(demo.coffee.get_particles_vel()),
+                            tensor_to_array(demo.water.get_particles_vel()),
+                        ),
+                        axis=-2,
+                    )
+                    concentrations = np.concatenate(
+                        (
+                            tensor_to_array(demo.coffee.get_particles_concentration()),
+                            tensor_to_array(demo.water.get_particles_concentration()),
+                        ),
+                        axis=-1,
+                    )
                     if not all(np.isfinite(values).all() for values in (positions, velocities, concentrations)):
                         raise RuntimeError("Liquid state contains non-finite values.")
                     mass = tensor_to_array(demo.coffee.get_mass() + demo.water.get_mass()).sum()
                     if abs(mass - initial_mass) > initial_mass * 2e-6:
                         raise RuntimeError("Liquid mass changed during the simulation.")
                     demo.scene.pbstf_solver.check_errno()
-                    is_absorbed = tensor_to_array(state.absorbed_collider_idx) >= 0
+                    coffee_absorbed_idx = tensor_to_array(demo.coffee.get_particles_absorbed_collider_idx())
+                    water_absorbed_idx = tensor_to_array(demo.water.get_particles_absorbed_collider_idx())
+                    is_absorbed = np.concatenate((coffee_absorbed_idx, water_absorbed_idx), axis=-1) >= 0
                     absorbed_particles = is_absorbed.sum()
-                    absorbed_water_particles = is_absorbed[:, demo.water.particle_start : demo.water.particle_end].sum()
+                    absorbed_water_particles = (water_absorbed_idx >= 0).sum()
                     wetness = tensor_to_array(demo.scene.pbstf_solver.get_static_collider_wetness(4))
                     if args.is_recording and is_checkpoint:
                         np.savez_compressed(
@@ -1191,15 +1245,13 @@ def main():
                             absorbed=is_absorbed,
                             wetness=wetness,
                         )
-                    water_pos = (
-                        positions[:, demo.water.particle_start : demo.water.particle_end]
-                        - demo.config.assets.coffee_cup_pos
-                    )
+                    water_pos = water_positions - demo.config.assets.coffee_cup_pos
                     is_in_cup = demo.cup_cavity.contains(water_pos.reshape((-1, 3)))
                     writer.writerow(
                         motion_row
                         + (
-                            tensor_to_array(state.active).sum(),
+                            tensor_to_array(demo.coffee.get_particles_active()).sum()
+                            + tensor_to_array(demo.water.get_particles_active()).sum(),
                             mass,
                             concentrations.sum(),
                             concentrations.var(),
@@ -1228,6 +1280,9 @@ def main():
     finally:
         if demo.camera is not None:
             demo.camera.stop_recording()
+    simulation_seconds = wall_time.perf_counter() - simulation_started
+    print(f"coffee_water timing: simulation_seconds={simulation_seconds:.3f}", flush=True)
+    print(f"coffee_water completed: steps={steps}, simulated_time={demo.scene.cur_t:.6f}s")
 
 
 if __name__ == "__main__":

@@ -91,6 +91,10 @@ class ButterSpreadingAssets:
     blade_xy_offset: tuple[float, float] = (0.0021, 0.0035)
     support_sdf_cell_size: float = 0.0015
     blade_sdf_cell_size: float = 0.001
+    camera_res: tuple[int, int] = (1280, 720)
+    camera_pos: tuple[float, float, float] = (0.22, -0.25, 0.18)
+    camera_lookat: tuple[float, float, float] = (0.0, 0.0, 0.025)
+    camera_fov: float = 40.0
 
     @property
     def task_origin(self) -> tuple[float, float, float]:

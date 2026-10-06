@@ -7,12 +7,13 @@ from .config import (
     ButterSpreadingTaskConfig,
 )
 from .scene import ButterSpreadingRuntime, build_scene
-from .task import ButterSpreadingController, knife_pose
+from .task import ButterSpreadingController, ButterSpreadingControllerState, knife_pose
 
 __all__ = [
     "ButterSpreadingAssets",
-    "ButterSpreadingController",
     "ButterSpreadingContactConfig",
+    "ButterSpreadingController",
+    "ButterSpreadingControllerState",
     "ButterSpreadingMaterialConfig",
     "ButterSpreadingRuntime",
     "ButterSpreadingScenarioConfig",

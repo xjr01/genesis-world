@@ -17,19 +17,39 @@ def smooth_lerp(start, end, value):
     return start + (end - start) * smooth_step(value)
 
 
+@dataclass(frozen=True)
+class GarmentFoldingControllerState:
+    step_index: int
+    hem_points: tuple[np.ndarray, np.ndarray] | None
+
+
 @dataclass
 class GarmentFoldingController:
-    """Advance a contact-only garment task using prescribed rigid-jaw targets."""
+    """Advance a garment task using prescribed rigid-jaw or articulated-robot targets."""
 
     config: GarmentFoldingTaskConfig
     step_index: int = 0
     hem_points: tuple[np.ndarray, np.ndarray] | None = None
 
-    def reset(self):
+    def reset(self, runtime: GarmentFoldingRuntime | None = None):
+        if runtime is not None and self.config != runtime.config.task:
+            raise ValueError("Controller task configuration must match the scene task configuration.")
         self.step_index = 0
         self.hem_points = None
 
+    def get_state(self) -> GarmentFoldingControllerState:
+        hem_points = None if self.hem_points is None else tuple(point.copy() for point in self.hem_points)
+        return GarmentFoldingControllerState(step_index=self.step_index, hem_points=hem_points)
+
+    def set_state(self, runtime: GarmentFoldingRuntime, state: GarmentFoldingControllerState):
+        if self.config != runtime.config.task:
+            raise ValueError("Controller task configuration must match the scene task configuration.")
+        self.step_index = state.step_index
+        self.hem_points = None if state.hem_points is None else tuple(point.copy() for point in state.hem_points)
+
     def _capture_hem_points(self, runtime: GarmentFoldingRuntime):
+        if runtime.landmarks is None:
+            raise RuntimeError("Garment landmarks are unavailable for this task profile.")
         positions = tensor_to_array(runtime.garment.get_state().pos).reshape(-1, 3)
         if self.config.task == "quarter":
             points = []
@@ -47,6 +67,19 @@ class GarmentFoldingController:
             )
 
     def before_step(self, runtime: GarmentFoldingRuntime):
+        if runtime.robot_trajectory is not None:
+            if runtime.robot is None:
+                raise RuntimeError("A robot trajectory requires a robot entity.")
+            if self.step_index >= runtime.robot_trajectory.physics_steps:
+                raise RuntimeError("Garment robot trajectory is complete.")
+            action_index = self.step_index // runtime.robot_trajectory.physics_steps_per_action
+            physics_index = self.step_index % runtime.robot_trajectory.physics_steps_per_action
+            target_q = runtime.robot_trajectory.joint_q[action_index]
+            previous_q = runtime.robot_trajectory.joint_q[max(0, action_index - 1)]
+            alpha = (physics_index + 1) / runtime.robot_trajectory.physics_steps_per_action
+            runtime.robot.set_qpos(previous_q + alpha * (target_q - previous_q), zero_velocity=True)
+            return
+
         dt = runtime.scene.dt
         time = self.step_index * dt
         if self.config.task == "fold" and self.hem_points is None and time >= 14.0:
@@ -94,9 +127,7 @@ class GarmentFoldingController:
                 phase_time = time - 16.0
                 outside = hem + np.array([0.0, -0.045 * garment_scale, 0.0])
                 if phase_time < 1.0:
-                    start = garment_pos + garment_scale * np.array(
-                        [-origin[0] + 0.14, origin[1], origin[2] + 0.32]
-                    )
+                    start = garment_pos + garment_scale * np.array([-origin[0] + 0.14, origin[1], origin[2] + 0.32])
                     position = smooth_lerp(
                         start,
                         outside + np.array([0.0, 0.0, 0.10 * garment_scale]),
@@ -122,8 +153,7 @@ class GarmentFoldingController:
                     position = np.array(
                         [
                             hem[0],
-                            runtime.garment_pos[1]
-                            + (hem[1] - runtime.garment_pos[1]) * np.cos(angle),
+                            runtime.garment_pos[1] + (hem[1] - runtime.garment_pos[1]) * np.cos(angle),
                             hem[2]
                             - 0.90 * hem[1] * np.sin(angle)
                             + 0.05 * garment_scale * smooth_step((phase_time - 9.0) / 2.0),
@@ -210,8 +240,7 @@ class GarmentFoldingController:
                         position = np.array(
                             [
                                 hem[0],
-                                runtime.garment_pos[1]
-                                + (hem[1] - runtime.garment_pos[1]) * np.cos(angle),
+                                runtime.garment_pos[1] + (hem[1] - runtime.garment_pos[1]) * np.cos(angle),
                                 hem[2]
                                 + 0.19 * garment_scale * np.sin(angle)
                                 + 0.05 * garment_scale * smooth_step((phase_time - 17.0) / 2.0),
@@ -233,17 +262,18 @@ class GarmentFoldingController:
                             position[1] += 0.15 * garment_scale * smooth_step((phase_time - 19.2) / 1.0)
                         if phase_time >= 20.2:
                             target_height = runtime.garment_pos[2] + 0.32 * garment_scale
-                            position[2] = hem[2] + 0.05 * garment_scale + (
-                                target_height - hem[2] - 0.05 * garment_scale
-                            ) * smooth_step((phase_time - 20.2) / 0.8)
+                            position[2] = (
+                                hem[2]
+                                + 0.05 * garment_scale
+                                + (target_height - hem[2] - 0.05 * garment_scale)
+                                * smooth_step((phase_time - 20.2) / 0.8)
+                            )
                         if phase_time >= 21.0:
                             destination = garment_pos + garment_scale * np.array([sign * 0.32, 0.1, 0.32])
                             position = smooth_lerp(position, destination, phase_time - 21.0)
 
             closed_gap = (
-                self.config.regrasp_gap
-                if self.config.task == "quarter" and time >= 16.0
-                else self.config.closed_gap
+                self.config.regrasp_gap if self.config.task == "quarter" and time >= 16.0 else self.config.closed_gap
             )
             gap = self.config.open_gap * (1.0 - close) + closed_gap * close + opening
             if is_position_local:
@@ -274,9 +304,7 @@ class GarmentFoldingController:
                 ]
             )
             for jaw, sign in zip(jaws, (-1.0, 1.0)):
-                offset = rotation @ np.array(
-                    [0.0, 0.0, sign * (0.5 * gap + runtime.jaw_half_thickness)]
-                )
+                offset = rotation @ np.array([0.0, 0.0, sign * (0.5 * gap + runtime.jaw_half_thickness)])
                 jaw.set_pos(position + offset)
                 jaw.set_quat(quat)
 

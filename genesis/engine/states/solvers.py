@@ -13,12 +13,14 @@ class SimState(RBC):
         s_global,
         f_local,
         solvers,
+        coupler_state=None,
     ):
         self._scene = scene
         self._s_global = s_global
         self._solvers_state = []
         for solver in solvers:
             self._solvers_state.append(solver.get_state(f_local))
+        self._coupler_state = coupler_state
 
     def serializable(self):
         self._scene = None
@@ -38,6 +40,10 @@ class SimState(RBC):
     @property
     def solvers_state(self):
         return self._solvers_state
+
+    @property
+    def coupler_state(self):
+        return self._coupler_state
 
     def __iter__(self):
         return iter(self._solvers_state)
@@ -501,6 +507,10 @@ class DEMSolverState:
         self._pos = gs.zeros((*shape, 3), **args)
         self._vel = gs.zeros((*shape, 3), **args)
         self._ratio = gs.zeros(shape, **args)
+        self._tilt_pos = gs.zeros((scene.sim._B, 3), **args)
+        self._tilt_quat = gs.zeros((scene.sim._B, 4), **args)
+        self._tilt_vel = gs.zeros((scene.sim._B, 3), **args)
+        self._tilt_omega = gs.zeros((scene.sim._B, 3), **args)
         args["dtype"] = gs.tc_bool
         self._active = gs.zeros(shape, **args)
 
@@ -509,6 +519,10 @@ class DEMSolverState:
         self._pos = self._pos.detach()
         self._vel = self._vel.detach()
         self._ratio = self._ratio.detach()
+        self._tilt_pos = self._tilt_pos.detach()
+        self._tilt_quat = self._tilt_quat.detach()
+        self._tilt_vel = self._tilt_vel.detach()
+        self._tilt_omega = self._tilt_omega.detach()
         self._active = self._active.detach()
 
     @property
@@ -530,6 +544,22 @@ class DEMSolverState:
     @property
     def active(self):
         return self._active
+
+    @property
+    def tilt_pos(self):
+        return self._tilt_pos
+
+    @property
+    def tilt_quat(self):
+        return self._tilt_quat
+
+    @property
+    def tilt_vel(self):
+        return self._tilt_vel
+
+    @property
+    def tilt_omega(self):
+        return self._tilt_omega
 
 
 class FLIPSolverState:

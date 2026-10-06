@@ -3,27 +3,28 @@ import os
 import pickle
 import sys
 import time
-from typing import Callable, Iterable, Literal, TYPE_CHECKING, overload
 import weakref
+from typing import TYPE_CHECKING, Callable, Iterable, Literal, overload
 
 import numpy as np
+import quadrants as qd
 import torch
-
 import trimesh
 
-import quadrants as qd
-
 import genesis as gs
+import genesis.utils.geom as gu
+import genesis.utils.mesh as mu
 from genesis.engine.force_fields import ForceField
 from genesis.engine.materials.base import EntityT, Material
 from genesis.engine.states.solvers import SimState
 from genesis.options import (
     BaseCouplerOptions,
     DEMOptions,
-    FLIPOptions,
     FEMOptions,
+    FLIPOptions,
     IPBFOptions,
     IPBSTFOptions,
+    IPCCouplerOptions,
     KinematicOptions,
     LegacyCouplerOptions,
     MPMOptions,
@@ -33,8 +34,8 @@ from genesis.options import (
     ProfilingOptions,
     RigidOptions,
     SFOptions,
-    SPHOptions,
     SimOptions,
+    SPHOptions,
     ToolOptions,
     ViewerOptions,
     VisOptions,
@@ -45,8 +46,6 @@ from genesis.options.renderers import Rasterizer, RendererOptions
 from genesis.options.surfaces import Surface
 from genesis.recorders import RecorderManager
 from genesis.repr_base import RBC
-import genesis.utils.geom as gu
-import genesis.utils.mesh as mu
 from genesis.utils.misc import sanitize_index, tensor_to_array
 from genesis.utils.tools import FPSTracker
 from genesis.utils.warnings import warn_once
@@ -1103,6 +1102,24 @@ class Scene(RBC):
         self._reset(state, envs_idx=envs_idx)
         self._recorder_manager.reset(envs_idx)
 
+    @gs.assert_built
+    def restore(self, state: SimState, envs_idx=None):
+        """Restore a checkpoint without replacing the Scene's registered initial state.
+
+        Unlike ``reset(state)``, this method preserves the state used by a later bare ``reset()``. It is intended for
+        resumable checkpoints whose task-controller state is restored separately.
+
+        Parameters
+        ----------
+        state : SimState
+            The checkpoint returned by :meth:`get_state`.
+        envs_idx : None | array_like, optional
+            The environments to restore. If None, all environments are restored.
+        """
+        gs.logger.debug(f"Restoring Scene ~~~<{self._uid}>~~~ from checkpoint.")
+        self._reset(state, envs_idx=envs_idx, keep_init=True)
+        self._recorder_manager.reset(envs_idx)
+
     def _reset(self, state: SimState | None = None, *, envs_idx=None, keep_init: bool = False):
         if self._is_built:
             if state is None:
@@ -1182,6 +1199,19 @@ class Scene(RBC):
             The state of the scene at the current time step.
         """
         return self._get_state()
+
+    @gs.assert_unbuilt
+    def set_ipc_contact_pair_friction(self, entity_a: "Entity", entity_b: "Entity", *, friction: float):
+        """Override friction for one entity pair in an Incremental Potential Contact (IPC) scene.
+
+        The pair value preserves independent material calibration for every other contact. Configure it after adding
+        both entities and before :meth:`build`.
+        """
+        if not isinstance(self.coupler_options, IPCCouplerOptions):
+            gs.raise_exception("Contact pair friction overrides require IPCCouplerOptions.")
+        if entity_a.scene is not self or entity_b.scene is not self:
+            gs.raise_exception("Both contact pair entities must belong to this scene.")
+        self._sim.coupler.set_contact_pair_friction(entity_a, entity_b, friction)
 
     def register_pre_step_callback(self, callback):
         """Register a callback invoked at the start of each ``step()``, on the stepping thread. A callback

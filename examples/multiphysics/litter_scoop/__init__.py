@@ -6,11 +6,12 @@ from .config import (
     LitterScoopTaskConfig,
 )
 from .scene import LitterScoopRuntime, build_scene
-from .task import LitterScoopController
+from .task import LitterScoopController, LitterScoopControllerState
 
 __all__ = [
     "LitterScoopAssets",
     "LitterScoopController",
+    "LitterScoopControllerState",
     "LitterScoopMaterialConfig",
     "LitterScoopRuntime",
     "LitterScoopScenarioConfig",

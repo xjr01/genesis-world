@@ -183,6 +183,21 @@ controller.step(runtime)
 `build_scene()` 返回命名 runtime。runtime 中保存 `scene` 和任务需要的实体句柄，例如 `bread`、`butter`、
 `blade`、`garment` 和 `jaws`。上层不需要猜测实体索引或 solver 顺序。
 
+服装折叠同时提供轻量默认配置和使用外部可移植资产包的 Scene527 高保真配置。两者共享同一套场景和控制器
+接口：
+
+```python
+from examples.multiphysics.garment_folding import GarmentFoldingController, build_scene, create_scene527_config
+
+config = create_scene527_config("/path/to/reproduction/scene527_55k_73s")
+runtime = build_scene(config, show_viewer=False)
+controller = GarmentFoldingController(config.task)
+controller.step(runtime)
+```
+
+高保真配置从资产根目录解析 55k 衣服、双 X5 URDF 和关节轨迹；参考视频、Isaac 数据和诊断脚本不属于
+运行时接口。
+
 资产相关的任务轨迹使用资产局部坐标。修改杯子、面包或衣物的位置、尺寸和缩放后，依赖这些资产的任务目标
 会根据资产配置重新计算，不需要同时修改 solver 参数。
 
@@ -225,7 +240,7 @@ UniRoboSim-Genesis 应使用：
 - `examples.multiphysics` 中的标准化场景；
 - `scene.pbstf_solver`、`scene.dem_solver`、`scene.flip_solver` 等公开 solver 属性；
 - `Scene`、`Entity` 的公开状态和控制接口；
-- `scene.get_state()`、`scene.reset()` 和 `scene.step()`。
+- `scene.get_state()`、`scene.restore()`、`scene.reset()` 和 `scene.step()`。
 
 UniRoboSim-Genesis 不应依赖：
 
@@ -264,10 +279,54 @@ FLIP 当前每个 Scene 支持一个独立环境。需要独立 reset 的多个 
 7. solver 类型、粒径、边界几何和资产缩放变化时重建 Scene；运行时位姿通过 Entity API 更新。
 8. checkpoint/reset 必须覆盖场景依赖的完整 solver 状态和耦合状态。
 
+### 本批 UniRoboSim 集成新增
+
+本批改动保持现有 `build_scene(config)` 和 `controller.step(runtime)` 调用方式，集中补全下面的能力：
+
+- 五个场景统一提供命名 runtime，以及 Controller 的 `step`、`reset`、`get_state` 和 `set_state`；
+- 新增 `Scene.restore(state)`，用于恢复中途 checkpoint，同时保留裸 `Scene.reset()` 使用的任务初始状态；
+- IPC checkpoint 同时保存 FEM position/velocity、affine-body transform/velocity 和 external-articulation 连续
+  状态，使 Genesis 与 libuIPC 从同一状态继续；
+- DEM checkpoint 保存猫砂场景移动障碍物的位置、姿态、线速度和角速度；各任务 Controller 保存自己的轨迹
+  阶段、步数、IK 或运动缓存；
+- 擦桌子成为独立标准场景，不再运行时导入研究目录；Scene527 服装配置支持可移植资产根目录、双 X5
+  URDF、55k 衣物网格和关节轨迹；
+- IPC 支持衣物自摩擦和实体对摩擦独立配置；咖啡、猫砂、黄油样例补充公开状态访问和完整轨迹诊断；
+- 新增完整轨迹、checkpoint、公共 API 和 adapter 私有边界验证脚本。
+
+统一 60 FPS 是可选适配能力，并未替换原控制接口或把物理步长统一成 `1/60 s`。每个 runtime 新增只读
+`control_dt`，表示一次原生 Controller 调用推进的仿真时间。需要统一展示时钟的 adapter 可以选择：
+
+```python
+from examples.multiphysics import ScenarioFrameRunner
+
+runner = ScenarioFrameRunner(controller, runtime, fps=60.0)
+native_substeps = runner.step()
+```
+
+Runner 按帧分配完整原生控制步，非整数比例在相邻 substep 数之间分配且不累计时间漂移。不使用 Runner 的
+现有 adapter 继续直接调用 `controller.step(runtime)`。
+
+中途续接需要配对保存 Scene 和 Controller；使用可选 Runner 时再保存其时钟状态：
+
+```python
+scene_state = runtime.scene.get_state()
+controller_state = controller.get_state(runtime)  # 部分 Controller 不需要 runtime 参数
+runner_state = runner.get_state()                  # 仅使用 Runner 时需要
+
+runtime.scene.restore(scene_state)
+controller.set_state(runtime, controller_state)
+runner.set_state(runner_state)
+```
+
+本批结构回归包含 35 个接口、Controller 状态、时序和 restore 测试，并通过相关源码编译、lint 和 diff
+检查。完整 GPU 物理轨迹的通过情况单独记录，接口完整不等同于五个任务的最终物理效果均已验收。
+
 ### 当前接口完整度
 
 - 五个场景都在各自的 `examples.multiphysics.<scenario>` 包内提供 `build_scene()`、命名 runtime 和
-  `Controller.step()`。
+  `Controller.step()`；Controller 同时提供 `reset()`、`get_state()` 和 `set_state()`，用于和
+  `scene.get_state()` / `scene.restore()` 配对保存或恢复任务阶段；裸 `scene.reset()` 仍回到任务起点。
 - 咖啡场景的稳定入口是 `examples.multiphysics.coffee_water`；原来的 `examples.pbstf_coffee_water` 仅保留为
   命令行和旧导入路径的薄入口。
 
@@ -281,6 +340,7 @@ FLIP 当前每个 Scene 支持一个独立环境。需要独立 reset 的多个 
 进一步说明：
 
 - [UniRoboSim-Genesis 详细对接指南](./docs/integration/unirobosim_genesis.md)
+- [五个标准场景完整轨迹验收记录](./docs/integration/full_trajectory_validation.md)
 - [多物理场景接口契约](./docs/architecture/multiphysics_scenario_contract.md)
 - [粒子流体最小接入说明](./docs/architecture/minimal_particle_fluid_integration.md)
 - [标准化场景目录](./examples/multiphysics/README.md)

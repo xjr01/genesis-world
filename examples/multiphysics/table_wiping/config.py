@@ -50,6 +50,11 @@ class TableWipingAssets:
     table_size: tuple[float, float, float] = (0.8, 1.0 / 30.0, 8.0 / 15.0)
     liquid_lower: tuple[float, float, float] = (-1.0 / 6.0, 1.0 / 300.0, -7.0 / 150.0)
     liquid_upper: tuple[float, float, float] = (-1.0 / 30.0, 7.0 / 300.0, 7.0 / 150.0)
+    camera_res: tuple[int, int] = (1280, 720)
+    camera_pos: tuple[float, float, float] = (0.0, 0.3, 2.0 / 3.0)
+    camera_lookat: tuple[float, float, float] = (0.0, 1.0 / 30.0, -0.1)
+    camera_up: tuple[float, float, float] = (0.0, 1.0, 0.0)
+    camera_fov: float = 40.0
 
 
 @dataclass(frozen=True)

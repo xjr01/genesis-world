@@ -7,9 +7,10 @@ from examples.multiphysics.garment_folding import (
     GarmentFoldingAssets,
     GarmentFoldingScenarioConfig,
     GarmentFoldingTaskConfig,
+    GarmentRobotTrajectory,
+    create_scene527_config,
 )
-from examples.multiphysics.garment_folding.task import GarmentFoldingController
-from examples.multiphysics.garment_folding.task import smooth_step
+from examples.multiphysics.garment_folding.task import GarmentFoldingController, smooth_step
 
 
 class _Scene:
@@ -28,6 +29,15 @@ class _Jaw:
         self.quat = quat
 
 
+class _Robot:
+    def __init__(self):
+        self.qpos = None
+
+    def set_qpos(self, qpos, *, zero_velocity):
+        assert zero_velocity
+        self.qpos = qpos
+
+
 class _Runtime:
     def __init__(self, assets, task):
         self.scene = _Scene()
@@ -36,15 +46,28 @@ class _Runtime:
         self.garment_pos = assets.garment_pos
         self.garment_scale = assets.garment_scale
         self.jaw_half_thickness = 0.5 * assets.jaw_size[2]
+        self.robot = None
+        self.robot_trajectory = None
 
 
 def test_garment_asset_changes_are_independent_from_solver_parameters():
     config = GarmentFoldingScenarioConfig()
     resized_table = replace(config, assets=replace(config.assets, table_size=(0.7, 0.5, 0.05)))
+    tuned_contact = replace(
+        config,
+        material=replace(config.material, cloth_self_friction=0.8, cloth_table_friction=0.5),
+    )
 
     assert resized_table.solver == config.solver
     assert resized_table.material == config.material
     assert resized_table.assets.table_size == (0.7, 0.5, 0.05)
+    assert config.material.cloth_self_friction is None
+    assert config.material.cloth_table_friction is None
+    assert tuned_contact.solver == config.solver
+    assert tuned_contact.assets == config.assets
+    assert tuned_contact.task == config.task
+    assert tuned_contact.material.cloth_self_friction == 0.8
+    assert tuned_contact.material.cloth_table_friction == 0.5
 
 
 def test_half_fold_is_the_validated_default():
@@ -64,6 +87,41 @@ def test_experimental_tasks_keep_their_distinct_layout_and_duration():
     assert not task.is_validated
     assert task.resolved_duration == 30.0
     assert assets.jaw_origins(task.task) == (assets.sleeve_left, assets.sleeve_right)
+
+
+def test_scene527_profile_uses_portable_bundle_paths_and_calibrated_physics(tmp_path):
+    config = create_scene527_config(tmp_path)
+
+    assert config.assets.asset_root == str(tmp_path)
+    assert config.assets.garment_mesh == "assets/cloth/short-shirt-55068f.obj"
+    assert config.assets.robot == "assets/robots/dual_x5_2025_ipc_v1/dual_x5_2025_ipc.urdf"
+    assert config.assets.trajectory == "controls/trajectory.npz"
+    assert config.assets.expected_garment_vertices == 27811
+    assert config.assets.expected_garment_faces == 55068
+    assert config.assets.expected_trajectory_frames == 4373
+    assert config.task.task == "scene527"
+    assert config.task.uses_robot_trajectory
+    assert config.solver.dt == pytest.approx(1.0 / 120.0)
+    assert config.solver.contact_d_hat == 0.0015
+    assert config.material.cloth_self_friction == 2.0
+
+
+def test_scene527_controller_interpolates_each_action_over_physics_steps():
+    task = GarmentFoldingTaskConfig(task="scene527", physics_steps_per_action=2)
+    controller = GarmentFoldingController(task)
+    runtime = _Runtime(GarmentFoldingAssets(), task)
+    runtime.robot = _Robot()
+    runtime.robot_trajectory = GarmentRobotTrajectory(
+        joint_q=np.array([[0.0, 1.0], [2.0, 3.0]]),
+        action_fps=60.0,
+        physics_steps_per_action=2,
+    )
+
+    expected = ([0.0, 1.0], [0.0, 1.0], [1.0, 2.0], [2.0, 3.0])
+    for qpos in expected:
+        controller.before_step(runtime)
+        np.testing.assert_allclose(runtime.robot.qpos, qpos)
+        controller.step_index += 1
 
 
 def test_half_fold_initial_jaw_commands_match_asset_placement():

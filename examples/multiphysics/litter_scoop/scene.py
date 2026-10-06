@@ -13,11 +13,16 @@ class LitterScoopRuntime:
     """Named scene handles used by an adapter or task controller after construction."""
 
     scene: gs.Scene
+    config: LitterScoopScenarioConfig
     setup: GranularFluidSetup
     sand: object
     water: object
     shovel: object
     camera: object | None
+
+    @property
+    def control_dt(self) -> float:
+        return self.config.solver.dt
 
 
 def build_scene(
@@ -140,4 +145,13 @@ def build_scene(
         quat=blade_quat,
         handle=(assets.handle_length, assets.handle_half_thickness, assets.handle_angle),
     )
-    return LitterScoopRuntime(scene=scene, setup=setup, sand=sand, water=water, shovel=shovel, camera=camera)
+    scene.reset(scene.get_state())
+    return LitterScoopRuntime(
+        scene=scene,
+        config=config,
+        setup=setup,
+        sand=sand,
+        water=water,
+        shovel=shovel,
+        camera=camera,
+    )

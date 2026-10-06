@@ -16,7 +16,12 @@ the public interfaces below.
 - Normalized task: convert task and asset specifications into a config for
   `examples.multiphysics.<scenario>.build_scene`.
 - Task control: advance a named runtime with its scenario controller and public entity methods.
-- State: store and restore the complete engine state through `scene.get_state()` and `scene.reset()`.
+- Optional frame timing: an adapter that needs a uniform 60 FPS clock may wrap the unchanged controller API in
+  `examples.multiphysics.ScenarioFrameRunner` while retaining each scenario's calibrated native step.
+- State: store checkpoints with `scene.get_state()`, resume them with `scene.restore(state)`, and restart with
+  `scene.reset()`.
+- Task reset: call `runtime.scene.reset()` first, then `controller.reset(runtime)` so controller phase state and scripted
+  tool handles are rewound together with the physics state.
 
 Adapter code must not inspect `scene.sim._solvers`, assume solver-list ordering, access Quadrants fields, or reproduce a
 scenario's contact law. These details belong to this engine profile.
@@ -53,15 +58,24 @@ the five task scenarios. The stable adapter surface is the combination of `genes
 - Fork capabilities: DEM, FLIP, two-way sand-water coupling, absorbed-water ratio, full particle/grid state and
   `create_granular_fluid_setup`.
 - Adapter work: probe DEM and FLIP together; validate a shared domain and compatible resolution; drive the shovel;
-  preserve all coupled state. FLIP currently requires one Scene per independently reset environment.
+  preserve all coupled state. FLIP currently requires one Scene per independently reset environment. DEM checkpoints
+  include the scripted shovel obstacle's position, orientation, linear velocity and angular velocity;
+  `LitterScoopController.reset(runtime)` separately restores its configured task-origin pose on restart.
 
 ### Garment folding
 
-- Genesis public capabilities: FEM cloth, IPC coupling, rigid jaws and public rigid pose control.
-- Fork capabilities: normalized garment assets, semantic landmarks, asset-local trajectories, named runtime and
-  stepwise controller.
-- Adapter work: verify the IPC dependency; resolve garment mesh/texture; pass asset pose and scale; drive jaw targets;
-  preserve FEM/IPC state.
+- Genesis public capabilities: FEM cloth, IPC coupling, independent cloth self-friction and entity-pair friction,
+  rigid jaws, articulated robots and public rigid pose control.
+- Fork capabilities: normalized garment assets, semantic landmarks, portable Scene527 asset roots, asset-local robot
+  trajectories, named runtime and a stepwise controller shared by the lightweight and high-fidelity profiles.
+- Adapter work: verify the IPC dependency; select `GarmentFoldingScenarioConfig()` or
+  `create_scene527_config(asset_root)`; call the same `build_scene` and `GarmentFoldingController.step` entry points;
+  preserve FEM/IPC and controller state.
+
+The Scene527 profile consumes only the portable physical inputs: the 55k cloth, dual-X5 URDF and referenced meshes,
+and the 4,373-frame trajectory. The controller interpolates every 60 Hz action over two 120 Hz physics steps. Reference
+replays, rendering assets and research diagnostics remain outside the runtime contract. Stage boundary archives require
+the matching Scene checkpoint, which includes native IPC finite-element and affine-body state.
 
 ### Butter spreading
 
@@ -81,6 +95,25 @@ the five task scenarios. The stable adapter surface is the combination of `genes
 6. Advance through `scene.step()` so registered boundary/contact callbacks run automatically.
 7. Rebuild after solver, particle-size, boundary-geometry or asset-scale changes.
 8. Include every solver and coupling field required by the scenario in checkpoint/reset.
+9. If the backend elects to publish a uniform frame clock, treat `ScenarioFrameRunner.step()`'s return value as that
+   frame's native substep count rather than replacing the scenario solver time step.
+
+For a task restart, use the same lifecycle for all five scenarios:
+
+```python
+runtime.scene.reset()
+controller.reset(runtime)
+```
+
+The Scene restores solver and entity state. The controller reset clears task phase, IK and trajectory caches and
+resynchronizes scripted tool handles. A serialized mid-trajectory checkpoint must store `scene.get_state()`,
+`controller.get_state(...)` and, when used, the optional frame runner state if execution is expected to resume at the
+same phase rather than restart from phase zero. Reset the optional runner with `runner.reset()`.
+Restore the Scene state with `runtime.scene.restore(scene_state)` first and then call `controller.set_state(...)`;
+`restore` preserves the task's registered initial state, so a later bare `scene.reset()` still restarts from the task
+origin. Coffee passes `runtime` to `get_state` because
+its coordinated robot trajectory keeps an internal joint target, while the other controllers need no runtime argument
+when taking their snapshot.
 
 ## Capability discovery
 
@@ -157,7 +190,10 @@ controller.step(runtime)
 
 `build_scene()` returns named handles instead of solver indices. Asset-relative task origins and semantic landmarks
 move with the configured asset. The controller issues task commands; registered scene callbacks apply boundary and
-contact updates whenever the adapter calls `scene.step()`.
+contact updates whenever the adapter calls `scene.step()`. Existing integrations continue calling
+`controller.step(runtime)`. If an adapter needs a 60 FPS presentation clock, it may construct
+`ScenarioFrameRunner(controller, runtime, fps=60.0)`; ratios that are not integers alternate between adjacent native
+substep counts without accumulating simulated-time drift.
 
 ## Parameter ownership
 
@@ -188,7 +224,7 @@ Before updating the commit pinned by UniRoboSim-Genesis:
 1. Run the configuration and adapter tests for the changed capability.
 2. Run a one-step headless smoke test for each changed normalized scenario.
 3. Run the complete default task trajectory on its supported GPU backend and record the command and result.
-4. Verify `scene.get_state()` and `scene.reset()` for any solver whose state layout changed.
+4. Verify `scene.get_state()`, `scene.restore(state)` and `scene.reset()` for any solver whose state layout changed.
 5. Confirm asset pose and scale changes propagate to task targets without editing solver configuration.
 
 A scenario is structurally integrated after steps 1, 2 and 5. Mark it physically validated only after its complete

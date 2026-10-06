@@ -6,11 +6,12 @@ from .config import (
     TableWipingTaskConfig,
 )
 from .scene import TableWipingRuntime, build_scene
-from .task import TableWipingController
+from .task import TableWipingController, TableWipingControllerState
 
 __all__ = [
     "TableWipingAssets",
     "TableWipingController",
+    "TableWipingControllerState",
     "TableWipingMaterialConfig",
     "TableWipingRuntime",
     "TableWipingScenarioConfig",

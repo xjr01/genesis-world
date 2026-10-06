@@ -2,17 +2,18 @@
 Data classes for IPC coupler.
 """
 
-from enum import IntEnum
 from dataclasses import dataclass
-from typing import NamedTuple, TYPE_CHECKING
+from enum import IntEnum
+from typing import TYPE_CHECKING, NamedTuple
 
 import numpy as np
-
+from uipc.core import ContactElement
 from uipc.geometry import GeometrySlot
 
 import genesis as gs
 
 if TYPE_CHECKING:
+    from genesis.engine.entities.base_entity import Entity
     from genesis.engine.entities.rigid_entity import RigidLink
 
 
@@ -28,6 +29,35 @@ class ABDLinkEntry(NamedTuple):
 
     transform: np.ndarray  # (4, 4) IPC transform
     velocity: np.ndarray  # (4, 4) velocity matrix
+
+
+class IPCContactInfo(NamedTuple):
+    """Entity-owned IPC contact element and its material contact properties."""
+
+    entity: "Entity"
+    element: ContactElement
+    friction: float
+    resistance: float
+    is_abd: bool
+
+
+@dataclass(frozen=True)
+class IPCArticulationState:
+    """Dynamic state retained by one external-articulation coupling."""
+
+    ref_dof_prev: np.ndarray
+    prev_links_transform: tuple[tuple[np.ndarray | None, ...], ...]
+
+
+@dataclass(frozen=True)
+class IPCCouplerState:
+    """Dynamic Incremental Potential Contact (IPC) state stored in a scene checkpoint."""
+
+    fem_position: np.ndarray | None
+    fem_velocity: np.ndarray | None
+    abd_transform: np.ndarray | None
+    abd_velocity: np.ndarray | None
+    articulations: tuple[IPCArticulationState, ...]
 
 
 @dataclass

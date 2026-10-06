@@ -49,6 +49,15 @@ def test_fem_public_state_includes_ipc_velocity(show_viewer):
     assert np.linalg.norm(velocity_after, axis=-1).max() > 0.0
     assert_allclose(velocity_after, (position_after - position_before) / dt, atol=1e-4)
 
+    checkpoint = scene.get_state()
+    scene.step()
+    continued_position = tensor_to_array(body.get_state().pos).copy()
+    continued_velocity = tensor_to_array(body.get_state().vel).copy()
+    scene.restore(checkpoint)
+    scene.step()
+    assert_allclose(tensor_to_array(body.get_state().pos), continued_position, atol=1e-5)
+    assert_allclose(tensor_to_array(body.get_state().vel), continued_velocity, atol=1e-5)
+
     scene.reset()
     state_reset = body.get_state()
     assert_allclose(tensor_to_array(state_reset.pos), position_before, atol=1e-6)

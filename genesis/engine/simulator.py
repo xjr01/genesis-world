@@ -7,8 +7,8 @@ from genesis.options.morphs import Morph
 from genesis.options.solvers import (
     BaseCouplerOptions,
     DEMOptions,
-    FLIPOptions,
     FEMOptions,
+    FLIPOptions,
     IPBFOptions,
     IPBSTFOptions,
     IPCCouplerOptions,
@@ -21,8 +21,8 @@ from genesis.options.solvers import (
     RigidOptions,
     SAPCouplerOptions,
     SFOptions,
-    SPHOptions,
     SimOptions,
+    SPHOptions,
     ToolOptions,
 )
 from genesis.repr_base import RBC
@@ -277,7 +277,10 @@ class Simulator(RBC):
             if solver.n_entities > 0:
                 solver.set_state(0, solver_state, envs_idx)
 
-        self._coupler.reset(envs_idx=envs_idx)
+        if isinstance(self._coupler, IPCCoupler) and state.coupler_state is not None:
+            self._coupler.set_state(state.coupler_state, envs_idx=envs_idx)
+        else:
+            self._coupler.reset(envs_idx=envs_idx)
 
         # TODO: keeping as is for now
         self.reset_grad()
@@ -471,6 +474,7 @@ class Simulator(RBC):
             s_global=self.cur_step_global,
             f_local=self.cur_substep_local,
             solvers=self._solvers,
+            coupler_state=self._coupler.get_state() if isinstance(self._coupler, IPCCoupler) else None,
         )
 
         # `SimState.__init__` calls `solver.get_state` on every solver, and solvers that maintain a per-solver queue

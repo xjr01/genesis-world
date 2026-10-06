@@ -4,20 +4,26 @@ import torch
 
 import genesis as gs
 
-from .contact import ButterContact
 from .config import ButterSpreadingScenarioConfig
+from .contact import ButterContact
 from .task import knife_pose
 
 
 @dataclass(frozen=True)
 class ButterSpreadingRuntime:
     scene: gs.Scene
+    config: ButterSpreadingScenarioConfig
     bread: object
     butter: object
     blade: object
     contact: ButterContact
     blade_xy_offset: tuple[float, float]
     task_origin: tuple[float, float, float]
+    camera: object | None
+
+    @property
+    def control_dt(self) -> float:
+        return self.config.solver.dt
 
 
 def _rigid_material(config: ButterSpreadingScenarioConfig, *, is_blade: bool):
@@ -40,6 +46,7 @@ def build_scene(
     config: ButterSpreadingScenarioConfig | None = None,
     *,
     show_viewer: bool = False,
+    add_camera: bool = False,
 ) -> ButterSpreadingRuntime:
     """Build the calibrated, self-contained butter-spreading MPM task."""
     config = config or ButterSpreadingScenarioConfig()
@@ -120,6 +127,15 @@ def build_scene(
         surface=gs.surfaces.Plastic(color=(0.97, 0.78, 0.30), roughness=0.3),
         vis_mode="particle",
     )
+    camera = None
+    if add_camera:
+        camera = scene.add_camera(
+            res=assets.camera_res,
+            pos=assets.camera_pos,
+            lookat=assets.camera_lookat,
+            fov=assets.camera_fov,
+            GUI=False,
+        )
     scene.build()
 
     bread_pos = bread.get_particles_pos()
@@ -161,13 +177,16 @@ def build_scene(
         is_equilibrium_adhesion=contact_config.is_equilibrium_adhesion,
     )
     scene.register_pre_step_callback(contact)
+    scene.reset(scene.get_state())
 
     return ButterSpreadingRuntime(
         scene=scene,
+        config=config,
         bread=bread,
         butter=butter,
         blade=blade,
         contact=contact,
         blade_xy_offset=assets.blade_xy_offset,
         task_origin=assets.task_origin,
+        camera=camera,
     )
