@@ -105,9 +105,10 @@ class BoxStaticCollider(StaticCollider):
 class AbsorbentStaticCollider:
     """Absorption parameters and compact voxel metadata for a position-based surface tension flow (PBSTF) collider."""
 
-    def __init__(self, absorption_rate, absorption_capacity_fraction):
+    def __init__(self, absorption_rate, absorption_capacity_fraction, absorption_motion_rate=None):
         self.absorption_rate = absorption_rate
         self.absorption_capacity_fraction = absorption_capacity_fraction
+        self.absorption_motion_rate = absorption_rate if absorption_motion_rate is None else absorption_motion_rate
         self.grid_res = None
         self.grid_res_qd = None
         self.voxel_size = None
@@ -121,6 +122,8 @@ class AbsorbentStaticCollider:
 
         if self.absorption_rate <= 0.0:
             gs.raise_exception("Absorbent static collider `absorption_rate` must be positive.")
+        if self.absorption_motion_rate <= 0.0:
+            gs.raise_exception("Absorbent static collider `absorption_motion_rate` must be positive.")
         if not 0.0 < self.absorption_capacity_fraction <= 1.0:
             gs.raise_exception("Absorbent static collider `absorption_capacity_fraction` must be in (0, 1].")
 
@@ -143,6 +146,7 @@ class AbsorbentBoxStaticCollider(BoxStaticCollider, AbsorbentStaticCollider):
         is_collider_adhesion_friction_enabled=False,
         collider_adhesion_compliance=10.0,
         collider_friction=0.1,
+        absorption_motion_rate=None,
     ):
         BoxStaticCollider.__init__(
             self,
@@ -158,6 +162,7 @@ class AbsorbentBoxStaticCollider(BoxStaticCollider, AbsorbentStaticCollider):
             self,
             absorption_rate=absorption_rate,
             absorption_capacity_fraction=absorption_capacity_fraction,
+            absorption_motion_rate=absorption_motion_rate,
         )
         self.pbd_entity_name = pbd_entity_name
         self.sdf_res = sdf_res
@@ -199,6 +204,7 @@ class AbsorbentBoxStaticCollider(BoxStaticCollider, AbsorbentStaticCollider):
             is_collider_adhesion_friction_enabled=options.is_collider_adhesion_friction_enabled,
             collider_adhesion_compliance=options.collider_adhesion_compliance,
             collider_friction=options.collider_friction,
+            absorption_motion_rate=options.absorption_motion_rate,
         )
 
 

@@ -46,8 +46,8 @@ from examples.multiphysics.coffee_water.implementation import (
     TABLE_Y,
     TASK_CONFIG,
     TOOL_CENTER,
-    WATER_FILL_FRACTION,
     WATER_CUP_POS,
+    WATER_FILL_FRACTION,
     CoffeeWaterRuntime,
     DistanceField,
     MotionMeasurement,
@@ -60,7 +60,6 @@ from examples.multiphysics.coffee_water.implementation import (
     check_contacts,
     grasp_pose,
     interpolate_tool,
-    main,
     measure_motion,
     motion_target,
     observe_scene,
@@ -72,6 +71,7 @@ from examples.multiphysics.coffee_water.implementation import (
     update_motion,
     water_cup_pose,
 )
+from examples.multiphysics.coffee_water.run import main
 
 __all__ = [
     "ASSETS",
@@ -109,8 +109,8 @@ __all__ = [
     "TABLE_Y",
     "TASK_CONFIG",
     "TOOL_CENTER",
-    "WATER_FILL_FRACTION",
     "WATER_CUP_POS",
+    "WATER_FILL_FRACTION",
     "CoffeeWaterAssets",
     "CoffeeWaterBoundaryConfig",
     "CoffeeWaterController",

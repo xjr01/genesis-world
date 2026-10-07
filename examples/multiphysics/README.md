@@ -30,6 +30,16 @@ state/reset requirements and adapter examples. The
 [full-trajectory validation record](../../docs/integration/full_trajectory_validation.md) distinguishes complete
 physical task runs from construction smoke tests.
 
+For adapter handoff, use the [exact-call table](../../docs/integration/unirobosim_genesis.md#exact-scenario-calls)
+and paired checkpoint example. Controllers advance physics themselves; call either
+the controller/frame runner or your own commands plus `scene.step()`. The current builders create unbatched scenes.
+Deploy the pinned source checkout: ordinary engine wheels package `genesis`, while these scenarios remain under
+`examples`. The guide documents camera keywords, coffee's snapshot signature and the butter controller's dt argument.
+
+All five default scenarios passed real GPU paired restore, finite continuation, bare scene reset and restart checks
+on 2026-10-07. Seven-phase diagnostic recordings and logs are under `out/handoff_20261007`; these short lifecycle
+checks do not replace complete task trajectories or visual acceptance. See the validation record for both scopes.
+
 Omit `--steps` to run the complete default task trajectory:
 
 ```bash
@@ -110,14 +120,21 @@ python -m examples.multiphysics.garment_folding.run \
 Each segment saves a video and a paired Scene/controller checkpoint. With a checkpoint, omitted `--steps` runs
 the remaining trajectory; explicit `--steps` specifies additional native steps. CSV distinguishes controller
 trajectory time from the Scene's restore-local clock. The recorded trajectory remains 60 Hz with two native
-120 Hz steps per action. Eight-step checkpoint continuation has been exercised; the full Scene527 run is pending.
+120 Hz steps per action. Scene527 continuation reached controller step 8,746 with finite state and 73 finalized video
+segments. Its 8,738-step recorded continuation starts at controller step 8; initial settling is a separate video.
+Folding shape quality remains a visual acceptance item. The lightweight half-fold is a separate profile requiring
+its own full rerun after the IPC material correction.
 
 Coffee records finalized one-second video segments by default (`--record-segment-seconds`), and reports build
 and simulation wall times. Use `--profile-build` for compilation diagnostics and `--progress-every` for progress.
 On 2026-10-07, the 500-step/one-second liquid run finalized a 50-frame video: all sampled states were finite,
 mass remained 0.5043063 kg, all 142,312 water particles stayed in their cup, and built-in tracking/clearance checks
 passed. Cold build took 636 seconds; the subsequent full run's warm build took 103 seconds. The full manipulation
-sequence is pending. Windows console recording should use `PYTHONIOENCODING=utf-8` and `PYTHONUTF8=1`.
+sequence then completed both arms' REST phase at step 11,140 / 22.28 seconds, with built-in terminal checks passing
+and 23 finalized video segments. The CLI's older completion message reports the 14,000-step upper bound rather than
+the actual early-termination count; use the final CSV time/step for that run. The current CLI reports the executed
+count and lives in `run.py`, with the original executable forwarding to the same entry point. Windows recording uses
+`PYTHONIOENCODING=utf-8` and `PYTHONUTF8=1`.
 
 The litter shovel uses a mesh signed distance field (SDF) with open slots, paired with its visual GLB by SHA-256.
 The bundled `litter_scoop_sdf_slots.npz` has 1.5 mm cells in the GLB's converted Z-up local frame. Regenerate it with:
@@ -132,7 +149,9 @@ require matching open-slot SDF data via `LitterScoopAssets.shovel_sdf`. The form
 box-proxy fields are removed. Controller and frame-runner entry points and the 60 Hz interface remain unchanged.
 Mesh-obstacle pose and velocity now participate in DEM Scene snapshots. Old box-proxy litter checkpoints must be
 regenerated with the mesh-obstacle scene. Litter videos finalize every 60 native steps and metrics report finite
-particle state and height/speed statistics. The default insertion/lift/sieving trajectory is being revalidated.
+particle state and height/speed statistics. The mesh-slot default trajectory completed all 766 steps / 12.766667
+seconds with finite sampled state and 13 finalized video segments. Sand retention and slot-throughput quality remain
+visual acceptance items.
 
 The butter scenario uses the public `gs.materials.MPM.HerschelBulkleyButter` and
 `gs.materials.MPM.PorousBread` materials. Its stratified sampling and finite-range `ButterContact` law remain scenario
@@ -142,3 +161,44 @@ client that calls `scene.step()` receives the same contact behavior.
 
 The larger scripts under `examples/multiflow` and `examples/sand_water_coupling` provide research references,
 parameter studies, asset tools and renderers. UniRoboSim-Genesis should import the normalized scenarios above.
+
+## Table-wiping calibration
+
+The wiping liquid uses surface-tension compliance `100/225`, capture rate `800` particles per second and inward-motion
+rate `10` inverse seconds. Larger surface-tension compliance weakens the surface-area constraint. Capture throughput
+and inward motion are independent: the nearest absorption target has a 0.1-second time constant, increasing with
+material-voxel distance. Other scenarios that omit `absorption_motion_rate` retain their configured rate for both
+effects. Solver dt and the UniRoboSim 60 Hz stepping interface stay unchanged.
+
+```bash
+python -m examples.multiphysics.table_wiping.run --record --metrics-every 25 \
+  --output out/table_wiping/calibrated
+```
+
+Recording finalizes one-second video segments; `--record-segment-seconds` adjusts their length. The CSV tracks free and
+captured particle counts, table-relative water height, horizontal extent, free-liquid speed and captured-liquid
+absorption progress. Particle conservation and finite state are checked while sampling. Particle-mode rendering and
+tetrahedral sponge visualization remain available for diagnosis; the calibration controls physical behavior.
+
+On 2026-10-07, the full 5,000-step / 10-second trajectory completed with 201 finite CSV samples, conserved 840-particle
+count and ten decoded video segments. Pre-contact water maximum at 0.2 seconds decreased from 52.42 to 17.73 mm.
+The captured count rose from 96 at 0.4 seconds to 576 at 1 second, reaching 840 by 1.4 seconds. Results are in
+`out/table_wiping/calibrated_full_v2_20261007`; isolation, API and absorption regression evidence is recorded in
+`docs/integration/full_trajectory_validation.md`. Particle spacing remains 6.67 mm, limiting thin-film resolution.
+
+## Recorded results and readiness
+
+All five packages expose the normalized adapter API. Full numerical execution and desired visual task outcomes are
+separate gates: Scene527, coffee, open-slot litter and calibrated table have recorded completed runs; butter's full
+trajectory and the corrected lightweight garment's full run remain pending. See the validation record for lifecycle
+checks and the source-deployment limitations in the integration guide.
+
+The following combined videos are local artifacts, alongside their original segments and metrics. `out/` is excluded
+from Git, so share these files separately when handing off to another machine.
+
+| Run | Combined video relative to repository root |
+|---|---|
+| Scene527 checkpoint continuation | `out/garment_folding/scene527_full_fold_20261006/garment-folding-full.mp4` |
+| Coffee full task | `out/coffee_water/full_default_20261007/coffee-water-full.mp4` |
+| Open-slot litter full task | `out/litter_scoop/mesh_slots_default_20261007/litter-scoop-full.mp4` |
+| Calibrated table full task | `out/table_wiping/calibrated_full_v2_20261007/table-wiping-full.mp4` |

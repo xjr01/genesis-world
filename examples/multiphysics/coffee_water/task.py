@@ -4,9 +4,12 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+import genesis as gs
+
 from .config import CoffeeWaterTaskConfig
 from .implementation import (
     POUR_QUAT,
+    MotionState,
     MotionTarget,
     SceneObservation,
     ToolPose,
@@ -25,8 +28,8 @@ class CoffeeWaterControllerState:
     step_index: int
     observation: SceneObservation | None
     ik_error: float | None
-    qpos: object
-    motion: object
+    qpos: gs.Tensor
+    motion: MotionState
 
 
 @dataclass

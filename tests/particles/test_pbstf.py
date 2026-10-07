@@ -391,6 +391,7 @@ def test_static_collider_pose_and_absorption(asset_tmp_path, n_envs, is_deformab
             upper=(0.3, 0.3, 0.3),
             absorption_rate=100.0,
             absorption_capacity_fraction=0.4,
+            absorption_motion_rate=5.0,
             pbd_entity_name="absorbent" if is_deformable else None,
         ),
     ]
@@ -507,7 +508,7 @@ def test_static_collider_pose_and_absorption(asset_tmp_path, n_envs, is_deformab
     is_first_captured = first_progress > 0.0
     assert_equal(is_first_captured.sum(axis=-1), 1)
     assert_equal(tensor_to_array(first_solver_state.absorption_voxel_distance)[is_first_captured], 0)
-    assert_allclose(first_progress[is_first_captured], 1.0 - math.exp(-0.1), atol=1e-6)
+    assert_allclose(first_progress[is_first_captured], 1.0 - math.exp(-5.0 * scene.dt), atol=1e-6)
     assert_allclose(tensor_to_array(first_solver_state.absorption_capture_budget), 0.0, atol=1e-6)
 
     for _ in range(70):
@@ -525,7 +526,9 @@ def test_static_collider_pose_and_absorption(asset_tmp_path, n_envs, is_deformab
     target_local_pos = tensor_to_array(solver_state.absorption_target_local_pos)
     is_captured = progress > 0.0
     beta = np.zeros_like(progress)
-    beta[is_captured] = 1.0 - np.exp(-collider_options[3].absorption_rate * 1e-3 / (voxel_distances[is_captured] + 1))
+    beta[is_captured] = 1.0 - np.exp(
+        -collider_options[3].absorption_motion_rate * scene.dt / (voxel_distances[is_captured] + 1)
+    )
     wetness = tensor_to_array(solver.get_static_collider_wetness(3))
     if n_envs == 0:
         wetness = wetness[None]

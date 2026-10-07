@@ -109,12 +109,7 @@ class ButterContact:
         for offset_x, offset_y in ((0, 0), (0, 1), (1, 0), (1, 1)):
             node_x = base[..., 0] + offset_x
             node_y = base[..., 1] + offset_y
-            is_valid = (
-                (node_x >= 0)
-                & (node_x < self._res[0])
-                & (node_y >= 0)
-                & (node_y < self._res[1])
-            )
+            is_valid = (node_x >= 0) & (node_x < self._res[0]) & (node_y >= 0) & (node_y < self._res[1])
             node_x = node_x.clamp(0, self._res[0] - 1)
             node_y = node_y.clamp(0, self._res[1] - 1)
             indices.append(env_offset + node_x * self._res[1] + node_y)
@@ -294,9 +289,7 @@ class ButterContact:
         for node_indices, node_weights, is_valid in zip(grid.indices, grid.weights, grid.valid):
             has_mass = is_valid & (grid.mass[node_indices] > 1.0e-12)
             contribution = (
-                node_weights[..., None]
-                * reaction[node_indices]
-                / grid.mass[node_indices].clamp_min(1.0e-12)[..., None]
+                node_weights[..., None] * reaction[node_indices] / grid.mass[node_indices].clamp_min(1.0e-12)[..., None]
             )
             surface_velocity_change += torch.where(has_mass[..., None], contribution, 0.0)
         bread_velocities[:, self._surface_indices] += surface_velocity_change

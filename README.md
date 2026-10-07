@@ -330,6 +330,27 @@ runner.set_state(runner_state)
 - 咖啡场景的稳定入口是 `examples.multiphysics.coffee_water`；原来的 `examples.pbstf_coffee_water` 仅保留为
   命令行和旧导入路径的薄入口。
 
+### 对接交接收尾（2026-10-07）
+
+目前五个场景的结构接口可供源码部署、单环境的 UniRoboSim adapter 接入。这里的 ready 指构建、原生步进、
+公开状态访问和配对恢复入口清晰；任务视觉效果、实时速度、多环境构建及 RL 的 action/reward/done 封装需
+分别验收。
+
+- 部署需保留同一 commit 的源码 checkout，并确保 `genesis` 和 `examples.multiphysics` 都从该目录导入。
+  当前普通 wheel 只打包引擎，不包含标准场景和场景目录下的资产；具体部署与 API 差异见
+  [调用表](./docs/integration/unirobosim_genesis.md#exact-scenario-calls)。
+- `controller.step(runtime)` 已推进物理；`runner.step()` 也已执行该帧的全部原生控制步。adapter 不应再补一次
+  `scene.step()`。如果 UniRoboSim 自己控制工具，则自行发命令并调用 `scene.step()`，保留已注册的物理 callback。
+- 咖啡的 CLI、录像和验收测量移到 `run.py`，核心场景实现与命令行客户端分开；公开构建与控制器签名保持。
+  咖啡快照使用 `get_state(runtime)`，其余使用 `get_state()`；黄油 Controller 构造还需传入原生 dt。
+- 擦水新增独立的 `absorption_motion_rate`，将粒子捕获吞吐与吸入内部的速度分开。省略该参数时沿用原行为；
+  本次仅擦水场景显式使用校准值，控制时钟保持。
+- 衣服 Scene527、倒咖啡、开槽猫砂和校准擦水已有完成的录像；轻量衣服与抹黄油的完整验证仍待完成。
+  [验收记录](./docs/integration/full_trajectory_validation.md) 区分数值完成、状态恢复和视觉任务验收。
+- 本轮 41 项接口/配置/时序/恢复结构回归通过；咖啡入口迁移后另有 7 项复查通过。真实场景的配对恢复检查
+  额外比较公开位置/速度和工具状态；五个场景均通过恢复、续跑、裸 scene 重置和重启检查，
+  各有七阶段诊断录像，结果单列在验收记录。这不替代完整轨迹和视觉效果验收。
+
 ## 7. 当前状态
 
 当前架构已经能够支持 UniRoboSim-Genesis 以较小改动接入新增流体、颗粒、多物理耦合和标准任务。

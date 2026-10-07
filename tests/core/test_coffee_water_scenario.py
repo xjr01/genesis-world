@@ -15,6 +15,7 @@ from examples.multiphysics.coffee_water.implementation import (
     ToolPose,
     motion_target,
 )
+from examples.multiphysics.coffee_water.run import main
 
 
 def test_coffee_water_public_api():
@@ -32,6 +33,7 @@ def test_coffee_water_public_api():
     )
     assert pbstf_coffee_water.build_scene is build_scene
     assert pbstf_coffee_water.CoffeeWaterRuntime is CoffeeWaterRuntime
+    assert pbstf_coffee_water.main is main
 
 
 def test_grasp_sponge_phase_uses_configured_grip_height():

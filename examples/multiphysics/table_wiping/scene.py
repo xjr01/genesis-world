@@ -73,6 +73,7 @@ def build_scene(
         upper=assets.sponge_upper,
         absorption_rate=material.absorption_rate,
         absorption_capacity_fraction=material.absorption_capacity_fraction,
+        absorption_motion_rate=material.absorption_motion_rate,
         pbd_entity_name="sponge",
     )
     scene = gs.Scene(

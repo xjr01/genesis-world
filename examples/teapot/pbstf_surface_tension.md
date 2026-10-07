@@ -251,27 +251,28 @@ fields control different parts of the behavior.
 
 ### `absorption_rate`
 
-`absorption_rate` controls both admission throughput and inward motion. Each absorbent collider in each environment
+`absorption_rate` controls admission throughput. Each absorbent collider in each environment
 earns `absorption_rate * dt` capture credit per simulation substep, and each new particle binding consumes one credit.
 With persistent contact and free capacity, the sustained upper bound is therefore approximately `absorption_rate`
 newly captured particles per simulated second. Idle credit is bounded to about one additional particle so a dry box
 cannot accumulate a large burst before it reaches water.
 
+`absorption_motion_rate` controls inward motion in inverse seconds. When omitted, it resolves to `absorption_rate`.
 After admission, a target at Manhattan voxel distance `d` uses:
 
 ```text
-beta = 1 - exp(-absorption_rate * dt / (d + 1))
+beta = 1 - exp(-absorption_motion_rate * dt / (d + 1))
 progress_new = progress + beta * (1 - progress)
 local_pos_new = local_pos + beta * (target_local_pos - local_pos)
 ```
 
-The nearest-voxel time constant is `1 / absorption_rate`; a target at distance `d` has time constant
-`(d + 1) / absorption_rate`. At the default `2000.0 s^-1`, persistent contacts admit about 2000 particles per
+The nearest-voxel time constant is `1 / absorption_motion_rate`; a target at distance `d` has time constant
+`(d + 1) / absorption_motion_rate`. With both rates set to `2000.0`, persistent contacts admit about 2000 particles per
 simulated second. The corresponding motion time constants are `0.0005 s` at distance zero, `0.001 s` at distance one,
 and `0.002 s` at distance three.
 
-- Raise the rate for more captures per second and a faster, more abrupt inward trajectory.
-- Lower the rate for fewer captures per second and a slower, smoother inward trajectory.
+- Raise `absorption_rate` for more captures per second, and lower it to delay saturation.
+- Raise `absorption_motion_rate` for a faster inward trajectory, and lower it for a smoother wetting transition.
 - The value must be greater than zero.
 
 ### `absorption_capacity_fraction`

@@ -24,14 +24,15 @@ class TableWipingMaterialConfig:
 
     density: float = 1000.0
     density_compliance: float = 33750.0
-    surface_tension_compliance: float = 1.0 / 225.0
+    surface_tension_compliance: float = 100.0 / 225.0
     surface_distance_compliance: float = 40.0
     interior_distance_compliance: float = 180.0
     surface_viscosity: float = 0.5
     interior_viscosity: float = 0.5
     collider_adhesion_compliance: float = 50.0
     collider_friction: float = 0.5
-    absorption_rate: float = 4000.0
+    absorption_rate: float = 800.0
+    absorption_motion_rate: float = 10.0
     absorption_capacity_fraction: float = 1.0
 
 

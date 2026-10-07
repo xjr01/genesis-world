@@ -33,9 +33,7 @@ def knife_pose(config: ButterSpreadingTaskConfig, time_s: float) -> tuple[float,
             + 0.5 * config.spread_speed * (config.acceleration_end_time - config.press_end_time)
             + config.spread_speed * (time_s - config.acceleration_end_time)
         )
-        phase = (time_s - config.acceleration_end_time) / (
-            config.spread_end_time - config.acceleration_end_time
-        )
+        phase = (time_s - config.acceleration_end_time) / (config.spread_end_time - config.acceleration_end_time)
         z_pos = config.sweep_clearance + (config.sweep_end_clearance - config.sweep_clearance) * _ease(phase)
     elif time_s < config.spread_end_time:
         duration = config.spread_end_time - config.deceleration_start_time
@@ -46,9 +44,7 @@ def knife_pose(config: ButterSpreadingTaskConfig, time_s: float) -> tuple[float,
             + config.spread_speed * (config.deceleration_start_time - config.acceleration_end_time)
             + config.spread_speed * duration * (phase - _ease_integral(phase))
         )
-        sweep_phase = (time_s - config.acceleration_end_time) / (
-            config.spread_end_time - config.acceleration_end_time
-        )
+        sweep_phase = (time_s - config.acceleration_end_time) / (config.spread_end_time - config.acceleration_end_time)
         z_pos = config.sweep_clearance + (config.sweep_end_clearance - config.sweep_clearance) * _ease(sweep_phase)
     else:
         phase = (time_s - config.spread_end_time) / (config.lift_end_time - config.spread_end_time)

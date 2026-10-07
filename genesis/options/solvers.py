@@ -806,21 +806,26 @@ class PBSTFBoxStaticColliderOptions(PBSTFStaticColliderOptions):
 class PBSTFAbsorbentStaticColliderOptionsMixin(Options):
     """Absorption controls for a position-based surface tension flow (PBSTF) static collider.
 
-    ``absorption_rate`` limits sustained new captures per simulated second for each collider and environment, and sets
-    the nearest-voxel exponential inward-motion rate. Voxels farther from the contact move liquid inward progressively
-    more slowly. A higher value admits liquid faster but produces more abrupt local trajectories; a lower value reduces
-    throughput and preserves gradual motion. ``absorption_capacity_fraction`` is the fraction of collider volume
+    ``absorption_rate`` limits sustained new captures per simulated second for each collider and environment. Higher
+    values remove free liquid faster and fill the collider sooner. ``absorption_motion_rate`` sets the nearest-target
+    exponential inward-motion rate in inverse seconds. Higher values draw captured liquid inward more abruptly; lower
+    values preserve a longer visible wetting transition. If None, resolved to ``absorption_rate``. Defaults to None.
+    Voxels farther from the contact move liquid inward progressively more slowly.
+    ``absorption_capacity_fraction`` is the fraction of collider volume
     available for liquid at rest. A higher value stores more liquid before saturation, while a lower value resumes
     ordinary collision behavior sooner.
     """
 
     absorption_rate: PositiveFloat
     absorption_capacity_fraction: UnitInterval
+    absorption_motion_rate: PositiveFloat | None = None
 
     @model_validator(mode="after")
     def _validate_absorption_capacity(self):
         if self.absorption_capacity_fraction <= 0.0:
             gs.raise_exception("PBSTF absorbent collider `absorption_capacity_fraction` must be positive.")
+        if self.absorption_motion_rate is None:
+            self.absorption_motion_rate = self.absorption_rate
         return self
 
 

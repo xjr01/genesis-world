@@ -2,6 +2,118 @@
 
 ## Supported integration surface
 
+### Source checkout deployment
+
+The adapter-facing scenarios live in `examples.multiphysics`. The current setuptools configuration packages only
+`genesis` and `genesis.*`; these scenarios and their scenario-local assets are available through the source checkout,
+not through an ordinary engine wheel. Keep the pinned checkout available to the adapter, install the engine with
+`python -m pip install -e /path/to/genesis-world`, and add that checkout to the adapter process's `PYTHONPATH` when
+launching outside it. Verify both `genesis.__file__` and `examples.multiphysics.__file__` resolve into that checkout.
+This is especially important with several editable checkouts on one machine.
+
+The engine and scenario checkout must use the same commit. Use the fork's dependency declaration, a compatible GPU
+PyTorch installation, and the optional `pyuipc` dependency for garment folding. The coffee client also imports SciPy.
+Scene527 requires its separate portable asset bundle; a lightweight garment scene uses the bundled assets instead.
+Engine capability availability and normalized scenario batching are distinct: the current five builders create one
+unbatched scene and expose no `n_envs` construction argument. Use one built runtime per task environment until a
+scenario-specific batched construction path is implemented and validated. FLIP additionally has a solver-level
+single-environment restriction.
+
+### Exact scenario calls
+
+Import from the scenario package, rather than its implementation, research script or command-line module. All five
+packages export their scenario config, named runtime, controller, controller-state type and `build_scene`. The API
+differences below are deliberate parts of the current callable surface.
+
+| Scenario | Controller construction | Camera construction | Controller snapshot | Native `control_dt` |
+|---|---|---|---|---:|
+| Coffee | `CoffeeWaterController(config.task)` | `build_scene(config, is_recording=True)` | `controller.get_state(runtime)` | 0.002 s |
+| Table | `TableWipingController(config.task)` | `build_scene(config, add_camera=True)` | `controller.get_state()` | 0.002 s |
+| Litter | `LitterScoopController(config.task)` | `build_scene(config, add_camera=True)` | `controller.get_state()` | 1/60 s |
+| Garment | `GarmentFoldingController(config.task)` | `build_scene(config, add_camera=True)` | `controller.get_state()` | 0.02 s lightweight; 1/120 s Scene527 |
+| Butter | `ButterSpreadingController(config.task, config.solver.dt)` | `build_scene(config, add_camera=True)` | `controller.get_state()` | 0.000035 s |
+
+Coffee uses `is_viewer_shown` for its viewer keyword; the other builders use `show_viewer`. Creating a camera leaves
+recording under the client's control. Omit camera/viewer keywords for headless adapter construction.
+
+The calibrated world frames also differ: coffee and table are Y-up, while litter, garment and butter are Z-up. Read
+the configured gravity and asset/task frame together; preserve that frame when constructing the calibrated scene.
+An adapter publishing a common world frame must consistently transform observations and commands at its boundary,
+including poses, velocities, gravity and task targets. Changing only a mesh rotation leaves physics and task frames
+inconsistent. Positions and durations use metres and seconds; public Genesis quaternions use `(w, x, y, z)`.
+
+`controller.step(runtime)` issues the task command AND advances physics by `runtime.control_dt`. Do not call an
+additional `scene.step()` after it. `ScenarioFrameRunner.step()` likewise performs all of that frame's controller
+steps and returns their count. Coffee's native controller call contains two scene steps at 0.001 s each; schedule
+with `runtime.control_dt`, rather than assuming it equals `scene.dt`. Coffee returns a `MotionTarget` from its
+controller step; the other controllers return
+`None`. An adapter should read observations through public runtime entity/solver handles and keep step return values
+separate from its own observation schema. None of the controllers implement an RL `step(action)`/reward/done API.
+
+Public observation types are explicit at the getter boundary: particle/robot getters used here return Torch tensors,
+while DEM's scripted obstacle pose getters return NumPy arrays. Normalize once in the adapter's observation layer;
+the lifecycle checker uses `torch.as_tensor` and cloned snapshots to support both and avoid aliasing saved observations.
+
+The adapter owns its episode termination. The calibrated clients use these native-step limits or task predicates:
+
+| Scenario | Calibrated termination |
+|---|---|
+| Coffee | Both returned target phases have `.name == "REST"`; `config.task.motion_end` is the upper time bound |
+| Table | `controller.step_index >= config.task.steps` |
+| Litter | `controller.step_index >= config.task.total_steps` |
+| Garment | `controller.step_index >= runtime.default_steps`; Scene527 rejects further native trajectory steps |
+| Butter | `controller.step_index >= round(config.task.lift_end_time / runtime.control_dt) + 1` |
+
+Use restored controller indices for resumed tasks, not the Scene's restore-local clock. Check termination after each
+native controller step when an exact horizon is required. A fixed-rate frame can contain several native steps;
+termination checked only after a full frame is quantized to that frame. Stop invoking a completed Scene527 controller.
+
+Two operating modes are supported: use the supplied controller to reproduce the calibrated example, or own task
+commands in UniRoboSim and call `scene.step()` directly. In the latter mode, retain registered contact/boundary
+callbacks and implement the task's tool commands in the adapter. A bare scene step applies physics and callbacks;
+it does not execute the example's scripted controller. At 60 FPS, the optional runner distributes native calls;
+for the lightweight garment some frames execute zero calls, and butter executes roughly 476 calls per frame.
+The frame runner provides timing, rather than a real-time performance guarantee.
+
+### Paired checkpoint lifecycle
+
+For example, after constructing a table runtime and controller:
+
+```python
+from examples.multiphysics import ScenarioFrameRunner
+
+controller.reset(runtime)
+runner = ScenarioFrameRunner(controller, runtime, fps=60.0)
+runner.step()
+scene_state = runtime.scene.get_state()
+controller_state = controller.get_state()  # Coffee uses get_state(runtime).
+frame_state = runner.get_state()
+
+runner.step()
+runtime.scene.restore(scene_state)
+controller.set_state(runtime, controller_state)
+runner.set_state(frame_state)
+runner.step()
+
+runtime.scene.reset()
+controller.reset(runtime)
+runner.reset()
+```
+
+Restore only into a runtime built from the same config, asset revisions and engine/backend profile. Capture a paired
+checkpoint after a completed controller/frame step. Serialized checkpoints also depend on backend state support;
+changing the solver layout or shovel representation requires regeneration. The coffee snapshot includes its runtime
+motion state and joint target; the other snapshot signatures remain unchanged.
+
+Run `python scripts/validate_multiphysics_checkpoint.py <scenario> --record` from the checkout to check public particle
+position/velocity, available tool/robot state, controller phase restoration, continuation and bare initial reset.
+Its seven rendered diagnostic frames use a 5 FPS display clock and cover initial, checkpoint, advance, restore,
+continuation, reset and restart; their playback duration is separate from simulated time. Detailed absorption,
+concentration, grid and native IPC state requirements also have solver-specific tests. Acceptance evidence and limits
+are tracked in [the validation record](full_trajectory_validation.md).
+
+### Engine boundary
+
 UniRoboSim-Genesis should treat this repository as one pinned engine distribution. Its provider, session and world
 lifecycle can follow the standard Genesis backend. Fork capabilities are discovered at startup and compiled through
 the public interfaces below.
@@ -218,6 +330,32 @@ FLIP currently supports one environment per scene. Use one scene per independent
 capabilities must preserve the leading environment dimension exposed by Genesis public getters and setters.
 
 ## Integration acceptance
+
+### Handoff scope
+
+The five normalized packages are the source-checkout integration surface. Config groups and runtimes are named
+dataclasses; task state lives in explicit controller snapshots; scenario physics updates use public engine APIs and
+registered scene callbacks. CLI recording and acceptance measurements stay in `run.py`, including the coffee client.
+The coffee implementation still contains its substantial coordinated manipulation and construction logic; the package
+exports isolate that implementation from adapter callers. A future internal split can preserve those exports.
+
+These are calibrated task reproductions rather than a generic robot/task compiler. Each config exposes its declared
+knobs; coffee still has detailed phase timings and grasp thresholds inside its controller implementation. Robot link
+names, joint layouts and semantic tool points are scenario-specific. Adapting an arbitrary replacement robot or a
+different manipulation sequence requires a matching scene/controller implementation, beyond changing material
+parameters. Preserve the documented asset representation and task frame when porting the five current examples.
+
+Integration readiness here means a caller can construct, advance, observe and restore a task through the documented
+API. It does not certify real-time throughput, batched task builders, an installable scenario wheel, an RL task schema
+or visual task success. Those are separate requirements. The remote UniRoboSim implementation is maintained separately;
+this repository's public API tests and recorded engine runs are evidence for this side of the boundary, not a joint
+end-to-end acceptance of an uninspected adapter revision.
+
+The current table calibration adds an optional `absorption_motion_rate` in inverse seconds. Existing absorbent
+collider callers that omit it keep their configured `absorption_rate` for inward motion as well as capture throughput.
+The table config supplies its calibrated value explicitly. Controller signatures, native `control_dt` values and
+the optional 60 FPS frame-runner contract stay unchanged. The open-slot litter asset correction requires matching
+visual/SDF assets and freshly generated checkpoints; check its asset notes in the scenario README before handoff.
 
 Before updating the commit pinned by UniRoboSim-Genesis:
 

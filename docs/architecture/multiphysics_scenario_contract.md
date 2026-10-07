@@ -4,6 +4,12 @@ The normalized construction inputs under `examples.multiphysics` use the Genesis
 UniRoboSim-Genesis should call these modules; scripts under `examples.multiflow` and
 `examples.sand_water_coupling` provide research and rendering references.
 
+The current normalized builders create one unbatched scene. Their modules and scenario-local assets are deployed from
+the pinned source checkout; engine wheels package only `genesis`. See the integration guide's
+[exact-call table](../integration/unirobosim_genesis.md#exact-scenario-calls) for construction keywords, controller
+snapshot signatures and native clock values. Structural integration readiness and recorded task success are separate
+acceptance gates.
+
 ## Configuration ownership
 
 Every normalized scenario separates four kinds of input:
@@ -44,7 +50,9 @@ part of the adapter contract.
 `examples.multiphysics.garment_folding.build_scene(config)` accepts `GarmentFoldingScenarioConfig` and returns named
 garment, table, jaw and landmark handles. `GarmentFoldingController.step(runtime)` drives the public rigid-entity API.
 Garment placement, scale and semantic grasp landmarks belong to `GarmentFoldingAssets`; task trajectories are evaluated
-in that asset-local frame. The validated default is the half-fold task; the other task variants remain experimental.
+in that asset-local frame. The default is the lightweight half-fold task, whose full trajectory requires revalidation
+after the IPC material correction. The separate Scene527 recorded continuation completed; fold-shape acceptance
+remains open. The other task variants remain experimental.
 
 ### Butter spreading
 
@@ -73,8 +81,8 @@ changing total mass when sampling resolution changes.
 
 ## State and reset
 
-DEM snapshots include particle position, velocity, active state, absorbed-water ratio, and the scripted tilt-box pose
-and velocity. FLIP snapshots include particle position, velocity, active state, MAC-grid face velocities and the
+DEM snapshots include particle position, velocity, active state, absorbed-water ratio, and the scripted obstacle pose
+and velocity, including the open-slot mesh shovel. FLIP snapshots include particle position, velocity, active state, MAC-grid face velocities and the
 previous fluid step duration. These fields are required so `scene.get_state()`, `scene.restore(state)` and
 `scene.reset()` restore coupled motion instead of restoring only rendered particle positions.
 
@@ -103,6 +111,11 @@ step. A backend that chooses to present a uniform 60 FPS task clock may construc
 returns the native substep count executed for that frame and distributes fractional ratios without cumulative time
 drift. This preserves high-rate command updates for coffee, garment and butter while giving UniRoboSim one frame
 contract across all five scenarios.
+
+Both the controller and frame runner advance physics themselves. Calling an additional `scene.step()` after either
+double-advances simulation. An adapter that owns the task commands instead of using the example controller calls
+`scene.step()` itself and retains the scene's registered boundary/contact callbacks. Controller step return values
+are task-specific; observation, action, reward and completion schemas belong to the adapter.
 
 When the optional runner is used, store `runner.get_state()` beside the matching Scene and controller states for a
 resumable adapter checkpoint. Restore the Scene state, controller state and runner state in that order. A task restart

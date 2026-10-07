@@ -218,7 +218,7 @@ def kernel_update_absorbed_particles(
     n_particles: qd.i32,
     collider_idx: qd.i32,
     substep_dt: float,
-    absorption_rate: float,
+    absorption_motion_rate: float,
     particles: qd.template(),
     particles_status: qd.template(),
     absorption_particles: qd.template(),
@@ -242,7 +242,7 @@ def kernel_update_absorbed_particles(
             voxel_distance = absorption_particles[particle_idx, env_idx].voxel_distance
             progress = absorption_particles[particle_idx, env_idx].progress
             distance_scale = qd.max(voxel_distance + 1, 1)
-            beta = 1.0 - qd.exp(-absorption_rate * substep_dt / distance_scale)
+            beta = 1.0 - qd.exp(-absorption_motion_rate * substep_dt / distance_scale)
             local_pos += beta * (target_local_pos - local_pos)
             progress += beta * (1.0 - progress)
             pos_prev = particles[particle_idx, env_idx].pos
@@ -284,7 +284,7 @@ def func_capture_particles(
     absorption_idx: qd.i32,
     particle_radius: float,
     substep_dt: float,
-    absorption_rate: float,
+    absorption_motion_rate: float,
     particles: qd.template(),
     particles_status: qd.template(),
     absorption_particles: qd.template(),
@@ -401,7 +401,7 @@ def func_capture_particles(
                                             + qd.abs(voxel_z - origin_z)
                                         )
                                         target_local_pos = collider.voxel_positions[voxel_idx_local, env_idx]
-                                    beta = 1.0 - qd.exp(-absorption_rate * substep_dt / (voxel_distance + 1))
+                                    beta = 1.0 - qd.exp(-absorption_motion_rate * substep_dt / (voxel_distance + 1))
                                     local_pos += beta * (target_local_pos - local_pos)
                                     progress = beta
                                     absorbed_pos = geom.qd_transform_by_trans_quat(
