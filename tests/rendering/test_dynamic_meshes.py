@@ -68,6 +68,22 @@ def test_pbd_reconstruction_uses_pbd_particle_radius(monkeypatch, renderer):
     "vis_mode, render_particle_as", [("particle", "points"), ("particle", "sphere"), ("recon", "sphere")]
 )
 def test_concentration_colors_and_merged_surface(n_envs, vis_mode, render_particle_as, renderer, show_viewer):
+    concentrations = np.array([-1.0, 0.0, 0.25, 0.5, 0.75, 1.0, 2.0])
+    expected_colors = np.array(
+        [
+            (1.0, 1.0, 1.0, 1.0),
+            (1.0, 1.0, 1.0, 1.0),
+            (0.975, 0.89, 0.65, 1.0),
+            (0.95, 0.78, 0.30, 1.0),
+            (0.625, 0.46, 0.175, 1.0),
+            (0.30, 0.14, 0.05, 1.0),
+            (0.30, 0.14, 0.05, 1.0),
+        ]
+    )
+    if n_envs:
+        concentrations = np.tile(concentrations, (n_envs, 1))
+        expected_colors = np.tile(expected_colors, (n_envs, 1, 1))
+    assert_allclose(particle_utils.concentration_colors(concentrations), expected_colors, atol=1e-7)
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
             gravity=(0.0, 0.0, 0.0),

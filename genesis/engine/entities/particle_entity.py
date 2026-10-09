@@ -154,7 +154,7 @@ class ParticleEntity(Entity):
 
     def _sanitize_particles_idx_local(self, particles_idx_local=None, envs_idx=None):
         if particles_idx_local is None:
-            particles_idx_local = range(self._n_particles)
+            particles_idx_local = torch.arange(self._n_particles, dtype=gs.tc_int, device=gs.device)
 
         if envs_idx is None:
             particles_idx_local_ = broadcast_tensor(particles_idx_local, gs.tc_int, (-1,), ("envs_idx",))
