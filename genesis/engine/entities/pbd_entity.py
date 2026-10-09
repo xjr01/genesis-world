@@ -908,11 +908,18 @@ class PBD3DSolidEntity(PBDBaseEntity):
         self._init_particles_offset = gs.tensor(self._particles) - gs.tensor(pos)
         self._particle_mass = self._vmesh.volume * self.material.rho / self._n_particles
 
+        if self.material.plastic_creep > 0.0 and self.material.plastic_flow_rate is not None:
+            gs.raise_exception(
+                "PBD.Solid: plastic_creep (legacy per-substep contract) and plastic_flow_rate "
+                "(time contract, 1/s) are two specifications of the same flow; set only one."
+            )
         if self.material.fracture_threshold > 0.0:
-            if self.material.yield_threshold > 0.0 or self.material.plastic_creep > 0.0:
+            if self.material.yield_threshold > 0.0 or self.material.plastic_creep > 0.0 or (
+                self.material.plastic_flow_rate is not None
+            ):
                 gs.raise_exception(
-                    "PBD.Solid: plasticity (yield_threshold / plastic_creep) is only supported for "
-                    "unbreakable bodies (fracture_threshold = 0)."
+                    "PBD.Solid: plasticity (yield_threshold / plastic_creep / plastic_flow_rate) is only "
+                    "supported for unbreakable bodies (fracture_threshold = 0)."
                 )
             self._partition_fragments()
             self._build_fragment_clusters()
@@ -1234,6 +1241,7 @@ class PBD3DSolidEntity(PBDBaseEntity):
             particle_member_start=self._particle_member_starts,
             particle_member_count=self._particle_member_counts,
             particle_cluster_ids=self._particle_cluster_ids,
+            plastic_flow_rate=(0.0 if self.material.plastic_flow_rate is None else float(self.material.plastic_flow_rate)),
         )
         if self.n_seams > 0:
             seam_clusters = np.stack(
@@ -1256,13 +1264,46 @@ class PBD3DSolidEntity(PBDBaseEntity):
             )
 
     def _add_vverts_to_solver(self):
-        # support skinning still provides the render active flag; cluster binding owns solid face motion
+        # support skinning still provides the render active flag; cluster binding owns solid face motion.
+        # Plastic bodies render through this skinning (see PBDSolver._kernel_update_render_fields), so
+        # their support weights must stay interpolation-safe: the base affine solve extrapolates whenever
+        # the nearest particles of a surface vertex form a degenerate cell, and a compressing plastic
+        # surface then flings vertices meters away. Inverse-distance weights are strictly positive and
+        # sum to one, so skinned vertices stay inside the local particle neighborhood and every state
+        # restore reproduces them exactly.
         super()._add_vverts_to_solver()
+        if self.material.plastic_creep > 0.0 or self.material.plastic_flow_rate is not None:
+            n_supports = self.solver._n_vvert_supports
+            dists, idxs = cKDTree(self._particles).query(self._vverts, k=n_supports)
+            if n_supports == 1:
+                dists, idxs = dists[:, None], idxs[:, None]
+            weights = 1.0 / np.maximum(dists, 1e-9)
+            weights /= weights.sum(axis=-1, keepdims=True)
+            self._kernel_rebind_vvert_supports(
+                vvert_start=self._vvert_start,
+                n_vverts=self.n_vverts,
+                support_idxs=idxs.astype(gs.np_int) + self._particle_start,
+                support_weights=weights.astype(gs.np_float),
+            )
         self._kernel_add_solid_vverts_to_solver(
             clusters=self._vvert_clusters,
             offsets=self._vvert_offsets,
             seams=self._vvert_seams,
         )
+
+    @qd.kernel
+    def _kernel_rebind_vvert_supports(
+        self,
+        vvert_start: qd.i32,
+        n_vverts: qd.i32,
+        support_idxs: qd.types.ndarray(),
+        support_weights: qd.types.ndarray(),
+    ):
+        for i_vv_ in range(n_vverts):
+            i_vv = vvert_start + i_vv_
+            for j in range(self.solver._n_vvert_supports):
+                self.solver.vverts_info.support_idxs[i_vv][j] = support_idxs[i_vv_, j]
+                self.solver.vverts_info.support_weights[i_vv][j] = support_weights[i_vv_, j]
 
     @qd.kernel
     def _kernel_add_solid_particles_to_solver(
@@ -1294,6 +1335,7 @@ class PBD3DSolidEntity(PBDBaseEntity):
     @qd.kernel
     def _kernel_add_clusters_to_solver(
         self,
+        plastic_flow_rate: qd.f32,
         cluster_rest_cm: qd.types.ndarray(element_dim=1),
         cluster_member_start: qd.types.ndarray(),
         cluster_member_count: qd.types.ndarray(),
@@ -1309,6 +1351,7 @@ class PBD3DSolidEntity(PBDBaseEntity):
             self.solver.clusters_info[i_c].stiffness = self.material.stiffness
             self.solver.clusters_info[i_c].yield_threshold = self.material.yield_threshold * self._particle_size
             self.solver.clusters_info[i_c].plastic_creep = self.material.plastic_creep
+            self.solver.clusters_info[i_c].plastic_flow_rate = plastic_flow_rate
 
         for i_c_, i_b in qd.ndrange(self.n_clusters, self._sim._B):
             i_c = i_c_ + self._cluster_start

@@ -21,6 +21,7 @@ from genesis.utils.array_class import V_ANNOTATION
 from genesis.utils.misc import qd_to_numpy, qd_to_torch, tensor_to_array
 
 if TYPE_CHECKING:
+    from genesis.engine.entities.rigid_entity.rigid_entity import RigidEntity, RigidLink
     from genesis.engine.simulator import Simulator
 
 
@@ -327,6 +328,153 @@ def kernel_revoke_fragment_ownership(
             pbd.particles_ng[bridge.fragment_member_particles_q[i_m_], i_b].is_native_owned = False
 
 
+@qd.kernel
+def kernel_switch_parent_to_fragments(bridge: V_ANNOTATION, rigid: V_ANNOTATION):
+    """One-shot import of every pre-cut fragment link from the parent's current state (stage B).
+
+    Reads the parent FREE link's pose and velocity, transfers each fragment to
+    pos_k = p + R dk, quat_k = quat, v_k = v + omega x (R dk), omega_k = R^T omega (mass, COM, P, L and
+    KE stay continuous because the d_k sum to zero against the parent COM and the fragment inertias are
+    the real particle-member inertias), then flips ownership in the same instant: fragments natively
+    integrated and contacted, the parent frozen (externally driven) with native contacts off. Runs at the
+    substep head; clears the pending flag itself so the hot path stays free of host readback.
+    """
+    for i_b in range(rigid._B):
+        if bridge.parent_switch_pending_q[i_b] == 0:
+            continue
+        bridge.parent_switch_pending_q[i_b] = 0
+        pq = bridge._parent_q_start
+        pd = bridge._parent_dof_start
+        c_p = qd.Vector.zero(qd.f64, 3)
+        quat_p = qd.Vector.zero(qd.f64, 4)
+        v_p = qd.Vector.zero(qd.f64, 3)
+        w_body = qd.Vector.zero(qd.f64, 3)
+        for j in qd.static(range(3)):
+            c_p[j] = rigid.rigid_info.qpos[pq + j, i_b]
+            v_p[j] = rigid.dyn_state.dofs.vel[pd + j, i_b]
+        for j in qd.static(range(4)):
+            quat_p[j] = rigid.rigid_info.qpos[pq + 3 + j, i_b]
+        for j in qd.static(range(3)):
+            w_body[j] = rigid.dyn_state.dofs.vel[pd + 3 + j, i_b]
+        # rotation matrix of the parent quaternion, built inline (no helper call in kernel scope)
+        qw, qx, qy, qz = quat_p[0], quat_p[1], quat_p[2], quat_p[3]
+        R = qd.Matrix(
+            [
+                [1.0 - 2.0 * (qy * qy + qz * qz), 2.0 * (qx * qy - qw * qz), 2.0 * (qx * qz + qw * qy)],
+                [2.0 * (qx * qy + qw * qz), 1.0 - 2.0 * (qx * qx + qz * qz), 2.0 * (qy * qz - qw * qx)],
+                [2.0 * (qx * qz - qw * qy), 2.0 * (qy * qz + qw * qx), 1.0 - 2.0 * (qx * qx + qy * qy)],
+            ]
+        )
+        w = R @ w_body
+        for i_k in range(bridge.n_fragments_q):
+            i_l = bridge.fragment_link_q[i_k]
+            q_start = bridge.fragment_q_start_q[i_k]
+            dof_start = bridge.fragment_dof_start_q[i_k]
+            d_w = R @ bridge.frag_dk_q[i_k]
+            pos_k = c_p + d_w
+            v_k = v_p + w.cross(d_w)
+            # the fragment link frames are spawn-aligned with the parent frame, so the inherited
+            # body-frame angular velocity is the parent's own
+            omega_body = w_body
+            for j in qd.static(range(3)):
+                rigid.rigid_info.qpos[q_start + j, i_b] = gs.qd_float(pos_k[j])
+                rigid.dyn_state.dofs.vel[dof_start + j, i_b] = gs.qd_float(v_k[j])
+            for j in qd.static(range(4)):
+                rigid.rigid_info.qpos[q_start + 3 + j, i_b] = gs.qd_float(quat_p[j])
+            for j in qd.static(range(3)):
+                rigid.dyn_state.dofs.vel[dof_start + 3 + j, i_b] = gs.qd_float(omega_body[j])
+            rigid.dyn_state.links.is_externally_driven[i_l, i_b] = False
+            rigid.dyn_state.links.is_contact_enabled[i_l, i_b] = True
+            for j in qd.static(range(3)):
+                rigid.dyn_state.links.cfrc_coupling_vel[i_l, i_b][j] = gs.qd_float(0.0)
+                rigid.dyn_state.links.cfrc_coupling_ang[i_l, i_b][j] = gs.qd_float(0.0)
+                rigid.dyn_state.links.contact_force[i_l, i_b][j] = gs.qd_float(0.0)
+        for i_pl_ in range(bridge.n_parent_links_q):
+            i_pl = bridge.parent_links_q[i_pl_]
+            rigid.dyn_state.links.is_externally_driven[i_pl, i_b] = True
+            rigid.dyn_state.links.is_contact_enabled[i_pl, i_b] = False
+
+
+@qd.kernel
+def kernel_snapshot_parent_velocity(bridge: V_ANNOTATION, links_state: array_class.LinksState):
+    """Copy the full parent's link velocities at the substep tail (stage-C trigger input).
+
+    The tail velocities are exactly what the next substep's constraint solve consumes, so the trigger's closing
+    speeds are evaluated on the pre-impact state instead of the post-resolution one the same tail would read.
+    """
+    for i_pl_, i_b in qd.ndrange(bridge.n_parent_links_q, bridge.impact_vel_snap_q.shape[1]):
+        i_pl = bridge.parent_links_q[i_pl_]
+        bridge.impact_vel_snap_q[i_pl_, i_b] = links_state.cd_vel[i_pl, i_b].cast(qd.f64)
+        bridge.impact_ang_snap_q[i_pl_, i_b] = links_state.cd_ang[i_pl, i_b].cast(qd.f64)
+        bridge.impact_com_snap_q[i_pl_, i_b] = links_state.root_COM[i_pl, i_b].cast(qd.f64)
+
+
+@qd.kernel
+def kernel_scan_impact_trigger(
+    threshold: qd.f64,
+    min_closing: qd.f64,
+    bridge: V_ANNOTATION,
+    rigid: V_ANNOTATION,
+    collider_state: array_class.ColliderState,
+):
+    """Accumulate the closing-speed-gated compression impulse of the full parent's impact events (stage C).
+
+    A substep contributes the normal compression impulse of every contact that touches a parent link and whose
+    contact point still approaches along the push direction faster than `min_closing`, evaluated on the previous
+    tail's velocity snapshot: that snapshot is the state the current substep's constraint solve consumed, while
+    the tail's own `cd_vel` is already the post-resolution velocity the impact absorbed. Resting support and
+    separating stabilization never pass the gate, and re-sampled contact manifolds cannot double-count because
+    the gate reruns per substep on the live contact set instead of accumulating per persisted pair. A substep
+    with no gate-passing contact closes the open event; a closed event whose total exceeds the calibrated
+    threshold arms the one-shot switch for the next substep head and disarms the trigger. Runs at the substep
+    tail on the contact forces the constraint solver just produced.
+    """
+    for i_b in range(rigid._B):
+        if not bridge.impact_armed_q[i_b] or bridge.parent_switch_pending_q[i_b] != 0:
+            continue
+        h = rigid.rigid_info.substep_dt[None]
+        contribution = 0.0
+        for i_c in range(collider_state.n_contacts[i_b]):
+            i_lp = -1
+            i_row = -1
+            side = 0
+            for i_pl_ in range(bridge.n_parent_links_q):
+                i_pl = bridge.parent_links_q[i_pl_]
+                if collider_state.contact_data.link_a[i_c, i_b] == i_pl:
+                    i_lp = i_pl
+                    i_row = i_pl_
+                    side = -1
+                    break
+                if collider_state.contact_data.link_b[i_c, i_b] == i_pl:
+                    i_lp = i_pl
+                    i_row = i_pl_
+                    side = 1
+                    break
+            if i_lp < 0:
+                continue
+            force_p = collider_state.contact_data.force[i_c, i_b] * side
+            f_mag = force_p.norm()
+            if f_mag < 1e-9:
+                continue
+            push = force_p / f_mag
+            v_point = bridge.impact_vel_snap_q[i_row, i_b] + bridge.impact_ang_snap_q[i_row, i_b].cross(
+                collider_state.contact_data.pos[i_c, i_b].cast(qd.f64) - bridge.impact_com_snap_q[i_row, i_b]
+            )
+            if -v_point.dot(push) > min_closing:
+                contribution += f_mag * qd.abs(push.dot(collider_state.contact_data.normal[i_c, i_b])) * h
+        if contribution > 0.0:
+            bridge.impact_accum_q[i_b] += contribution
+            bridge.impact_event_open_q[i_b] = True
+        elif bridge.impact_event_open_q[i_b]:
+            if bridge.impact_accum_q[i_b] > threshold:
+                bridge.parent_switch_pending_q[i_b] = 1
+                bridge.impact_event_count_q[i_b] += 1
+                bridge.impact_last_sum_q[i_b] = bridge.impact_accum_q[i_b]
+                bridge.impact_armed_q[i_b] = False
+            bridge.impact_accum_q[i_b] = 0.0
+            bridge.impact_event_open_q[i_b] = False
+
+
 class PBDRigidFragmentBridge:
     """Lifecycle owner of the native rigid links that shadow the fragments of a PBD fracturable solid.
 
@@ -393,6 +541,33 @@ class PBDRigidFragmentBridge:
         self.commit_capture_qvel_q = None  # qd float [K, B, 6]
         self.commit_capture_valid_q = None  # qd int [K, B]
         self.n_fragments_q = 0  # kernel-visible fragment count
+        # Stage-B full-native-parent switch: the parent entity's whole link tree owns the dynamics and contacts
+        # until the one-shot switch imports the pre-cut fragment links from the root's state (same substep head,
+        # mutually exclusive). All fields are None until `register_full_parent` runs.
+        self._parent_entity: "RigidEntity | None" = None
+        self._parent_link: int | None = None  # idx of the parent compound's FREE root link
+        self._parent_links: np.ndarray | None = None  # [P] link idxs of the compound (root + welded children)
+        self._parent_q_start: int | None = None
+        self._parent_dof_start: int | None = None
+        # Stage-C impact trigger: the calibrated one-shot release signal of the full parent. The threshold is
+        # an effect parameter bound to this object's mass / scale / pre-cut and the validated scenario, never
+        # a general material strength. All fields are None until `arm_impact_trigger` runs.
+        self._impact_threshold: float | None = None  # N·s compression-impulse total an event must exceed
+        self._impact_min_closing: float | None = None  # m/s closing-speed gate separating impacts from support
+        self.impact_armed_q = None  # qd bool [B]
+        self.impact_accum_q = None  # qd f64 [B] compression impulse of the currently open event
+        self.impact_event_open_q = None  # qd bool [B]
+        self.impact_event_count_q = None  # qd int [B] fired events (diagnostic)
+        self.impact_last_sum_q = None  # qd f64 [B] compression impulse of the last fired event (diagnostic)
+        self.impact_vel_snap_q = None  # qd f64 vec3 [P, B] parent link velocities at the last tail
+        self.impact_ang_snap_q = None  # qd f64 vec3 [P, B] parent link angular velocities at the last tail
+        self.impact_com_snap_q = None  # qd f64 vec3 [P, B] parent tree COMs at the last tail
+        self._impact_armed_cpu: np.ndarray | None = None  # [B] host mirror gating the tail scan launch
+        self._frag_dk: np.ndarray | None = None  # [K, 3] f64 fragment rest-CM offsets vs the parent COM
+        self.parent_links_q = None  # qd int [P]
+        self.n_parent_links_q = 0  # kernel-visible parent link count
+        self.frag_dk_q = None  # qd f64 vec3 [K]
+        self.parent_switch_pending_q = None  # qd int [B]
 
     @property
     def n_fragments(self) -> int:
@@ -474,11 +649,15 @@ class PBDRigidFragmentBridge:
         self._fragment_rest_cm_offset = rest_cm - unweighted_cm
         self._fragment_rest_inertia = rest_inertia
         self._fragment_member_start = member_start
-        self._fragment_member_particles = (
-            entity._particle_start + np.concatenate(member_particles).astype(gs.np_int)
-        )
+        self._fragment_member_particles = entity._particle_start + np.concatenate(member_particles).astype(gs.np_int)
         self._fragment_is_handoff_eligible = np.array(
-            [entity.material.stiffness == 1.0 and entity.material.plastic_creep == 0.0] * n_fragments, dtype=bool
+            [
+                entity.material.stiffness == 1.0
+                and entity.material.plastic_creep == 0.0
+                and entity.material.plastic_flow_rate is None
+            ]
+            * n_fragments,
+            dtype=bool,
         )
         self._proxy_meshes = proxies
 
@@ -503,6 +682,84 @@ class PBDRigidFragmentBridge:
             gs.raise_exception("particle_fragments holds a fragment idx outside [0, n_fragments).")
 
         self._wire_fragment_links(list(fragment_links), fragment_clusters, particle_fragments)
+
+    def register_full_parent(self, parent_entity, frag_links, frag_offsets) -> None:
+        """Register a full native parent body with its pre-cut fragment links (stage-B switch mode).
+
+        `parent_entity` is the rigid entity whose FREE root link owns the dynamics and whose whole link tree
+        carries the parent's collision geoms (one link per welded piece); the switch freezes and contact-gates
+        every one of its links, so the entity must contain no link meant to keep moving past the switch.
+        `frag_links` are the pre-cut fragment FREE links (dormant until the switch); `frag_offsets` are the
+        fragments' rest-CM offsets relative to the parent COM in the spawn-aligned frame ([K, 3], f64).
+        The fragment links are wired through the ordinary manual-mode path; the parent stays an ordinary
+        natively-integrated body until `request_parent_switch` arms the one-shot kernel.
+        """
+        if self._parent_link is not None:
+            gs.raise_exception("PBDRigidFragmentBridge full parent is already registered.")
+        if self._fragment_link is not None:
+            gs.raise_exception("PBDRigidFragmentBridge fragments are already registered.")
+        root = parent_entity.links[0]
+        d = np.asarray(frag_offsets, dtype=np.float64)
+        if d.ndim != 2 or d.shape[1] != 3 or d.shape[0] != len(frag_links):
+            gs.raise_exception("frag_offsets must be [n_fragments, 3].")
+        if abs(np.asarray(frag_offsets).sum(0).max()) > 1e-8:
+            pass  # offsets need not sum to zero for correctness; the switch transfer is per-fragment
+        self._parent_entity = parent_entity
+        self._parent_link = int(root.idx)
+        self._parent_q_start = int(root.q_start)
+        self._parent_dof_start = int(root.dof_start)
+        self._parent_links = np.array([link.idx for link in parent_entity.links], dtype=gs.np_int)
+        self._frag_dk = d
+        self._wire_fragment_links(list(frag_links), np.arange(len(frag_links)), np.zeros(0, dtype=gs.np_int))
+
+    def request_parent_switch(self, envs_idx=None) -> None:
+        """Arm the one-shot parent→fragments switch for the given environments (applied at the next substep head)."""
+        if self._parent_link is None:
+            gs.raise_exception("PBDRigidFragmentBridge has no registered full parent.")
+        envs_list = tensor_to_array(self.sim.scene._sanitize_envs_idx(envs_idx)).astype(np.int64).tolist()
+        for i_b in envs_list:
+            self.parent_switch_pending_q[i_b] = 1
+        # The switch kernel flips the links' driven gate inside the next substep head, and the manual-mode follow
+        # block gates on this host mirror within that same head: the mirror must drop the fragments here, or the
+        # stale shadow target would overwrite the state the kernel transfers in that very substep.
+        self._fragment_driven_cpu[:, envs_list] = False
+
+    def arm_impact_trigger(self, threshold, min_closing_speed=0.1, envs_idx=None) -> None:
+        """Arm the calibrated one-shot impact trigger of the registered full parent (stage C).
+
+        An impact event is the maximal run of consecutive substeps whose contact set touches a parent link with a
+        contact point still closing faster than `min_closing_speed`; the event's normal compression impulse total
+        (N·s, compression component of F*h over the gate-passing contacts) arms `request_parent_switch` for the
+        next substep head when it exceeds `threshold`. The threshold is an effect parameter calibrated per
+        object mass / scale / pre-cut and per validated scenario - it is not a general material strength, and
+        resting support or de-penetration stabilization cannot reach it because the closing gate excludes them
+        per substep. The scan runs on the solved contact set at every substep tail while armed; a scene without
+        an armed trigger launches nothing.
+        """
+        if self._parent_link is None:
+            gs.raise_exception("PBDRigidFragmentBridge impact trigger requires a registered full parent.")
+        if threshold <= 0.0:
+            gs.raise_exception("PBDRigidFragmentBridge impact threshold must be positive (N·s).")
+        if self.impact_armed_q is None:
+            gs.raise_exception("PBDRigidFragmentBridge impact trigger state is allocated at scene build; build first.")
+        envs_list = tensor_to_array(self.sim.scene._sanitize_envs_idx(envs_idx)).astype(np.int64).tolist()
+        self._impact_threshold = float(threshold)
+        self._impact_min_closing = float(min_closing_speed)
+        for i_b in envs_list:
+            self.impact_armed_q[i_b] = True
+        self._impact_armed_cpu[envs_list] = True
+
+    def read_impact_trigger(self) -> dict:
+        """Host copy of the impact trigger state (diagnostic readback; syncs)."""
+        if self.impact_armed_q is None:
+            gs.raise_exception("PBDRigidFragmentBridge impact trigger state is allocated at scene build; build first.")
+        return {
+            "armed": qd_to_numpy(self.impact_armed_q),
+            "accum": qd_to_numpy(self.impact_accum_q),
+            "event_open": qd_to_numpy(self.impact_event_open_q),
+            "event_count": qd_to_numpy(self.impact_event_count_q),
+            "last_sum": qd_to_numpy(self.impact_last_sum_q),
+        }
 
     def register_shadow_links(self) -> None:
         """`Simulator.build` head hook, before any solver allocates fields: create the shadow FREE links.
@@ -676,6 +933,33 @@ class PBDRigidFragmentBridge:
         self.fragment_owner_q.fill(int(FragmentOwner.PBD))
         self.handoff_pending_q = qd.field(dtype=gs.qd_bool, shape=(n_fragments, n_envs))
         self.handoff_pending_q.fill(False)
+        if self._parent_link is not None:
+            parent_links_field = qd.field(dtype=gs.qd_int, shape=(len(self._parent_links),))
+            parent_links_field.from_numpy(self._parent_links)
+            self.parent_links_q = parent_links_field
+            self.n_parent_links_q = len(self._parent_links)
+            dk_field = qd.Vector.field(3, qd.f64, shape=(n_fragments,))
+            dk_field.from_numpy(self._frag_dk)
+            self.frag_dk_q = dk_field
+            self.impact_armed_q = qd.field(dtype=gs.qd_bool, shape=(n_envs,))
+            self.impact_armed_q.fill(False)
+            self.impact_accum_q = qd.field(dtype=gs.qd_float, shape=(n_envs,))
+            self.impact_accum_q.fill(0.0)
+            self.impact_event_open_q = qd.field(dtype=gs.qd_bool, shape=(n_envs,))
+            self.impact_event_open_q.fill(False)
+            self.impact_event_count_q = qd.field(dtype=gs.qd_int, shape=(n_envs,))
+            self.impact_event_count_q.fill(0)
+            self.impact_last_sum_q = qd.field(dtype=gs.qd_float, shape=(n_envs,))
+            self.impact_last_sum_q.fill(0.0)
+            self.impact_vel_snap_q = qd.Vector.field(3, qd.f64, shape=(len(self._parent_links), n_envs))
+            self.impact_vel_snap_q.fill(0.0)
+            self.impact_ang_snap_q = qd.Vector.field(3, qd.f64, shape=(len(self._parent_links), n_envs))
+            self.impact_ang_snap_q.fill(0.0)
+            self.impact_com_snap_q = qd.Vector.field(3, qd.f64, shape=(len(self._parent_links), n_envs))
+            self.impact_com_snap_q.fill(0.0)
+            self._impact_armed_cpu = np.zeros((n_envs,), dtype=bool)
+        self.parent_switch_pending_q = qd.field(dtype=gs.qd_int, shape=(n_envs,))
+        self.parent_switch_pending_q.fill(0)
         self.commit_count_q = qd.field(dtype=gs.qd_int, shape=(n_fragments, n_envs))
         self.commit_count_q.fill(0)
         self.commit_rejected_q = qd.field(dtype=gs.qd_int, shape=(n_envs,))
@@ -703,7 +987,7 @@ class PBDRigidFragmentBridge:
         self._shadow_lin_vel.copy_(shadow_v[..., :3])
         self._shadow_ang_vel.copy_(shadow_v[..., 3:6])
 
-        envs_idx = self.sim.scene._sanitize_envs_idx(None)
+        envs_idx = np.asarray(tensor_to_array(self.sim.scene._sanitize_envs_idx(None)), dtype=gs.np_int)
         for i_k in range(n_fragments):
             kernel_set_link_externally_driven(
                 int(self._fragment_link[i_k]), envs_idx, is_driven=1, dyn_state=solver.dyn_state
@@ -774,6 +1058,7 @@ class PBDRigidFragmentBridge:
             solver._is_forward_pos_updated = False
             solver._is_forward_vel_updated = False
             return
+        kernel_switch_parent_to_fragments(self, solver)
         if not self._fragment_driven_cpu.any():
             return
 
@@ -781,11 +1066,12 @@ class PBDRigidFragmentBridge:
         envs_rows = torch.arange(n_envs, device=gs.device)
         q_rows = self._fragment_q_idx[None].expand(n_envs, -1, -1)
         dof_rows = self._fragment_dof_idx[None].expand(n_envs, -1, -1)
-        is_q_target = torch.as_tensor(self._fragment_driven_cpu, device=gs.device).t()[:, :, None] & (
-            self._fragment_q_mask[None]
+        is_q_target = (
+            torch.as_tensor(self._fragment_driven_cpu, device=gs.device).t()[:, :, None] & (self._fragment_q_mask[None])
         )
-        is_dof_target = torch.as_tensor(self._fragment_driven_cpu, device=gs.device).t()[:, :, None] & (
-            self._fragment_dof_mask[None]
+        is_dof_target = (
+            torch.as_tensor(self._fragment_driven_cpu, device=gs.device).t()[:, :, None]
+            & (self._fragment_dof_mask[None])
         )
         shadow_q = torch.cat((self._shadow_pos, self._shadow_quat), dim=-1).permute(1, 0, 2)
         shadow_v = torch.cat((self._shadow_lin_vel, self._shadow_ang_vel), dim=-1).permute(1, 0, 2)
@@ -814,10 +1100,30 @@ class PBDRigidFragmentBridge:
         solver._is_forward_vel_updated = False
 
     def substep_tail(self, f: int) -> None:
-        """Substep tail, after every solver advanced: scan for newly isolated fragments, then sync derived
-        particles of native-owned ones from their link poses."""
+        """Substep tail, after every solver advanced: scan impact events, then isolated fragments, then sync
+        derived particles of native-owned ones."""
         if self._fragment_link is None:
             return
+        solver = self.sim.rigid_solver
+        if not solver.is_active:
+            return
+        if self._impact_armed_cpu is not None and self._impact_armed_cpu.any():
+            kernel_scan_impact_trigger(
+                self._impact_threshold,
+                self._impact_min_closing,
+                self,
+                solver,
+                solver.collider._collider_state,
+            )
+            kernel_snapshot_parent_velocity(self, solver.dyn_state.links)
+            # A kernel-fired switch (pending set inside the scan) flips the links' driven gate at the next
+            # substep head, whose follow block gates on the host mirror: drop the fired envs here, or the
+            # stale shadow target would overwrite the transferred state in that very head. The readback is
+            # paid only while the trigger is armed, which ends at the fire.
+            fired = np.nonzero(qd_to_numpy(self.parent_switch_pending_q) * self._impact_armed_cpu)[0]
+            if len(fired) > 0:
+                self._fragment_driven_cpu[:, fired] = False
+                self._impact_armed_cpu[fired] = False
         pbd = self.sim.pbd_solver
         if self._solid_entity is None or not pbd.is_active:
             return
@@ -893,6 +1199,23 @@ class PBDRigidFragmentBridge:
         pbd = self.sim.pbd_solver
         if self._solid_entity is not None and pbd.is_active:
             kernel_restore_fragment_ownership(envs_idx, self, solver, pbd)
+        elif self._parent_link is not None:
+            # manual mode has no PBD side: ownership follows the restored link flags (driven = dormant
+            # fragment, undriven = natively owned), keeping the mirror consistent for the next switch
+            driven = qd_to_numpy(solver.dyn_state.links.is_externally_driven, transpose=True)
+            envs_list = tensor_to_array(envs_idx).tolist()
+            for i_k in range(self.n_fragments):
+                i_l = int(self._fragment_link[i_k])
+                for i_b in envs_list:
+                    self.fragment_owner_q[i_k, i_b] = (
+                        int(FragmentOwner.PBD) if driven[i_b, i_l] else int(FragmentOwner.NATIVE)
+                    )
+            # the restored world predates any open impact event: drop its partial accumulation so the trigger
+            # judges only events of the restored timeline (the armed switch itself is a host decision)
+            if self.impact_armed_q is not None:
+                for i_b in envs_list:
+                    self.impact_accum_q[i_b] = 0.0
+                    self.impact_event_open_q[i_b] = False
         owner = qd_to_numpy(self.fragment_owner_q, transpose=True)
         self._fragment_owner_cpu[...] = owner.T.astype(np.int64)
         driven = qd_to_numpy(solver.dyn_state.links.is_externally_driven, transpose=True)

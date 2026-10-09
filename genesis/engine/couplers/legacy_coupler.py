@@ -1130,6 +1130,16 @@ class LegacyCoupler(RBC):
                 self.pbd_solver.particles_info_reordered[i, batch_idx].material_type == self.pbd_solver.MATERIAL.SOLID
             ):
                 new_vel = vel + contact_delta / self.pbd_solver._substep_dt
+                # Perfectly-plastic rigid-geom contact mirrors the analytic-boundary hold in
+                # pbd_solver._func_zero_boundary_separation_velocity: a plastic member inside the
+                # contact zone keeps no separation velocity, so the impact locks into the rest
+                # shape instead of rebounding off the geom.
+                if self.pbd_solver._func_particle_has_plastic_cluster(
+                    self.pbd_solver.particles_ng_reordered[i, batch_idx].original_idx, batch_idx
+                ):
+                    separation_speed = new_vel.dot(contact_normal)
+                    if separation_speed > 0.0:
+                        new_vel = new_vel - separation_speed * contact_normal
             else:
                 new_vel = (new_pos - prev_pos) / self.pbd_solver._substep_dt
 

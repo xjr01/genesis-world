@@ -40,6 +40,15 @@ class Solid(Base["PBD3DSolidEntity"]):
     softer or plastically evolving groups retain their particle velocity path. Contact deformation
     and graph reactions are measured before this velocity projection.
 
+    Bodies with `plastic_creep > 0` contact perfectly plastically: while a member lies within one
+    particle radius of a domain-boundary face or inside a rigid-geom contact zone, its
+    contact-normal velocity is held at zero regardless of sign, so an impact transfers its
+    compression into the rest shape and the body cannot rebound off the contact. Tangential
+    friction is unchanged. Creep-free elastic bodies keep the full restitution of their rebound.
+    Plastic bodies also render through support-weight skinning of the deformed particles: their
+    bending drives neighboring cluster fits apart, and rigid cluster patches would tear the
+    displayed surface.
+
     Parameters
     ----------
     rho : float, optional
@@ -75,10 +84,12 @@ class Solid(Base["PBD3DSolidEntity"]):
         residuals before separation. Zero disables rotation damage. Default is None (resolved to 0.25 when
         `fracture_threshold` > 0).
     seam_failure_threshold : float, optional
-        Accumulated damage (in units of overloaded bond fraction per substep) at which a whole seam dies
-        at once, taking all of its bonds with it. At 1.0 a fully overloaded seam fails in a single
-        substep while partial overload accumulates over several; larger values let cracked seams carry
-        load longer before snapping; zero restricts failure to the last bond breaking. Default is None
+        Accumulated damage at which a whole seam dies at once, taking all of its bonds with it. The
+        damage unit is overloaded-bond fraction integrated over substeps: the accumulation contract
+        is the legacy `q` per substep or the time-based `q * substep_dt / seam_damage_time_constant`
+        (see `seam_damage_time_constant`). At 1.0 a fully overloaded seam fails in a single substep
+        while partial overload accumulates over several; larger values let cracked seams carry load
+        longer before snapping; zero restricts failure to the last bond breaking. Default is None
         (resolved to 1.0 when `fracture_threshold` > 0).
     n_fragments : int, optional
         Number of rigid fragments the body is split into when `fracture_threshold` > 0, partitioned by
@@ -103,11 +114,33 @@ class Solid(Base["PBD3DSolidEntity"]):
         higher memory and compute cost. Default is 1.5.
     yield_threshold : float, optional
         Deviation in units of `PBDOptions.particle_size` beyond which deformation becomes permanent.
-        Requires `plastic_creep` > 0 and `fracture_threshold` = 0. Default is 0.0.
+        Requires a flow specification (`plastic_creep` > 0 or `plastic_flow_rate`) and
+        `fracture_threshold` = 0. Default is 0.0.
     plastic_creep : float, optional
-        Fraction of the excess deformation absorbed into the rest shape per substep once `yield_threshold`
-        is exceeded, in [0, 1]. Higher values dent faster, but repeated violent impacts then drift the rest
-        shape; keep at or below roughly 0.05 for clean dents. Default is 0.0.
+        Legacy per-substep flow contract: fraction of the excess deformation absorbed into the rest
+        shape per substep once `yield_threshold` is exceeded, in [0, 1]. The effective rate is
+        `-ln(1 - plastic_creep) / substep_dt`, so changing the substep length changes the flow speed.
+        Ignored (must be 0) when `plastic_flow_rate` is set. Higher values dent faster, but repeated
+        violent impacts then drift the rest shape; keep at or below roughly 0.05 for clean dents.
+        Default is 0.0.
+    plastic_flow_rate : float, optional
+        Plastic flow rate `gamma` in 1/s for the substep-independent contract: a particle covered by
+        clusters with total normalized yielding weight `W` flows by `1 - exp(-gamma * W * substep_dt)`
+        per substep, so the flow speed is a material property and overlapping cluster coverage no
+        longer multiplies it. Set `plastic_creep = 0` when using this. Migration from the legacy
+        contract: `gamma = -ln(1 - plastic_creep) / substep_dt_reference` reproduces the legacy rate
+        for a single yielding membership at the reference substep length (delivery reference
+        `substep_dt = 2e-4 s` and `plastic_creep = 0.05` give `gamma ~ 256.47 1/s`); with several
+        simultaneously yielding memberships the normalized rate is slower than the legacy sum, which
+        is the intended coverage-independence fix. Default is None (legacy `plastic_creep` contract).
+    seam_damage_time_constant : float, optional
+        Damage accumulation time constant `tau_damage` in seconds for the substep-independent
+        contract: while a seam overload persists at fraction `q` of its alive bonds, damage grows by
+        `q * substep_dt / tau_damage` per substep instead of the legacy `q` per substep, and death
+        still occurs at `seam_failure_threshold`. `None` (default) keeps the legacy per-substep
+        accumulation, whose time to failure scales with the substep count. Migration from the legacy
+        contract: `tau_damage = substep_dt_reference` (delivery reference `2e-4 s`) reproduces the
+        legacy accumulation exactly at that substep length and integrates over time elsewhere.
     """
 
     rho: PositiveFloat = 1000.0
@@ -126,3 +159,5 @@ class Solid(Base["PBD3DSolidEntity"]):
     cluster_spacing_factor: PositiveFloat = 1.5
     yield_threshold: NonNegativeFloat = 0.0
     plastic_creep: UnitInterval = 0.0
+    plastic_flow_rate: PositiveFloat | None = None
+    seam_damage_time_constant: PositiveFloat | None = None

@@ -750,7 +750,9 @@ def test_solid_fracture_and_plasticity(n_envs, show_viewer):
         material=gs.materials.PBD.Solid(
             sampler="regular",
             stiffness=1.0,
-            yield_threshold=0.4,
+            # perfectly-plastic contact (plastic_creep > 0) bounds the landing compression to roughly
+            # vel * substep_dt, so the yield threshold must stay below that for the box to dent
+            yield_threshold=0.1,
             plastic_creep=0.05,
         ),
     )
@@ -835,6 +837,9 @@ def test_solid_fracture_and_plasticity(n_envs, show_viewer):
     assert_allclose(z0 - z_fall, 0.5 * 9.81 * (30 * scene.dt) ** 2, atol=2e-3)
 
     bar.set_particles_vel((0.0, 0.0, -4.0))
+    # the box re-impacts inside the same window: the perfectly-plastic contact absorbs its free-fall
+    # landing, and a fresh slam keeps the rest-shape creep measurable
+    plastic.set_particles_vel((0.0, 0.0, -4.0))
     for _ in range(80):
         scene.step()
 
