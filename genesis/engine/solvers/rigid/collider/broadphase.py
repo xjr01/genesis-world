@@ -31,6 +31,11 @@ def func_check_collision_valid(
         i_la = dyn_info.geoms.link_idx[i_ga]
         i_lb = dyn_info.geoms.link_idx[i_gb]
 
+        # Runtime per-env contact switch (see is_contact_enabled in array_class.py): a link whose contacts are
+        # disabled responds to no native collision while its build-time pairs stay allocated for later handoff.
+        if not dyn_state.links.is_contact_enabled[i_la, i_b] or not dyn_state.links.is_contact_enabled[i_lb, i_b]:
+            is_valid = False
+
         # Filter out collision pairs that are involved in dynamically registered weld equality constraints
         for i_eq in range(rigid_info.n_equalities[None], constraint_state.qd_n_equalities[i_b]):
             if dyn_info.equalities.eq_type[i_eq, i_b] == gs.EQUALITY_TYPE.WELD:

@@ -55,6 +55,9 @@ class Base(Material["MPMEntity"]):
         The second Lame's parameter. Default is None, computed from E and nu.
     sampler : str, optional
         Particle sampler ('pbs', 'regular', 'random'). Default is platform-dependent.
+    particle_size : float, optional
+        Material-point spacing. Smaller values resolve finer features at higher memory and runtime cost. If None, the
+        solver-wide MPM particle size is used. Default is None.
     """
 
     E: PositiveFloat = 1e6
@@ -63,6 +66,7 @@ class Base(Material["MPMEntity"]):
     lam: ValidFloat | None = None
     mu: ValidFloat | None = None
     sampler: SamplerType = DEFAULT_SAMPLER
+    particle_size: PositiveFloat | None = None
 
     # Dispatch fields - set by subclass model_post_init, not user-specified. needs_svd flips the solver's forward-mode
     # SVD kernel off when no material in the scene reads U/V/S from SVD(F_tmp) (e.g. non-viscous liquid, neohooken

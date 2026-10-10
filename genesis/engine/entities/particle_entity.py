@@ -4,6 +4,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
+from scipy.spatial import cKDTree
 import trimesh
 
 import quadrants as qd
@@ -17,6 +18,10 @@ from genesis.utils.misc import broadcast_tensor, qd_to_torch, to_gs_tensor
 import genesis.utils.particle as pu
 
 from .base_entity import Entity
+
+
+# Chunk length for nearest-particle support queries; bounds query memory on flattened visual meshes
+_VVERT_SUPPORT_CHUNK = 1 << 18
 
 
 def assert_active(method):
@@ -231,15 +236,21 @@ class ParticleEntity(Entity):
         raise NotImplementedError
 
     def _add_vverts_to_solver(self):
-        # Compute supports for rendering vverts using neighboring particles
-        dist2 = np.sum(np.square(self._vverts[:, None, :] - self._particles[None, :, :]), axis=2)
-        support_idxs = np.argpartition(dist2, self.solver._n_vvert_supports - 1, axis=1)[
-            :, : self.solver._n_vvert_supports
-        ]
-        row_indices = np.arange(dist2.shape[0])[:, None]
-        sorted_order = np.lexsort((support_idxs, dist2[row_indices, support_idxs]))
-        support_idxs = support_idxs[row_indices, sorted_order].astype(gs.np_int)
-        support_idxs = np.clip(support_idxs, 0, len(self._particles) - 1)
+        """Bind every visual vertex to its nearest particles for skinned rendering."""
+        n_supports = self.solver._n_vvert_supports
+        particle_tree = cKDTree(self._particles)
+        support_idxs = np.empty((len(self._vverts), n_supports), dtype=gs.np_int)
+        for i_vv in range(0, len(self._vverts), _VVERT_SUPPORT_CHUNK):
+            block = slice(i_vv, i_vv + _VVERT_SUPPORT_CHUNK)
+            dists, idxs = particle_tree.query(self._vverts[block], k=n_supports)
+            if n_supports == 1:
+                support_idxs[block, 0] = idxs
+                continue
+            # Small entities repeat a valid particle to fill the fixed-width support slots
+            idxs = np.minimum(idxs, len(self._particles) - 1)
+            # nearest first, ties broken by particle index so the supports are deterministic
+            order = np.lexsort((idxs, dists), axis=-1)
+            support_idxs[block] = np.take_along_axis(idxs, order, axis=-1)
 
         all_ps = self._particles[support_idxs]
         Ps = all_ps[:, :-1].swapaxes(-2, -1) - np.expand_dims(all_ps[:, -1], axis=-1)
@@ -341,7 +352,8 @@ class ParticleEntity(Entity):
                 gs.raise_exception(
                     "Entity has particles outside solver boundary. Note that for MPMSolver, boundary is slightly "
                     "tighter than the specified domain due to safety padding.\n\nCurrent boundary:\n"
-                    f"{self._solver.boundary}\n\nEntity to be added:\nmin: {particles.min(0)}\nmax: {particles.max(0)}\n"
+                    f"{self._solver.boundary}\n\nEntity to be added:\nmin: {particles.min(0)}\n"
+                    f"max: {particles.max(0)}\n"
                 )
 
             combined_verts, combined_faces = trimesh.util.append_faces(

@@ -97,6 +97,8 @@ class ErrorCode(IntEnum):
     INVALID_PBSTF_DEFORMABLE_COLLIDER = 0b00000000000000000000001000000000
     INVALID_FEM_RIGID_SURFACE_INTERSECTION = 0b00000000000000000000010000000000
     INVALID_PBD_RIGID_SURFACE_INTERSECTION = 0b00000000000000000000100000000000
+    INVALID_PBD_COHESIVE_REACTION = 1 << 15
+    INVALID_PBD_VELOCITY_PROJECTION = 1 << 16
     INVALID_PBD_STATE = 0b00000000000000000001000000000000
     INVALID_PBD_VOLUME = 0b00000000000000000010000000000000
     INVALID_IPBF_STATE_NAN = 0b00000000000000000100000000000000
@@ -1805,6 +1807,12 @@ class LinksState:
     contact_force: qd.Tensor
     is_hibernated: qd.Tensor
     awake_steps: qd.Tensor
+    # Whether an external authority (the PBD-fragment bridge) currently owns this link's pose and velocity; the
+    # integrator then advances neither and the bridge rewrites qpos/vel and their next buffers every substep head.
+    is_externally_driven: qd.Tensor
+    # Runtime per-env contact switch read by the broadphase valid-pair check; build-time pair allocation is
+    # unaffected, so a shadow fragment's future contacts stay preallocated while it responds to none.
+    is_contact_enabled: qd.Tensor
 
 
 def get_links_state(solver):
@@ -1861,6 +1869,8 @@ def get_links_state(solver):
         contact_force=V(dtype=gs.qd_vec3, shape=shape, needs_grad=requires_grad),
         is_hibernated=V(dtype=gs.qd_int, shape=shape),
         awake_steps=V(dtype=gs.qd_int, shape=shape),
+        is_externally_driven=V(dtype=gs.qd_bool, shape=shape),
+        is_contact_enabled=V(dtype=gs.qd_bool, shape=shape),
     )
 
 

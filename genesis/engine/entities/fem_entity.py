@@ -430,8 +430,8 @@ class FEMEntity(Entity):
         state = FEMEntityState(self, self._sim.cur_step_global)
         self.get_frame(self._sim.cur_substep_local, state.pos, state.vel, state.active)
 
-        # we store all queried states to track gradient flow
-        self._queried_states.append(state)
+        if self._sim.requires_grad:
+            self._queried_states.append(state)
 
         return state
 

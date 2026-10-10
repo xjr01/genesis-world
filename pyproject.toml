@@ -47,6 +47,8 @@ dependencies = [
     "DracoPy",
     # Use by `PBD3DEntity.sample` to tetrahedralize a mesh
     "tetgen==0.8.2",
+    # Robust mesh booleans that cut fracturable PBD solids into closed fragment render meshes
+    "manifold3d>=3.5.4",
     # Used for some advanced mesh processing such as `skeletonization`
     "PyGEL3D",
     # Used to convert VTK output to numpy when converting volume to particles for PBS

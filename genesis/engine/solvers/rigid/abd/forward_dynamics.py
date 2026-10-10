@@ -1234,12 +1234,13 @@ def func_midpoint_eligible(
     """Whether the link is a standalone free body eligible for midpoint integration this step.
 
     Eligible: a 6-DOF free-joint link that is its own whole kinematic tree (no parent, and no descendant
-    contributing mass, detected as crb equal to the link's own spatial inertia), and unconstrained this step (no
+    contributing mass, detected as crb equal to the link's own spatial inertia), unconstrained this step (no
     contact touching it and no connect/weld equality involving it, per the assembly-written involvement flag; see
-    is_constrained in array_class.py). The flag covers dynamically registered welds; entities merged at build time
-    via attach are excluded by the tree tests. A constrained body must keep the standard update: the constraint
-    impulse is resolved by the solver at the current configuration and would double-count inside the discrete free
-    rigid-body equation.
+    is_constrained in array_class.py), and not externally driven (the PBD-fragment bridge owns the link's
+    advancement; see is_externally_driven in array_class.py). The flag covers dynamically registered welds;
+    entities merged at build time via attach are excluded by the tree tests. A constrained body must keep the
+    standard update: the constraint impulse is resolved by the solver at the current configuration and would
+    double-count inside the discrete free rigid-body equation.
     """
     I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
     is_eligible = False
@@ -1250,6 +1251,7 @@ def func_midpoint_eligible(
             dyn_info.joints.type[I_j] == gs.JOINT_TYPE.FREE
             and dyn_state.links.crb_mass[i_l, i_b] == dyn_state.links.cinr_mass[i_l, i_b]
             and not dyn_state.links.is_constrained[i_l, i_b]
+            and not dyn_state.links.is_externally_driven[i_l, i_b]
         )
         if is_eligible:
             # A position/velocity servo folds its stabilizing gain into the implicit velocity update; treating it
@@ -1452,7 +1454,14 @@ def func_integrate(
             if func_check_index_range(i_1, 0, rigid_info.n_awake_links[i_b], rigid_config.use_hibernation):
                 i_l = rigid_info.awake_links[i_1, i_b] if qd.static(rigid_config.use_hibernation) else i_0
                 I_l = [i_l, i_b] if qd.static(rigid_config.batch_links_info) else i_l
-                if dyn_info.links.n_dofs[I_l] > 0:
+                is_driven = dyn_state.links.is_externally_driven[i_l, i_b]
+                if is_driven and dyn_info.links.n_dofs[I_l] > 0:
+                    # The bridge owns this link's advancement: it rewrote qpos_next at the substep head, so the
+                    # copyback keeps the followed pose; the DOF loop above pushed vel_next with acceleration,
+                    # so restore the bridge-written velocity before the copyback reads it.
+                    for i_d in range(dyn_info.links.dof_start[I_l], dyn_info.links.dof_end[I_l]):
+                        dyn_state.dofs.vel_next[i_d, i_b] = dyn_state.dofs.vel[i_d, i_b]
+                if (not is_driven) and dyn_info.links.n_dofs[I_l] > 0:
                     EPS = rigid_info.EPS[None]
 
                     dof_start = dyn_info.links.dof_start[I_l]

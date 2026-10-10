@@ -77,7 +77,7 @@ class FLIPSolver(Solver):
         super().build()
 
         self._B = self._sim._B
-        if self._B != 1:
+        if self.is_active and self._B != 1:
             gs.raise_exception("FLIPSolver does not support batched simulation (n_envs must be 0 or 1).")
         self._n_particles = self.n_particles
 
