@@ -3,7 +3,8 @@
 Run headlessly with ``python -m examples.pbstf_coffee_water`` from the repository. Add ``--vis`` for the viewer,
 ``--record`` for a checkpoint at every control frame, or ``--surface`` for a reconstructed liquid surface.
 Replay with ``python -m examples.rendering.replay_checkpoints out/pbstf_coffee_water/checkpoints``.
-``--check-motion`` simulates rigid manipulation with a rigid sponge and ``--no-liquid`` keeps the soft sponge.
+``--no-liquid`` skips liquid creation and simulation for faster trajectory tuning while keeping the soft sponge.
+It supports ``--record``; ``--check-motion`` also replaces the sponge with a rigid preview.
 From the robot's perspective, world X points right, Y points up, and negative Z points forward across the table.
 The default particle scale resolves pouring and the wall film; coarse scales can retain liquid inside the tilted cup.
 """
@@ -347,7 +348,8 @@ def motion_target(time, motion, observation):
                 np.array((SPONGE_START[0], motion.right_start.pos[1], SPONGE_START[2])), motion.right_start.quat
             )
             right = interpolate_tool(motion.right_start, end, smooth_progress(elapsed, start=0.0, end=1.2))
-            if observation.cup_tilt >= 38.0 and (observation.water_in_cup is None or motion.spilled_particles > 0):
+            # Measured tilt keeps recovery timing independent of liquid sampling and simulation.
+            if observation.cup_tilt >= 38.0:
                 # Intercept the falling cup with open fingers before closing around its wall.
                 axis = geom.transform_by_quat(np.array((0.0, 1.0, 0.0)), observation.cup.quat)
                 direction = axis * (1.0, 0.0, 1.0)
@@ -650,7 +652,8 @@ def build_scene(
 ):
     """Build contact-driven manipulation in meters with a deformable absorbent sponge.
 
-    Motion-only mode uses a rigid sponge preview. Disabling liquid keeps sponge dynamics for isolated contact checks.
+    Motion-only mode uses a rigid sponge preview. Disabling liquid skips its particles and solver steps while retaining
+    rigid and sponge dynamics. Liquid boundaries receive their motion through one-way coupling.
     """
     if scale <= 0:
         raise ValueError("Particle scale must be positive.")
@@ -976,7 +979,12 @@ def main():
     parser.add_argument("--record", dest="is_recording", action="store_true")
     parser.add_argument("--surface", dest="is_surface", action="store_true")
     parser.add_argument("--check-motion", dest="is_motion_only", action="store_true")
-    parser.add_argument("--no-liquid", dest="is_liquid_enabled", action="store_false")
+    parser.add_argument(
+        "--no-liquid",
+        dest="is_liquid_enabled",
+        action="store_false",
+        help="Skip liquid creation and simulation for faster trajectory tuning; keep the soft sponge and support --record.",
+    )
     parser.add_argument("--output", type=Path, default=Path("out/pbstf_coffee_water"))
     args = parser.parse_args()
     if args.scale <= 0 or (args.steps is not None and args.steps <= 0):

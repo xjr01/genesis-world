@@ -1,3 +1,4 @@
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -41,6 +42,14 @@ def test_dual_arm_manipulation(show_viewer):
     # The contact-driven sequence needs the full pouring, recovery and wiping horizons in one scene.
     for step in range(round(pbstf_coffee_water.MOTION_END / pbstf_coffee_water.CONTROL_DT)):
         time = (step + 1) * pbstf_coffee_water.CONTROL_DT
+        if demo.motion.right_phase == pbstf_coffee_water.Phase.REACH_SPONGE and observation.cup_tilt >= 38.0:
+            for water_in_cup in (None, 10, 9):
+                recovery_target = pbstf_coffee_water.motion_target(
+                    time,
+                    replace(demo.motion, water_before_reach=10),
+                    replace(observation, water_in_cup=water_in_cup),
+                )
+                assert_equal(recovery_target.right_phase, pbstf_coffee_water.Phase.CATCH)
         target, error = pbstf_coffee_water.update_motion(demo, time, observation)
         positions = np.stack((target.right.pos, target.left.pos))
         quaternions = np.stack((target.right.quat, target.left.quat))

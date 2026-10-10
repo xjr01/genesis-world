@@ -23,7 +23,7 @@ from ..utils import assert_allclose, assert_equal
 @pytest.mark.required
 @pytest.mark.parametrize("backend", [gs.cuda])
 @pytest.mark.parametrize("n_envs", [0, 2])
-@pytest.mark.parametrize("vis_mode", ["particle", "recon"])
+@pytest.mark.parametrize("vis_mode", [None, "particle", "recon"])
 def test_checkpoint_roundtrip(tmp_path, n_envs, vis_mode, show_viewer):
     scene = gs.Scene(
         pbd_options=gs.options.PBDUnifiedOptions(
@@ -46,19 +46,21 @@ def test_checkpoint_roundtrip(tmp_path, n_envs, vis_mode, show_viewer):
             size=(0.08, 0.08, 0.08),
         ),
     )
-    liquid = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(0.0, 0.0, 0.1),
-            size=(0.08, 0.08, 0.08),
-        ),
-        material=gs.materials.PBSTF.Liquid(
-            sampler="regular",
-            c_init=0.0,
-        ),
-        surface=gs.surfaces.Default(
-            vis_mode=vis_mode,
-        ),
-    )
+    liquid = None
+    if vis_mode is not None:
+        liquid = scene.add_entity(
+            morph=gs.morphs.Box(
+                pos=(0.0, 0.0, 0.1),
+                size=(0.08, 0.08, 0.08),
+            ),
+            material=gs.materials.PBSTF.Liquid(
+                sampler="regular",
+                c_init=0.0,
+            ),
+            surface=gs.surfaces.Default(
+                vis_mode=vis_mode,
+            ),
+        )
     vertices, elements = create_tetrahedral_grid(
         lower=(-0.04, -0.04, -0.04), upper=(0.04, 0.04, 0.04), resolution=(2, 2, 2)
     )
@@ -76,15 +78,17 @@ def test_checkpoint_roundtrip(tmp_path, n_envs, vis_mode, show_viewer):
     writer.write_frame()
     image_initial, *_ = camera.render()
     rigid_initial = tensor_to_array(rigid.get_pos())
-    liquid_initial = tensor_to_array(liquid.get_particles_pos())
+    if liquid is not None:
+        liquid_initial = tensor_to_array(liquid.get_particles_pos())
     sponge_initial = tensor_to_array(sponge.get_particles_pos())
 
     rigid.set_pos(rigid.get_pos() + 0.03)
-    liquid.set_particles_pos(liquid.get_particles_pos() + 0.04)
-    liquid.set_particles_concentration(0.75)
-    is_active = liquid.get_particles_active()
-    is_active[..., : liquid.n_particles // 2] = False
-    liquid.set_particles_active(is_active)
+    if liquid is not None:
+        liquid.set_particles_pos(liquid.get_particles_pos() + 0.04)
+        liquid.set_particles_concentration(0.75)
+        is_active = liquid.get_particles_active()
+        is_active[..., : liquid.n_particles // 2] = False
+        liquid.set_particles_active(is_active)
     sponge.set_particles_pos(sponge.get_particles_pos() * 1.2)
     writer.write_frame()
     scene.visualizer.update()
@@ -97,10 +101,11 @@ def test_checkpoint_roundtrip(tmp_path, n_envs, vis_mode, show_viewer):
     for index in (0, 1, 0):
         apply_frame(scene, reader.read_frame(index))
         assert_allclose(rigid.get_pos(), rigid_initial + index * 0.03, atol=1e-7)
-        assert_allclose(liquid.get_particles_pos(), liquid_initial + index * 0.04, atol=1e-7)
         assert_allclose(sponge.get_particles_pos(), sponge_initial * (1.0 + index * 0.2), atol=1e-7)
-        assert_equal(liquid.get_particles_concentration(), index * 0.75)
-        assert_equal(liquid.get_particles_active(), is_active if index else True)
+        if liquid is not None:
+            assert_allclose(liquid.get_particles_pos(), liquid_initial + index * 0.04, atol=1e-7)
+            assert_equal(liquid.get_particles_concentration(), index * 0.75)
+            assert_equal(liquid.get_particles_active(), is_active if index else True)
         image, *_ = camera.render()
         assert_allclose(image, image_changed if index else image_initial, atol=1.0)
 
