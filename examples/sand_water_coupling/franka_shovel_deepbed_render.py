@@ -352,7 +352,9 @@ def main():
     )
     cam = scene.add_camera(
         res=(1280, 720),
-        pos=(0.42, -0.48, 0.44),  # z +0.06 vs validated probe framing: keep lifted shovel (z~0.25) in frame
+        # 20% farther out along the view axis than the probe close-up (same sightline and fov):
+        # wider framing, and the lifted shovel (z~0.25) keeps clearance from the frame top
+        pos=(0.516, -0.576, 0.504),
         lookat=(-0.06, 0.0, 0.12),
         fov=40,
     )
