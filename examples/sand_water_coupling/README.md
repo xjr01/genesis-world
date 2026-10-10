@@ -2,7 +2,7 @@
 
 ## 概述
 
-本目录是沙水耦合（DEM 沙 + FLIP 水 + 吸收耦合）系列示例的入库镜像，来源于仓库外 `experiments/` 的 phase5–phase9 系列脚本：从滴水吸水（phase5）到 Franka 机械臂夹持猫砂铲对深床湿沙完成「沉降 → 滴水 → 下压 → 斜插 → 转起 → 抬升」的完整铲掘（phase9 深床）。主流程参数为 2026-09-03 验收的 v2 版（夹持修复 + 水滴第 4 秒延迟释放）。18 个脚本入库时已全部通过 py_compile；除体素化 / matplotlib 回放 / 采样模块外，全部脚本 headless 运行（`gs.init(backend=gs.gpu)`），需要 NVIDIA GPU。
+本目录是沙水耦合（DEM 沙 + FLIP 水 + 吸收耦合）系列示例的入库镜像，来源于仓库外 `experiments/` 的 phase5–phase9 系列脚本：从滴水吸水（phase5）到 Franka 机械臂夹持猫砂铲对深床湿沙完成「沉降 → 滴水 → 下压 → 斜插 → 转起 → 抬升」的完整铲掘（phase9 深床）。主流程现为**粗沙快速档**（2026-10-10：grid_res 64、沙粒半径 3.125 mm、VISCOSITY 4.0，全量 75 分钟；轨迹与夹持为 2026-09-03 验收的 v2 版）。18 个脚本入库时已全部通过 py_compile；除体素化 / matplotlib 回放 / 采样模块外，全部脚本 headless 运行（`gs.init(backend=gs.gpu)`），需要 NVIDIA GPU。
 
 ## 环境要求
 
@@ -56,7 +56,7 @@ cd /d D:\workspace\python-workspace\genesis\genesis-world\examples\sand_water_co
 
 （PowerShell 下去掉 `/d`。）
 
-**第 1 步：smoke 自检（约 35 分钟）**——建场景 + 30 步沉降 + 一次全重启 IK 求解后退出，验证资产、建床、GPU、IK 全链路：
+**第 1 步：smoke 自检（约 4 分钟）**——建场景 + 30 步沉降 + 一次全重启 IK 求解后退出，验证资产、建床、GPU、IK 全链路：
 
 ```bash
 conda run -n genesis-sandwater --no-capture-output python franka_shovel_deepbed.py smoke
@@ -64,7 +64,7 @@ conda run -n genesis-sandwater --no-capture-output python franka_shovel_deepbed.
 
 看控制台末尾的 `SMOKE done` 行（打印 n_sand / n_water / first-IK grasp_err / gpu mem），过程中无 NaN 报错即通过。注意 smoke 产物在 `recordings/phase9_deepbed_full_smoke/` 且**不含 meta.json，不能喂给渲染脚本**（渲染验证只对 full 记录有效）。
 
-**第 2 步：full 全量仿真（约 16 小时；v2 实测 1419 步 15.9h，零 NaN）**：
+**第 2 步：full 全量仿真（约 75 分钟；粗沙档实测 1696 步 75.1 min，零 NaN）**：
 
 ```bash
 conda run -n genesis-sandwater --no-capture-output python franka_shovel_deepbed.py full > deepbed_full.log 2>&1
@@ -72,7 +72,7 @@ conda run -n genesis-sandwater --no-capture-output python franka_shovel_deepbed.
 
 建议放独立终端或后台任务跑；日志重定向到 `.log` 文件天然被 .gitignore 忽略（见「仓库卫生」）。
 
-**第 3 步：渲染（约 1.5–2 小时；1227 帧约 1–1.5h 渲染 + 稀疏段补帧 + ffmpeg 合成）**：
+**第 3 步：渲染（约 10 分钟；1504 帧回放 + 稀疏段补帧 + ffmpeg 合成）**：
 
 ```bash
 conda run -n genesis-sandwater --no-capture-output python franka_shovel_deepbed_render.py > deepbed_render.log 2>&1
@@ -86,7 +86,7 @@ conda run -n genesis-sandwater --no-capture-output python franka_shovel_deepbed_
 
 | 脚本 | 功能 | 位置参数 | 依赖资产 | 主要输出 |
 |---|---|---|---|---|
-| `franka_shovel_deepbed.py` | **主流程（phase9 深床 v2）**：1.8× Poisson 深床，沉降判稳后第 4 秒滴水、吸水，Franka 跟随猫砂铲完成完整铲掘 | `[smoke\|full] [tag]`（默认 full；tag 默认 smoke→`_smoke`、full→空） | `litter_scoop_sdf_slots_s0.5.npz`（需再生） | `recordings/phase9_deepbed_full{tag}/`（frame_*.npz、meta.json、ik_log.csv） |
+| `franka_shovel_deepbed.py` | **主流程（phase9 深床，粗沙快速档）**：1.8× Poisson 深床，沉降判稳后第 4 秒滴水、吸水，Franka 跟随猫砂铲完成完整铲掘 | `[smoke\|full] [tag]`（默认 full；tag 默认 smoke→`_smoke`、full→空） | `litter_scoop_sdf_slots_s0.5.npz`（需再生） | `recordings/phase9_deepbed_full{tag}/`（frame_*.npz、meta.json、ik_log.csv） |
 | `franka_shovel_deepbed_render.py` | 主流程渲染：湿色 4 桶 + 逐帧重驱 Franka IK + 时间轴对齐 | `[tag] [max_frames]` | `litter_scoop_aligned.glb` + 对应 recordings | `videos/phase9_deepbed_full{tag}.mp4`、`frames/` 关键帧、`recordings/…/ik_render_log{tag}.csv` |
 | `franka_shovel_sand_sdf.py` | phase9 半尺寸 Franka+猫砂铲铲湿沙（v4 轨迹版，浅床） | `[max_steps] [sdf文件名] [tag]` | `litter_scoop_sdf_slots_s0.5.npz`（需再生）、glb | `recordings/phase9_franka_shovel_sdf{tag}/`、`videos/` |
 | `franka_shovel_sdf_render_wet_native.py` | 上者的原生湿色渲染 | `[max_frames] [tag]` | glb + 对应 recordings | `videos/phase9_franka_shovel_sdf{tag}.mp4`、`frames/` |
@@ -113,16 +113,18 @@ conda run -n genesis-sandwater --no-capture-output python franka_shovel_deepbed_
 
 | 常量 | 当前值 | 位置（约） | 作用 |
 |---|---|---|---|
-| `VISCOSITY` | 0.8 | :65 | 沙↔水二次拖曳系数（FLIP `viscosity_coeff`；沿革 0.01→2.0→0.4→0.8） |
-| `DROPLET_RADIUS` | 0.016 | :82 | 水滴半径（原始 0.02 的 0.8 倍） |
-| `ABSORB_MAX` | 700 | :140 | 吸水段步数上限（吸水自然判停则提前结束） |
-| `SAFETY`（即 `ddt_safety`） | 0.5 | :77 | DEM 子步安全系数 |
+| `grid_res` | 64 | :282 | FLIP 网格分辨率（dx 5.47 mm）；改它必须连 `PARTICLE_RADIUS` 一起（见下） |
+| `PARTICLE_RADIUS` | 3.125e-3 | :64 | 沙粒半径（直径 6.25 mm ≈ res64 dx）；与 grid_res 同比例缩放，只改一边会破坏粒径:dx 比 |
+| `VISCOSITY` | 4.0 | :67 | 沙↔水二次拖曳系数（FLIP `viscosity_coeff`；沿革 0.01→2.0→0.4→0.8→4.0，4.0 为粗沙档补偿值） |
+| `DROPLET_RADIUS` | 0.016 | :90 | 水滴半径（原始 0.02 的 0.8 倍；写入 meta 供渲染端读取） |
+| `ABSORB_MAX` | 700 | :152 | 吸水段步数上限（吸水自然判停则提前结束；visc4 下尾段慢、cap 常被顶到） |
+| `SAFETY`（即 `ddt_safety`） | 0.5 | :79 | DEM 子步安全系数 |
 
 **改任何常量前先跑 smoke**；每个参数的完整沿革与每轮实测数字见仓库外 `experiments/record.md`。
 
 两个易漏点：
 
-- `DROPLET_RADIUS` 在渲染脚本里是**独立硬编码的镜像**（`franka_shovel_deepbed_render.py` 构建水球处，约 :344；meta.json 不记录该值），两处必须同步改。渲染脚本另有 `n_particles == meta n_water` 断言兜底，漏改会在渲染启动时被拦下。
+- `DROPLET_RADIUS` 由渲染脚本从 meta.json 的 `droplet_radius` 字段读取（粗沙档起 sim 写入；旧记录无该字段时回退 0.016）；`grid_res`（渲染端 :285）与 `PARTICLE_RADIUS`（:58）仍是**硬编码镜像**，与 sim 侧同步改。渲染脚本另有 `n_particles == meta n_water` 断言兜底，不一致会在渲染启动时被拦下。
 - 夹爪常量 `FINGER_GRIP` / `HANDLE_OFFSET_LOCAL` / `HANDLE_ANGLE`（约 :121–133）：改动后必须先过 `experiments/phase9_gripcheck.py`（仓库外，import 同一份常量对 6 个记录位姿做 IK + 特写渲染，抽帧确认两指捏在铲柄杆上）再上 full——历史上正是 blade→handle 偏移错导致两指捏空。
 
 ### C++ 对齐锁定项（勿动）
@@ -142,7 +144,7 @@ conda run -n genesis-sandwater --no-capture-output python franka_shovel_deepbed_
 
 ## 常见坑
 
-1. **改参数先 smoke**——full 一次约 16h；smoke 约 35 分钟即可暴露资产缺失、建床、IK 大部分问题。
+1. **改参数先 smoke**——full 一次约 1.2h；smoke 约 4 分钟即可暴露资产缺失、建床、IK 大部分问题。
 2. **smoke 不能渲染**：smoke 提前退出、不写 meta.json，渲染脚本启动即读 meta.json 会直接报错。渲染验证只对 full 记录有效。
 3. **DROPLET_RADIUS 两文件硬编码须同步**（sim :82 与 render 约 :344，见上）。
 4. **夹爪常量改动必须过 `experiments/phase9_gripcheck.py`** 再上 full。
@@ -152,11 +154,13 @@ conda run -n genesis-sandwater --no-capture-output python franka_shovel_deepbed_
 
 ## 性能与资源
 
-单个控制步约 40s 的构成：子步公式在 r=1.5625mm 下给出一个 1/60s 控制步需 **8589 个 DEM 子步 × 约 4.7ms/子步 ≈ 40s**（v2 全量实测 1419 步 / 57263s = 40.4s/步）。
+**粗沙快速档（当前，2026-10-10 实测）**：grid_res 64 + 3.125 mm 沙粒 → n_sand 47 543（res128 的 1/8）、n_water 540，平均 **2.66 s/步**（对照 res128 v2 的 40.35 s/步 = **15.2× 提速**，理论 16×；残差为 FLIP 网格固定开销 + Franka IK）；全量 1696 步 75.1 min（B 吸收段 visc4 慢尾顶到 700 cap 多占 ~270 步）。
 
 | 项目 | 数值 |
 |---|---|
-| smoke | 约 35 分钟（build 约 13 分钟 + 30 步沉降 + 1 次 IK） |
-| full | 约 16 小时（v2 实测 1419 步 15.9h，零 NaN） |
-| 渲染 | 约 1.5–2 小时（1227 帧约 1–1.5h 渲染 + 补帧 + 合成） |
-| 显存 | 沙粒约 38 万时约 2.2GB（RTX 4060 8GB 实测可跑） |
+| smoke | 约 4 分钟（build 165.7 s + 30 步沉降约 80 s + 1 次 IK） |
+| full | 约 75 分钟（1696 步 4504 s，零 NaN） |
+| 渲染 | 约 10 分钟（1504 帧回放 + 补帧 192 + ffmpeg） |
+| 显存 | 约 3.0 GB（RTX 4060 8GB 实测） |
+
+细粒参考档（res128 + 1.5625 mm，2026-09-03 v2）：单个控制步约 40 s——子步公式在 r=1.5625 mm 下一个 1/60 s 控制步需 **8589 个 DEM 子步 × 约 4.7 ms/子步 ≈ 40 s**（v2 全量实测 1419 步 / 57263 s = 40.4 s/步；smoke 约 35 分钟、full 约 16 h、渲染约 1.5–2 h、显存 38 万粒约 2.2 GB）。
