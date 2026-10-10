@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Scene527 action workbench</title>
+    <link rel="stylesheet" href="/workbench.css" />
+  </head>
+  <body>
+    <header>
+      <h1>Scene527 / action design</h1>
+      <p>
+        Inspect cloth, select material points, edit paths and preview gripper
+        poses.
+      </p>
+    </header>
+    <main>
+      <section>
+        <label
+          >Frame
+          <select id="frame"></select></label
+        ><button id="anchor">Plan start</button>
+        <label
+          >View
+          <select id="view">
+            <option value="xy">Overhead XY</option>
+            <option value="xz">Front XZ</option>
+            <option value="yz">Side YZ</option>
+            <option value="perspective">Camera perspective</option>
+          </select></label
+        >
+        <label
+          >Color
+          <select id="color">
+            <option value="height">Height</option>
+            <option value="width_band">Material width</option>
+            <option value="length_zone">Hem / torso / collar</option>
+            <option value="surface_layer">Authored surface</option>
+          </select></label
+        >
+        <canvas id="cloth"></canvas>
+        <label
+          >Hand
+          <select id="hand">
+            <option>right</option>
+            <option>left</option>
+          </select></label
+        >
+        <label
+          >Mode
+          <select id="mode">
+            <option value="grasp">Grasp point</option>
+            <option value="placement">Placement point</option>
+            <option value="node">Drag path node</option>
+          </select></label
+        >
+        <select id="layers" aria-label="Cloth layer candidates"></select
+        ><button id="confirm">Confirm layer</button>
+        <p>World XYZ in mm:</p>
+        <input id="x" type="number" step="0.1" aria-label="X mm" /><input
+          id="y"
+          type="number"
+          step="0.1"
+          aria-label="Y mm"
+        /><input
+          id="z"
+          type="number"
+          step="0.1"
+          value="800"
+          aria-label="Z mm"
+        />
+        <button id="placement">Set placement</button
+        ><button id="save">Save selections</button>
+        <details>
+          <summary>Selected points</summary>
+          <pre id="points"></pre>
+        </details>
+        <p>
+          Surface tags identify authored material surfaces. Choose folded layers
+          by current world position.
+        </p>
+      </section>
+      <section>
+        <h2>Action plan</h2>
+        <p>
+          Position: m. Quaternion: WXYZ. Opening: m per finger. Duration: 60 Hz
+          intervals.
+        </p>
+        <textarea
+          id="plan"
+          spellcheck="false"
+          aria-label="Action plan JSON"
+        ></textarea>
+        <button id="compile">Save + compile path</button>
+        <label
+          >Pull axis
+          <select id="pullAxis">
+            <option>x</option>
+            <option>y</option>
+          </select></label
+        >
+        <select id="pullSign" aria-label="Pull direction">
+          <option value="-1">Negative</option>
+          <option value="1">Positive</option>
+        </select>
+        <button id="draft">Draft lift / pull / hold</button>
+        <p>
+          The draft uses the supplied start pose and aperture. Use it after
+          grasping.
+        </p>
+        <details open>
+          <summary>Path nodes</summary>
+          <button id="reference">Load imported reference path</button>
+          <label
+            >Source frame
+            <select id="nodeFrame"></select></label
+          ><label
+            >Radius <input id="radius" type="number" min="2" value="15"
+          /></label>
+          <select id="editMode" aria-label="Node correction mode">
+            <option value="local">Local bump</option>
+            <option value="hold_after">Hold afterwards</option>
+            <option value="semantic">Semantic anchor</option>
+          </select>
+          <p>Delta XYZ in mm. Drag a path marker or enter exact offsets.</p>
+          <input
+            id="dx"
+            type="number"
+            step="0.1"
+            value="0"
+            aria-label="Delta X"
+          /><input
+            id="dy"
+            type="number"
+            step="0.1"
+            value="0"
+            aria-label="Delta Y"
+          /><input
+            id="dz"
+            type="number"
+            step="0.1"
+            value="0"
+            aria-label="Delta Z"
+          />
+          <button id="addNode">Add correction</button
+          ><button id="clearNodes">Clear corrections</button>
+          <label>Stage start <input id="stageStart" type="number" /></label
+          ><label>End <input id="stageEnd" type="number" /></label>
+          <textarea id="edits" spellcheck="false" aria-label="Path edits JSON">
+{"edits":[],"semantic_keyframes":[]}</textarea>
+          <button id="applyNodes">Save corrected path</button>
+        </details>
+        <details>
+          <summary>Gripper pose</summary>
+          <button id="preview">Load measured pose</button
+          ><label><input id="showRobot" type="checkbox" />Show robot</label>
+          <p>
+            Tool-local rotation XYZ in degrees. X: length, Y: opening / closing.
+          </p>
+          <input
+            id="rx"
+            type="number"
+            step="1"
+            value="0"
+            aria-label="Rotation X"
+          /><input
+            id="ry"
+            type="number"
+            step="1"
+            value="0"
+            aria-label="Rotation Y"
+          /><input
+            id="rz"
+            type="number"
+            step="1"
+            value="0"
+            aria-label="Rotation Z"
+          />
+          <button id="poseApply">Apply pose to selected action</button
+          ><button id="poseSave">Save pose</button>
+          <select id="poseAction" aria-label="Target action"></select>
+          <pre id="poseInfo"></pre>
+        </details>
+        <details>
+          <summary>Inverse kinematics</summary>
+          <textarea id="ikOptions" spellcheck="false" aria-label="IK settings">
+{"hand":"both","orientation_mode":"full","orientation_assist":{"is_enabled":false},"min_tool_table_clearance_m":-0.0035,"min_clearance_delta_m":-0.0035}</textarea>
+          <button id="ik">Check current path</button>
+          <p>
+            IK checks robot motion. Execute an exported trajectory to test
+            grasping and folding.
+          </p>
+        </details>
+        <div id="status" role="status">Loading workspace...</div>
+      </section>
+    </main>
+    <script type="module" src="/workbench.js"></script>
+  </body>
+</html>

@@ -8,6 +8,7 @@ import genesis as gs
 from genesis.utils.misc import tensor_to_array
 
 from .config import GarmentFoldingScenarioConfig
+from .tools.core.trajectory import read_trajectory
 
 
 @dataclass(frozen=True)
@@ -79,9 +80,9 @@ def build_scene(
     expected_dt = 1.0 / (config.task.action_fps * config.task.physics_steps_per_action)
     if not np.isclose(solver.dt, expected_dt):
         raise ValueError(f"Scene timestep must be {expected_dt} for the configured garment action rate.")
-    with np.load(trajectory_path, allow_pickle=False) as trajectory_data:
-        source_joint_q = trajectory_data["joint_q"].copy()
-        source_joint_names = tuple(trajectory_data["joint_names"].tolist())
+    trajectory = read_trajectory(trajectory_path)
+    source_joint_q = trajectory.joint_q
+    source_joint_names = trajectory.joint_names
     if source_joint_q.ndim != 2 or source_joint_q.shape[1] != len(source_joint_names):
         raise ValueError("Garment robot trajectory joint data and names have incompatible shapes.")
     if not len(source_joint_q) or not np.all(np.isfinite(source_joint_q)):

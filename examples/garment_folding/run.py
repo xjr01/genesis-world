@@ -14,6 +14,8 @@ from genesis.utils.misc import tensor_to_array
 from .config import create_scene527_config
 from .scene import build_scene
 from .task import GarmentFoldingController, step_settling
+from .tools.core.replay import ReplayRecorder
+from .tools.core.trajectory import file_hash, read_trajectory
 
 
 def run_settle_only(runtime, config, output: Path, settle_steps: int):
@@ -132,6 +134,7 @@ def main():
     parser = argparse.ArgumentParser(description="FEM/IPC garment-folding scenario")
     parser.add_argument("-s", "--steps", type=int, help="Physics steps to run; defaults to the remaining trajectory.")
     parser.add_argument("--asset-root", type=Path, help="External Scene527 bundle; defaults to the packaged assets.")
+    parser.add_argument("--trajectory", type=Path, help="Custom finite joint_q/joint_names NPZ trajectory.")
     parser.add_argument("--mesh", choices=("8k", "13k", "55k"), default="55k", help="Cloth mesh resolution.")
     parser.add_argument("-v", "--vis", action="store_true", help="Show the scene viewer.")
     parser.add_argument("-r", "--record", action="store_true", help="Record each trajectory segment.")
@@ -139,6 +142,7 @@ def main():
     parser.add_argument("--settle-steps", type=int, help="Override Scene527 settling steps.")
     parser.add_argument("--checkpoint", type=Path, help="Resume a saved scene or scene/controller checkpoint.")
     parser.add_argument("--segment-steps", type=int, default=120, help="Physics steps per saved segment.")
+    parser.add_argument("--dump-replay", action="store_true", help="Save cloth/robot replay at two-step intervals.")
     parser.add_argument("--disable-robot-ipc-proxies", action="store_true", help="Exclude robot links from IPC.")
     parser.add_argument(
         "--progress-every", type=int, default=10, help="Print progress every N steps; zero disables it."
@@ -162,9 +166,24 @@ def main():
     if args.settle_steps is not None and args.settle_steps <= 0:
         parser.error("--settle-steps must be positive")
 
+    config = create_scene527_config(args.asset_root, mesh=args.mesh)
+    continuation = None
+    if args.trajectory is not None:
+        continuation = read_trajectory(args.trajectory)
+        if continuation.checkpoint_sha256 is not None and (
+            args.checkpoint is None or file_hash(args.checkpoint) != continuation.checkpoint_sha256
+        ):
+            parser.error("This trajectory requires the exact checkpoint used for its action design")
+        config = replace(
+            config,
+            assets=replace(
+                config.assets,
+                trajectory=str(args.trajectory.resolve()),
+                expected_trajectory_frames=None,
+            ),
+        )
     # The Incremental Potential Contact (IPC) backend executes its solve on CUDA
     gs.init(backend=gs.gpu, logging_level="warning", seed=0)
-    config = create_scene527_config(args.asset_root, mesh=args.mesh)
     if args.disable_robot_ipc_proxies:
         config = replace(
             config,
@@ -204,12 +223,20 @@ def main():
             controller.set_state(runtime, checkpoint[1])
         else:
             runtime.scene.restore(checkpoint)
+        if (
+            continuation is not None
+            and continuation.checkpoint_step is not None
+            and controller.step_index != continuation.checkpoint_step
+        ):
+            raise ValueError("Checkpoint action progress differs from the exported trajectory.")
         print(
             f"garment_folding restored: checkpoint={args.checkpoint}, "
             f"scene_cur_t={runtime.scene.cur_t:.6f}s, controller_step={controller.step_index}",
             flush=True,
         )
     steps = args.steps if args.steps is not None else max(0, runtime.default_steps - controller.step_index)
+    if steps > runtime.default_steps - controller.step_index:
+        raise ValueError("Requested steps exceed the remaining trajectory.")
     metrics_path = args.output_dir / "garment-folding-metrics.csv"
     fields = (
         "step",
@@ -234,6 +261,9 @@ def main():
         while completed_steps < steps:
             segment_steps = min(args.segment_steps, steps - completed_steps)
             segment_start = controller.step_index
+            replay = ReplayRecorder.create(runtime, segment_start, segment_steps) if args.dump_replay else None
+            if replay is not None:
+                replay.capture(runtime, controller.step_index)
             video_path = args.output_dir / f"garment-folding-segment-{segment_start:06d}.mp4"
             if runtime.camera is not None:
                 runtime.camera.start_recording(save_to_filename=str(video_path), fps=30)
@@ -244,6 +274,8 @@ def main():
                     step_finished = time.perf_counter()
                     completed_steps += 1
                     garment_state = runtime.garment.get_state()
+                    if replay is not None:
+                        replay.capture(runtime, controller.step_index, garment_state)
                     if not torch.isfinite(garment_state.pos).all() or not torch.isfinite(garment_state.vel).all():
                         raise RuntimeError(f"Garment state contains non-finite values at step {controller.step_index}.")
                     positions = tensor_to_array(garment_state.pos).reshape(-1, 3)
@@ -284,6 +316,8 @@ def main():
                 if runtime.camera is not None:
                     runtime.camera.stop_recording()
             scene_state = runtime.scene.get_state()
+            if replay is not None:
+                replay.save(args.output_dir / f"garment-folding-replay-{segment_start:06d}.npz", runtime)
             scene_state.serializable()
             torch.save(
                 (scene_state, controller.get_state()),
