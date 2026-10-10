@@ -94,6 +94,8 @@ def kernel_get_state(
     links_quat: qd.types.ndarray(),
     mass_shift: qd.types.ndarray(),
     friction_ratio: qd.types.ndarray(),
+    links_externally_driven: qd.types.ndarray(),
+    links_contact_enabled: qd.types.ndarray(),
     dyn_state: array_class.DynState,
     rigid_info: array_class.RigidInfo,
     rigid_config: qd.template(),
@@ -121,6 +123,8 @@ def kernel_get_state(
         for j in qd.static(range(4)):
             links_quat[i_b, i_l, j] = dyn_state.links.quat[i_l, i_b][j]
         mass_shift[i_b, i_l] = dyn_state.links.mass_shift[i_l, i_b]
+        links_externally_driven[i_b, i_l] = gs.qd_float(dyn_state.links.is_externally_driven[i_l, i_b])
+        links_contact_enabled[i_b, i_l] = gs.qd_float(dyn_state.links.is_contact_enabled[i_l, i_b])
 
     qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
     for i_l, i_b in qd.ndrange(n_geoms, _B):
@@ -138,6 +142,8 @@ def kernel_set_state(
     links_quat: qd.types.ndarray(),
     mass_shift: qd.types.ndarray(),
     friction_ratio: qd.types.ndarray(),
+    links_externally_driven: qd.types.ndarray(),
+    links_contact_enabled: qd.types.ndarray(),
     dyn_state: array_class.DynState,
     rigid_info: array_class.RigidInfo,
     rigid_config: qd.template(),
@@ -169,6 +175,8 @@ def kernel_set_state(
         for j in qd.static(range(4)):
             dyn_state.links.quat[i_l, envs_idx[i_b_]][j] = links_quat[envs_idx[i_b_], i_l, j]
         dyn_state.links.mass_shift[i_l, envs_idx[i_b_]] = mass_shift[envs_idx[i_b_], i_l]
+        dyn_state.links.is_externally_driven[i_l, envs_idx[i_b_]] = links_externally_driven[envs_idx[i_b_], i_l] > 0.5
+        dyn_state.links.is_contact_enabled[i_l, envs_idx[i_b_]] = links_contact_enabled[envs_idx[i_b_], i_l] > 0.5
 
     qd.loop_config(serialize=rigid_config.para_level < gs.PARA_LEVEL.ALL)
     for i_l, i_b_ in qd.ndrange(n_geoms, _B):

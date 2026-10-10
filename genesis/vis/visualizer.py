@@ -3,6 +3,7 @@ import sys
 import pyglet
 
 import genesis as gs
+from genesis.engine.solvers.base_solver import StateChange, Subscriber
 from genesis.repr_base import RBC
 
 from .camera import Camera
@@ -38,6 +39,7 @@ class Visualizer(RBC):
         self._rasterizer = None
         self._raytracer = None
         self._batch_renderer = None
+        self._render_state_subscribers = []
         self.viewer_lock = DummyViewerLock()
 
         # Rasterizer context is shared by viewer and rasterizer
@@ -173,6 +175,18 @@ class Visualizer(RBC):
 
     @gs.assert_built
     def reset(self):
+        self._invalidate_render_caches()
+
+        if self._viewer is not None:
+            self._viewer.update(auto_refresh=True)
+
+    def _invalidate_render_caches(self):
+        """Drop every render-freshness marker so the next render query re-pulls solver state.
+
+        Scene time advancing is the ordinary invalidation; a solver mutating its state without stepping (e.g.
+        `set_particles_pos`, `set_state`) does not advance it, so the solvers' StateChange notifications call this
+        through the subscriptions set up in `build`.
+        """
         self._t = -1
 
         self._context.reset()
@@ -182,9 +196,6 @@ class Visualizer(RBC):
 
         if self._batch_renderer is not None:
             self._batch_renderer.reset()
-
-        if self._viewer is not None:
-            self._viewer.update(auto_refresh=True)
 
     def build(self):
         self._context.build(self._scene)
@@ -207,8 +218,30 @@ class Visualizer(RBC):
         # Fully initialized at this point
         self._is_built = True
 
+        self._subscribe_to_solver_state_changes()
+
         # Make sure that the viewer is fully compiled and in a clean state
         self.reset()
+
+    def _subscribe_to_solver_state_changes(self):
+        """Subscribe to the state changes of every solver whose render fields `update_visual_states` refreshes.
+
+        The per-render gate there keys on scene time, which a state-mutating call leaves unchanged, so the
+        notification is what re-opens it: the callback invalidates the render caches, and the next render query
+        (viewer frame, camera render) pulls the edited state. Among the refreshed solvers, the rigid, kinematic,
+        and PBD solvers emit these notifications from their state-mutating API.
+        """
+        for solver in (self._scene.rigid_solver, self._scene.kinematic_solver, self._scene.pbd_solver):
+            if solver.is_active:
+                subscriber = Subscriber(
+                    to=frozenset((StateChange.GEOMETRY, StateChange.DYNAMICS)),
+                    callback=self._on_solver_state_change,
+                )
+                solver.subscribe(subscriber)
+                self._render_state_subscribers.append(subscriber)
+
+    def _on_solver_state_change(self, changed, envs_idx):
+        self._invalidate_render_caches()
 
     def update(self, force=True, auto=None):
         if force:  # force update

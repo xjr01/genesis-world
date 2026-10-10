@@ -341,7 +341,10 @@ def func_add_contact(
         collider_state.contact_data.normal[i_c, i_b] = normal
         collider_state.contact_data.pos[i_c, i_b] = contact_pos
         collider_state.contact_data.penetration[i_c, i_b] = penetration
-        collider_state.contact_data.friction[i_c, i_b] = qd.max(qd.max(friction_a, friction_b), 1e-2)
+        # Pair coefficient is the plain max: a zero explicit friction on both geoms must stay zero (exact
+        # frictionless), and any pair carrying a coefficient >= the smallest public material value (0.01) is
+        # unchanged by dropping the historical 1e-2 clamp, which only ever bound both-below-0.01 pairs.
+        collider_state.contact_data.friction[i_c, i_b] = qd.max(friction_a, friction_b)
         collider_state.contact_data.friction_torsional[i_c, i_b] = qd.max(friction_torsional_a, friction_torsional_b)
         collider_state.contact_data.friction_rolling[i_c, i_b] = qd.max(friction_rolling_a, friction_rolling_b)
         collider_state.contact_data.sol_params[i_c, i_b] = 0.5 * (
@@ -389,7 +392,7 @@ def func_set_contact(
     collider_state.contact_data.normal[i_c, i_b] = normal
     collider_state.contact_data.pos[i_c, i_b] = contact_pos
     collider_state.contact_data.penetration[i_c, i_b] = penetration
-    collider_state.contact_data.friction[i_c, i_b] = qd.max(qd.max(friction_a, friction_b), 1e-2)
+    collider_state.contact_data.friction[i_c, i_b] = qd.max(friction_a, friction_b)
     collider_state.contact_data.friction_torsional[i_c, i_b] = qd.max(friction_torsional_a, friction_torsional_b)
     collider_state.contact_data.friction_rolling[i_c, i_b] = qd.max(friction_rolling_a, friction_rolling_b)
     collider_state.contact_data.sol_params[i_c, i_b] = 0.5 * (

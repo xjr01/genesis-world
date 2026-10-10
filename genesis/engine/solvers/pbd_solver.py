@@ -6,6 +6,7 @@ import numpy as np
 import quadrants as qd
 
 import genesis as gs
+import genesis.utils.geom as gu
 from genesis.engine.boundaries import (
     CubeBoundary,
     CylinderBoundary,
@@ -13,15 +14,601 @@ from genesis.engine.boundaries import (
     TiltedCylinderBoundary,
     TiltedCylinderShellBoundary,
 )
-from genesis.engine.entities import PBD2DEntity, PBD3DEntity, PBDFreeParticleEntity, PBDParticleEntity
+from genesis.engine.entities import PBD2DEntity, PBD3DEntity, PBD3DSolidEntity, PBDFreeParticleEntity, PBDParticleEntity
 from genesis.engine.entities.pbd_entity import PBDTetEntity
+from genesis.engine.materials.PBD.solid import (
+    DEFAULT_ROTATION_THRESHOLD,
+    DEFAULT_SEAM_FAILURE_THRESHOLD,
+    DEFAULT_SHEAR_THRESHOLD,
+)
 from genesis.engine.states.solvers import PBDFluidSolverState
-from genesis.utils.array_class import LinksState, V_ANNOTATION
+from genesis.utils.array_class import ErrorCode, LinksState, V_ANNOTATION
 from genesis.utils.geom import SpatialHasher
-import genesis.utils.geom as gu
 from genesis.utils.misc import qd_to_numpy, tensor_to_array
 
-from .base_solver import Solver
+from .base_solver import Solver, StateChange, mutates
+
+
+@qd.func
+def func_validate_pbd_particle(i_b, pos, vel, errno: qd.Tensor):
+    if qd.math.isnan(pos).any() or qd.math.isinf(pos).any() or qd.math.isnan(vel).any() or qd.math.isinf(vel).any():
+        qd.atomic_or(errno[i_b], ErrorCode.INVALID_PBD_STATE)
+
+
+@qd.func
+def func_update_pbd_cluster_roots(solver: V_ANNOTATION):
+    # A serial union per environment touches only the cluster/bond graph; particle
+    # fitting remains parallel. Rebuild after death/reset, never through host reads.
+    if qd.static(solver._n_bonds > 0):
+        for i_b in range(solver._B):
+            if solver.cluster_roots_dirty[i_b]:
+                solver.cohesive.rebuild[i_b] = True
+                for i_c in range(solver._n_clusters):
+                    solver.cluster_roots[i_c, i_b] = i_c
+                for i_l in range(solver._n_bonds):
+                    if solver.bonds_state[i_l, i_b].alive:
+                        i_p = solver.bonds_info[i_l].i_p
+                        j_p = solver.bonds_info[i_l].j_p
+                        i_c = solver.particle_cluster_ids[solver.particle_cluster_ptr[i_p].member_start]
+                        j_c = solver.particle_cluster_ids[solver.particle_cluster_ptr[j_p].member_start]
+                        while solver.cluster_roots[i_c, i_b] != i_c:
+                            i_c = solver.cluster_roots[i_c, i_b]
+                        while solver.cluster_roots[j_c, i_b] != j_c:
+                            j_c = solver.cluster_roots[j_c, i_b]
+                        solver.cluster_roots[qd.max(i_c, j_c), i_b] = qd.min(i_c, j_c)
+                for i_c in range(solver._n_clusters):
+                    root = i_c
+                    while solver.cluster_roots[root, i_b] != root:
+                        root = solver.cluster_roots[root, i_b]
+                    solver.cluster_roots[i_c, i_b] = root
+                solver.cluster_roots_dirty[i_b] = False
+
+
+@qd.func
+def func_fit_pbd_clusters(solver: V_ANNOTATION, welded: qd.template(), render_only: qd.template()):
+    if qd.static(welded):
+        func_update_pbd_cluster_roots(solver)
+    for i_c, i_b in qd.ndrange(solver._n_clusters, solver._B):
+        if qd.static(not render_only) or solver.is_render_dirty[i_b]:
+            solver.clusters_fit[i_c, i_b].weight = 0.0
+            solver.clusters_fit[i_c, i_b].p_sum = qd.Vector.zero(qd.f64, 3)
+            solver.clusters_fit[i_c, i_b].q_sum = qd.Vector.zero(qd.f64, 3)
+            solver.clusters_fit[i_c, i_b].covariance = qd.Matrix.zero(qd.f64, 3, 3)
+    for i_m, i_b in qd.ndrange(solver._n_cluster_members, solver._B):
+        if qd.static(not render_only) or solver.is_render_dirty[i_b]:
+            i_c = solver.cluster_member_clusters[i_m]
+            if qd.static(welded and solver._n_bonds > 0):
+                i_c = solver.cluster_roots[i_c, i_b]
+            i_p = solver.cluster_member_particles[i_m]
+            # The same membership weight is used in the fit and distributed correction, so
+            # each cluster's mass-weighted translation sums to zero even with uneven overlap.
+            weight = qd.f64(solver.particles_info[i_p].mass) / qd.max(solver.particle_cluster_ptr[i_p].member_count, 1)
+            origin = solver.clusters_rest[i_c, i_b].cm.cast(qd.f64)
+            p = solver.particles[i_p, i_b].pos.cast(qd.f64) - origin
+            q = solver.particles_solid_rest[i_p, i_b].cast(qd.f64) - origin
+            solver.clusters_fit[i_c, i_b].weight += weight
+            solver.clusters_fit[i_c, i_b].p_sum += weight * p
+            solver.clusters_fit[i_c, i_b].q_sum += weight * q
+            solver.clusters_fit[i_c, i_b].covariance += weight * p.outer_product(q)
+    for i_c, i_b in qd.ndrange(solver._n_clusters, solver._B):
+        if qd.static(not render_only) or solver.is_render_dirty[i_b]:
+            fit = solver.clusters_fit[i_c, i_b]
+            if fit.weight > 0.0:
+                origin = solver.clusters_rest[i_c, i_b].cm.cast(qd.f64)
+                solver.clusters_fit[i_c, i_b].cm = origin + fit.p_sum / fit.weight
+                solver.clusters_fit[i_c, i_b].rest_cm = origin + fit.q_sum / fit.weight
+                covariance = fit.covariance - fit.p_sum.outer_product(fit.q_sum) / fit.weight
+                solver.clusters_state[i_c, i_b].cm = solver.clusters_fit[i_c, i_b].cm.cast(gs.qd_float)
+                solver.clusters_fit[i_c, i_b].rot = func_pbd_polar_rotation(covariance)
+                solver.clusters_state[i_c, i_b].rot = solver.clusters_fit[i_c, i_b].rot.cast(gs.qd_float)
+    if qd.static(welded and solver._n_bonds > 0):
+        for i_c, i_b in qd.ndrange(solver._n_clusters, solver._B):
+            if qd.static(not render_only) or solver.is_render_dirty[i_b]:
+                root = solver.cluster_roots[i_c, i_b]
+                R = solver.clusters_fit[root, i_b].rot
+                solver.clusters_state[i_c, i_b].rot = R.cast(gs.qd_float)
+                solver.clusters_state[i_c, i_b].cm = (
+                    solver.clusters_fit[root, i_b].cm + R @ (
+                        solver.clusters_rest[i_c, i_b].cm.cast(qd.f64) - solver.clusters_fit[root, i_b].rest_cm
+                    )
+                ).cast(gs.qd_float)
+
+
+@qd.func
+def func_pbd_polar_rotation(A):
+    scale = qd.f64(0.0)
+    for i, j in qd.static(qd.ndrange(3, 3)):
+        scale = qd.max(scale, qd.abs(A[i, j]))
+    R = qd.Matrix.identity(qd.f64, 3)
+    if scale > 0.0:
+        a = A / scale
+        # Davenport matrix for max trace(R.T @ covariance). A maps rest to current.
+        K = qd.Matrix.zero(qd.f64, 4, 4)
+        K[0, 0] = a.trace()
+        K[0, 1] = a[2, 1] - a[1, 2]
+        K[0, 2] = a[0, 2] - a[2, 0]
+        K[0, 3] = a[1, 0] - a[0, 1]
+        for i in qd.static(range(3)):
+            K[i + 1, 0] = K[0, i + 1]
+            for j in qd.static(range(3)):
+                K[i + 1, j + 1] = a[i, j] + a[j, i]
+            K[i + 1, i + 1] -= a.trace()
+        V = qd.Matrix.identity(qd.f64, 4)
+        # Symmetric cyclic Jacobi uses rotations, no inverse or rank regularizer.
+        # Eight sweeps diagonalize the normalized 4x4 covariance eigensystem.
+        for sweep in range(8):
+            for p in qd.static(range(3)):
+                for q in qd.static(range(p + 1, 4)):
+                    value = K[p, q]
+                    if value != 0.0:
+                        tau = (K[q, q] - K[p, p]) / (2.0 * value)
+                        sign = qd.f64(1.0)
+                        if tau < 0.0:
+                            sign = -1.0
+                        t = sign / (qd.abs(tau) + qd.sqrt(1.0 + tau * tau))
+                        c = 1.0 / qd.sqrt(1.0 + t * t)
+                        s = t * c
+                        K[p, p] -= t * value
+                        K[q, q] += t * value
+                        K[p, q] = 0.0
+                        K[q, p] = 0.0
+                        for k in qd.static(range(4)):
+                            if qd.static(k != p and k != q):
+                                kp, kq = K[k, p], K[k, q]
+                                K[k, p] = c * kp - s * kq
+                                K[p, k] = K[k, p]
+                                K[k, q] = s * kp + c * kq
+                                K[q, k] = K[k, q]
+                            vp, vq = V[k, p], V[k, q]
+                            V[k, p] = c * vp - s * vq
+                            V[k, q] = s * vp + c * vq
+        largest = 0
+        for k in qd.static(range(1, 4)):
+            if K[k, k] > K[largest, largest]:
+                largest = k
+        quat = qd.Vector([V[0, largest], V[1, largest], V[2, largest], V[3, largest]])
+        quat /= quat.norm()
+        w, x, y, z = quat[0], quat[1], quat[2], quat[3]
+        R = qd.Matrix([
+            [1.0 - 2.0 * (y*y + z*z), 2.0*(x*y - w*z), 2.0*(x*z + w*y)],
+            [2.0*(x*y + w*z), 1.0 - 2.0*(x*x + z*z), 2.0*(y*z - w*x)],
+            [2.0*(x*z - w*y), 2.0*(y*z + w*x), 1.0 - 2.0*(x*x + y*y)],
+        ])
+    return R
+
+
+@qd.func
+def func_pbd_inertia_twist(i_b, inertia, angular, errno: qd.Tensor):
+    """Minimum-norm angular velocity of a positive semidefinite inertia tensor."""
+    scale = qd.f64(0.0)
+    for i, j in qd.static(qd.ndrange(3, 3)):
+        scale = qd.max(scale, qd.abs(inertia[i, j]))
+    omega = qd.Vector.zero(qd.f64, 3)
+    is_finite = not (qd.math.isnan(inertia).any() or qd.math.isinf(inertia).any()
+                     or qd.math.isnan(angular).any() or qd.math.isinf(angular).any())
+    if not is_finite:
+        qd.atomic_or(errno[i_b], ErrorCode.INVALID_PBD_VELOCITY_PROJECTION)
+    if is_finite and scale > 0.0:
+        A = inertia / scale
+        V = qd.Matrix.identity(qd.f64, 3)
+        for sweep in range(8):
+            for p in qd.static(range(2)):
+                for q in qd.static(range(p + 1, 3)):
+                    value = A[p, q]
+                    if value != 0.0:
+                        tau = (A[q, q] - A[p, p]) / (qd.f64(2.0) * value)
+                        sign = qd.f64(1.0)
+                        if tau < 0.0:
+                            sign = -1.0
+                        t = sign / (qd.abs(tau) + qd.sqrt(qd.f64(1.0) + tau * tau))
+                        c = qd.f64(1.0) / qd.sqrt(qd.f64(1.0) + t*t)
+                        s = t * c
+                        A[p, p] -= t * value
+                        A[q, q] += t * value
+                        A[p, q] = 0.0
+                        A[q, p] = 0.0
+                        for k in qd.static(range(3)):
+                            if qd.static(k != p and k != q):
+                                kp, kq = A[k, p], A[k, q]
+                                A[k, p] = c*kp - s*kq
+                                A[p, k] = A[k, p]
+                                A[k, q] = s*kp + c*kq
+                                A[q, k] = A[k, q]
+                            vp, vq = V[k, p], V[k, q]
+                            V[k, p] = c*vp - s*vq
+                            V[k, q] = s*vp + c*vq
+        # Numerical rank uses the f64 eigensystem's roundoff scale. Null rotations
+        # have no point velocity, so their minimum-norm angular component is zero.
+        for k in qd.static(range(3)):
+            if A[k, k] < -qd.f64(64.0) * qd.f64(2.220446049250313e-16):
+                qd.atomic_or(errno[i_b], ErrorCode.INVALID_PBD_VELOCITY_PROJECTION)
+            if A[k, k] > qd.f64(64.0) * qd.f64(2.220446049250313e-16):
+                direction = qd.Vector([V[0, k], V[1, k], V[2, k]])
+                omega += direction * direction.dot(angular) / (scale * A[k, k])
+    return omega
+
+
+@qd.func
+def func_project_pbd_rigid_velocities(solver: V_ANNOTATION):
+    """Mass-weighted velocity projection for freely moving unit-stiffness groups."""
+    for i_c, i_b in qd.ndrange(solver._n_clusters, solver._B):
+        solver.is_velocity_projectable[i_c, i_b] = 1
+        solver.clusters_fit[i_c, i_b].weight = 0.0
+        solver.clusters_fit[i_c, i_b].p_sum = qd.Vector.zero(qd.f64, 3)
+        solver.clusters_fit[i_c, i_b].q_sum = qd.Vector.zero(qd.f64, 3)
+        solver.clusters_fit[i_c, i_b].covariance = qd.Matrix.zero(qd.f64, 3, 3)
+        solver.clusters_fit[i_c, i_b].rest_cm = qd.Vector.zero(qd.f64, 3)
+    for i_m, i_b in qd.ndrange(solver._n_cluster_members, solver._B):
+        i_c = solver.cluster_member_clusters[i_m]
+        root = i_c
+        if qd.static(solver._n_bonds > 0):
+            root = solver.cluster_roots[i_c, i_b]
+        i_p = solver.cluster_member_particles[i_m]
+        if (
+            not solver.particles[i_p, i_b].free
+            or solver.particles_ng[i_p, i_b].is_native_owned
+            or solver.clusters_info[i_c].stiffness != 1.0
+            or solver.clusters_info[i_c].plastic_creep > 0.0
+            or solver.clusters_info[i_c].plastic_flow_rate > 0.0
+        ):
+            qd.atomic_min(solver.is_velocity_projectable[root, i_b], 0)
+        weight = qd.f64(solver.particles_info[i_p].mass) / solver.particle_cluster_ptr[i_p].member_count
+        r = solver.particles[i_p, i_b].pos.cast(qd.f64) - solver.clusters_rest[root, i_b].cm.cast(qd.f64)
+        v = solver.particles[i_p, i_b].vel.cast(qd.f64)
+        solver.clusters_fit[root, i_b].weight += weight
+        solver.clusters_fit[root, i_b].p_sum += weight * r
+        solver.clusters_fit[root, i_b].q_sum += weight * v
+    for i_c, i_b in qd.ndrange(solver._n_clusters, solver._B):
+        weight = solver.clusters_fit[i_c, i_b].weight
+        if weight > 0.0:
+            solver.clusters_fit[i_c, i_b].p_sum /= weight
+            solver.clusters_fit[i_c, i_b].q_sum /= weight
+    # Center before outer products so coincident and collinear groups preserve
+    # their numerical nullspace even after a large world translation.
+    for i_m, i_b in qd.ndrange(solver._n_cluster_members, solver._B):
+        i_c = solver.cluster_member_clusters[i_m]
+        root = i_c
+        if qd.static(solver._n_bonds > 0):
+            root = solver.cluster_roots[i_c, i_b]
+        if solver.is_velocity_projectable[root, i_b] > 0:
+            i_p = solver.cluster_member_particles[i_m]
+            weight = qd.f64(solver.particles_info[i_p].mass) / solver.particle_cluster_ptr[i_p].member_count
+            r = (solver.particles[i_p, i_b].pos.cast(qd.f64) - solver.clusters_rest[root, i_b].cm.cast(qd.f64)
+                 - solver.clusters_fit[root, i_b].p_sum)
+            v = solver.particles[i_p, i_b].vel.cast(qd.f64) - solver.clusters_fit[root, i_b].q_sum
+            solver.clusters_fit[root, i_b].covariance += weight * r.outer_product(r)
+            solver.clusters_fit[root, i_b].rest_cm += weight * r.cross(v)
+    for i_c, i_b in qd.ndrange(solver._n_clusters, solver._B):
+        if solver.is_velocity_projectable[i_c, i_b] > 0 and solver.clusters_fit[i_c, i_b].weight > 0.0:
+            covariance = solver.clusters_fit[i_c, i_b].covariance
+            inertia = covariance.trace() * qd.Matrix.identity(qd.f64, 3) - covariance
+            solver.clusters_fit[i_c, i_b].rest_cm = func_pbd_inertia_twist(
+                i_b, inertia, solver.clusters_fit[i_c, i_b].rest_cm, solver._errno
+            )
+    for i_m, i_b in qd.ndrange(solver._n_cluster_members, solver._B):
+        i_c = solver.cluster_member_clusters[i_m]
+        root = i_c
+        if qd.static(solver._n_bonds > 0):
+            root = solver.cluster_roots[i_c, i_b]
+        if solver.is_velocity_projectable[root, i_b] > 0:
+            i_p = solver.cluster_member_particles[i_m]
+            r = (solver.particles[i_p, i_b].pos.cast(qd.f64) - solver.clusters_rest[root, i_b].cm.cast(qd.f64)
+                 - solver.clusters_fit[root, i_b].p_sum)
+            goal = solver.clusters_fit[root, i_b].q_sum + solver.clusters_fit[root, i_b].rest_cm.cross(r)
+            solver.particles[i_p, i_b].dpos += ((goal - solver.particles[i_p, i_b].vel.cast(qd.f64))
+                * qd.f64(solver._substep_dt) / solver.particle_cluster_ptr[i_p].member_count).cast(gs.qd_float)
+    for i_p, i_b in qd.ndrange(solver._n_particles, solver._B):
+        if solver.particles_info[i_p].material_type == solver.MATERIAL.SOLID:
+            solver.particles[i_p, i_b].vel += solver.particles[i_p, i_b].dpos / solver._substep_dt
+            solver.particles[i_p, i_b].dpos.fill(0.0)
+
+
+class CohesiveProjection:
+    def __init__(self, solver):
+        # Build-only bulk reads, exact physical graph sizes; no runtime host traversal.
+        i_p = qd_to_numpy(solver.bonds_info.i_p, transpose=True)
+        j_p = qd_to_numpy(solver.bonds_info.j_p, transpose=True)
+        seams = qd_to_numpy(solver.bonds_info.seam, transpose=True)
+        starts = qd_to_numpy(solver.particle_cluster_ptr.member_start, transpose=True)
+        owners = qd_to_numpy(solver.particle_cluster_ids, transpose=True)[starts]
+        clusters = np.unique(np.concatenate((owners[i_p], owners[j_p])))
+        physical_seams, first = np.unique(seams, return_index=True)
+        stiffness = qd_to_numpy(solver.clusters_info.stiffness, transpose=True)[clusters]
+        self.n_nodes = len(clusters)
+        self.n_edges = len(physical_seams)
+        self.length = solver._particle_size
+        self.relative_tol = 1e-8
+        node_map = np.full(solver._n_clusters, -1, dtype=gs.np_int)
+        node_map[clusters] = np.arange(self.n_nodes)
+        edge_map = np.full(solver._n_seams, -1, dtype=gs.np_int)
+        edge_map[physical_seams] = np.arange(self.n_edges)
+        assert np.all(stiffness[node_map[owners[i_p[first]]]] == stiffness[node_map[owners[j_p[first]]]]), "Connected fragments require uniform stiffness"
+        self.node_map = qd.field(gs.qd_int, shape=(solver._n_clusters,))
+        self.node_map.from_numpy(node_map)
+        self.edge_map = qd.field(gs.qd_int, shape=(solver._n_seams,))
+        self.edge_map.from_numpy(edge_map)
+        self.clusters = qd.field(gs.qd_int, shape=(self.n_nodes,))
+        self.clusters.from_numpy(clusters)
+        rest = qd_to_numpy(solver.particles_solid_rest, transpose=True)[0]
+        member_clusters = qd_to_numpy(solver.cluster_member_clusters, transpose=True)
+        selected_members = np.flatnonzero(node_map[member_clusters] >= 0)
+        member_particles = qd_to_numpy(solver.cluster_member_particles, transpose=True)[selected_members]
+        self.n_members = len(selected_members)
+        self.origin = qd.Vector(rest[np.unique(member_particles)].mean(0), dt=qd.f64)
+        member_type = qd.types.struct(particle=gs.qd_int, cluster=gs.qd_int, node=gs.qd_int)
+        self.members = member_type.field(shape=(self.n_members,))
+        self.members.particle.from_numpy(member_particles)
+        self.members.cluster.from_numpy(member_clusters[selected_members])
+        self.members.node.from_numpy(node_map[member_clusters[selected_members]])
+        node_type = qd.types.struct(
+            rhs=qd.types.vector(6, qd.f64), x=qd.types.vector(6, qd.f64),
+            r=qd.types.vector(6, qd.f64), roundoff=qd.f64,
+        )
+        self.nodes = node_type.field(shape=(self.n_nodes, solver._B))
+        edge_info = qd.types.struct(i=gs.qd_int, j=gs.qd_int, seam=gs.qd_int)
+        self.edges_info = edge_info.field(shape=(self.n_edges,))
+        self.edges_info.i.from_numpy(node_map[owners[i_p[first]]])
+        self.edges_info.j.from_numpy(node_map[owners[j_p[first]]])
+        self.edges_info.seam.from_numpy(physical_seams)
+        self.K = qd.Matrix.field(6, 6, qd.f64, shape=(self.n_edges, solver._B))
+        self.roots = qd.field(gs.qd_int, shape=(self.n_nodes, solver._B))
+        self.rebuild = qd.field(gs.qd_bool, shape=(solver._B,))
+        self.rebuild.fill(True)
+        # Each entity owns one exact-size block. Unbreakable/plastic clusters
+        # have no incident bonds and allocate no factor storage.
+        edge_i = node_map[owners[i_p[first]]]
+        edge_j = node_map[owners[j_p[first]]]
+        graphs = []
+        matrix_size = 0
+        for entity in solver.entities:
+            if isinstance(entity, PBD3DSolidEntity):
+                nodes = np.flatnonzero((clusters >= entity.cluster_start) & (clusters < entity.cluster_end))
+                if len(nodes):
+                    edges = np.flatnonzero(np.isin(edge_i, nodes))
+                    assert np.array_equal(nodes, np.arange(nodes[0], nodes[-1] + 1))
+                    assert np.array_equal(edges, np.arange(edges[0], edges[-1] + 1))
+                    assert np.isin(edge_j[edges], nodes).all()
+                    graphs.append((nodes[0], len(nodes), edges[0], len(edges), matrix_size))
+                    matrix_size += (6 * len(nodes)) ** 2
+        self.n_graphs = len(graphs)
+        self.matrix_size = matrix_size
+        graph_type = qd.types.struct(node_start=gs.qd_int, node_count=gs.qd_int,
+                                     edge_start=gs.qd_int, edge_count=gs.qd_int, matrix_start=gs.qd_int)
+        self.graphs_info = graph_type.field(shape=(self.n_graphs,))
+        graph_data = np.array(graphs, dtype=gs.np_int)
+        self.graphs_info.node_start.from_numpy(graph_data[:, 0])
+        self.graphs_info.node_count.from_numpy(graph_data[:, 1])
+        self.graphs_info.edge_start.from_numpy(graph_data[:, 2])
+        self.graphs_info.edge_count.from_numpy(graph_data[:, 3])
+        self.graphs_info.matrix_start.from_numpy(graph_data[:, 4])
+        self.factor = qd.field(qd.f64, shape=(self.matrix_size, solver._B))
+        self.is_factor_valid = qd.field(gs.qd_bool, shape=(self.n_graphs, solver._B))
+        self.overload = qd.field(qd.f64, shape=(solver._n_bonds, solver._B))
+        self.stats = qd.Vector.field(4, qd.f64, shape=(solver._B,))
+
+
+@qd.func
+def func_cohesive_patch(r, reduced_mass, length):
+    length = qd.f64(length)
+    S = qd.Matrix([[0.0, -r[2], r[1]], [r[2], 0.0, -r[0]], [-r[1], r[0], 0.0]])
+    inertia = qd.f64(2.0) / 5.0 * reduced_mass * (length / 2.0) ** 2
+    moment = -reduced_mass * S @ S + inertia * qd.Matrix.identity(qd.f64, 3)
+    K = qd.Matrix.zero(qd.f64, 6, 6)
+    for i, j in qd.static(qd.ndrange(3, 3)):
+        if qd.static(i == j):
+            K[i, j] = reduced_mass * length * length
+        K[i, j + 3] = -reduced_mass * S[i, j] * length
+        K[i + 3, j] = reduced_mass * S[i, j] * length
+        K[i + 3, j + 3] = moment[i, j]
+    return K
+
+
+@qd.func
+def func_factor_cohesive_graphs(solver: V_ANNOTATION):
+    # Live components each have one six-DOF gauge. Gauge identity rows carry
+    # no physical stiffness; their conjugate RHS is zero after closure validation.
+    for i_e, i_b in qd.ndrange(solver.cohesive.n_edges, solver._B):
+        if qd.math.isnan(solver.cohesive.K[i_e, i_b]).any() or qd.math.isinf(solver.cohesive.K[i_e, i_b]).any():
+            qd.atomic_or(solver._errno[i_b], ErrorCode.INVALID_PBD_COHESIVE_REACTION)
+    for i_g, i_b in qd.ndrange(solver.cohesive.n_graphs, solver._B):
+        if solver.cohesive.rebuild[i_b]:
+            graph = solver.cohesive.graphs_info[i_g]
+            dofs = 6 * graph.node_count
+            start = graph.matrix_start
+            solver.cohesive.is_factor_valid[i_g, i_b] = True
+            for row in range(dofs):
+                i_n = graph.node_start + row // 6
+                for col in range(row + 1):
+                    j_n = graph.node_start + col // 6
+                    value = qd.f64(0.0)
+                    if i_n == solver.cohesive.roots[i_n, i_b] or j_n == solver.cohesive.roots[j_n, i_b]:
+                        if row == col:
+                            value = 1.0
+                    else:
+                        for i_e in range(graph.edge_start, graph.edge_start + graph.edge_count):
+                            edge = solver.cohesive.edges_info[i_e]
+                            if i_n == j_n and (edge.i == i_n or edge.j == i_n):
+                                value += solver.cohesive.K[i_e, i_b][row % 6, col % 6]
+                            elif (edge.i == i_n and edge.j == j_n) or (edge.j == i_n and edge.i == j_n):
+                                value -= solver.cohesive.K[i_e, i_b][row % 6, col % 6]
+                    for k in range(col):
+                        value -= solver.cohesive.factor[start + row * dofs + k, i_b] * solver.cohesive.factor[start + col * dofs + k, i_b]
+                    entry = qd.f64(0.0)
+                    if qd.math.isnan(value) or qd.math.isinf(value):
+                        solver.cohesive.is_factor_valid[i_g, i_b] = False
+                    elif row == col:
+                        if value > 0.0:
+                            entry = qd.sqrt(value)
+                        else:
+                            solver.cohesive.is_factor_valid[i_g, i_b] = False
+                    else:
+                        pivot = solver.cohesive.factor[start + col * dofs + col, i_b]
+                        if pivot > 0.0:
+                            entry = value / pivot
+                        else:
+                            solver.cohesive.is_factor_valid[i_g, i_b] = False
+                    solver.cohesive.factor[start + row * dofs + col, i_b] = entry
+            if not solver.cohesive.is_factor_valid[i_g, i_b]:
+                qd.atomic_or(solver._errno[i_b], ErrorCode.INVALID_PBD_COHESIVE_REACTION)
+
+
+@qd.func
+def func_solve_cohesive_graphs(solver: V_ANNOTATION):
+    for i_g, i_b in qd.ndrange(solver.cohesive.n_graphs, solver._B):
+        graph = solver.cohesive.graphs_info[i_g]
+        dofs = 6 * graph.node_count
+        start = graph.matrix_start
+        valid = solver.cohesive.is_factor_valid[i_g, i_b]
+        # Forward/back substitutions are performed on the cached Cholesky block.
+        for row in range(dofs):
+            i_n = graph.node_start + row // 6
+            value = qd.f64(0.0)
+            if i_n != solver.cohesive.roots[i_n, i_b]:
+                value = solver.cohesive.nodes[i_n, i_b].rhs[row % 6]
+            for col in range(row):
+                j_n = graph.node_start + col // 6
+                value -= solver.cohesive.factor[start + row * dofs + col, i_b] * solver.cohesive.nodes[j_n, i_b].x[col % 6]
+            pivot = solver.cohesive.factor[start + row * dofs + row, i_b]
+            if pivot <= 0.0 or qd.math.isnan(pivot) or qd.math.isinf(pivot) or qd.math.isnan(value) or qd.math.isinf(value):
+                valid = False
+            if valid:
+                solver.cohesive.nodes[i_n, i_b].x[row % 6] = value / pivot
+            else:
+                solver.cohesive.nodes[i_n, i_b].x[row % 6] = 0.0
+        for reverse in range(dofs):
+            row = dofs - reverse - 1
+            i_n = graph.node_start + row // 6
+            value = solver.cohesive.nodes[i_n, i_b].x[row % 6]
+            for col in range(row + 1, dofs):
+                j_n = graph.node_start + col // 6
+                value -= solver.cohesive.factor[start + col * dofs + row, i_b] * solver.cohesive.nodes[j_n, i_b].x[col % 6]
+            if valid:
+                value /= solver.cohesive.factor[start + row * dofs + row, i_b]
+            else:
+                value = 0.0
+            solver.cohesive.nodes[i_n, i_b].x[row % 6] = value
+            if qd.math.isnan(value) or qd.math.isinf(value):
+                valid = False
+        if not valid:
+            qd.atomic_or(solver._errno[i_b], ErrorCode.INVALID_PBD_COHESIVE_REACTION)
+
+
+@qd.func
+def func_validate_cohesive_closure(solver: V_ANNOTATION, i_b):
+    # Equilibrium includes each component's gauge node, even with zero free DOFs.
+    closure = qd.f64(0.0)
+    for root in range(solver.cohesive.n_nodes):
+        if solver.cohesive.roots[root, i_b] == root:
+            total = qd.Vector.zero(qd.f64, 6)
+            scale, roundoff = qd.f64(0.0), qd.f64(0.0)
+            for i_n in range(solver.cohesive.n_nodes):
+                if solver.cohesive.roots[i_n, i_b] == root:
+                    if qd.math.isnan(solver.cohesive.nodes[i_n, i_b].rhs).any() or qd.math.isinf(solver.cohesive.nodes[i_n, i_b].rhs).any() or qd.math.isnan(solver.cohesive.nodes[i_n, i_b].roundoff) or qd.math.isinf(solver.cohesive.nodes[i_n, i_b].roundoff):
+                        qd.atomic_or(solver._errno[i_b], ErrorCode.INVALID_PBD_COHESIVE_REACTION)
+                    total += solver.cohesive.nodes[i_n, i_b].rhs
+                    scale += solver.cohesive.nodes[i_n, i_b].rhs.norm_sqr()
+                    roundoff += solver.cohesive.nodes[i_n, i_b].roundoff
+            bound = 2.220446049250313e-16 * 64.0 * solver.cohesive.n_members * roundoff
+            if qd.math.isnan(total).any() or qd.math.isinf(total).any() or qd.math.isnan(scale) or qd.math.isinf(scale) or qd.math.isnan(bound) or qd.math.isinf(bound):
+                qd.atomic_or(solver._errno[i_b], ErrorCode.INVALID_PBD_COHESIVE_REACTION)
+            if total.norm_sqr() > solver.cohesive.relative_tol**2 * scale + bound**2:
+                qd.atomic_or(solver._errno[i_b], ErrorCode.INVALID_PBD_COHESIVE_REACTION)
+            closure = qd.max(closure, total.norm())
+    return closure
+
+
+@qd.func
+def func_compute_cohesive_reaction(solver: V_ANNOTATION):
+    for i_b in range(solver._B):
+        solver.cohesive.rebuild[i_b] = solver.cohesive.rebuild[i_b] or solver.cluster_roots_dirty[i_b]
+    # This only measures the predicted configuration; no position/velocity changes.
+    func_fit_pbd_clusters(solver, welded=True, render_only=False)
+    for i_n, i_b in qd.ndrange(solver.cohesive.n_nodes, solver._B):
+        i_c = solver.cohesive.clusters[i_n]
+        solver.cohesive.roots[i_n, i_b] = solver.cohesive.node_map[solver.cluster_roots[i_c, i_b]]
+        solver.cohesive.nodes[i_n, i_b].rhs.fill(0.0)
+        solver.cohesive.nodes[i_n, i_b].roundoff = 0.0
+    for i_m, i_b in qd.ndrange(solver.cohesive.n_members, solver._B):
+        i_c = solver.cohesive.members[i_m].cluster
+        i_n = solver.cohesive.members[i_m].node
+        if i_n >= 0:
+            i_p = solver.cohesive.members[i_m].particle
+            root = solver.cluster_roots[i_c, i_b]
+            fit = solver.clusters_fit[root, i_b]
+            R = fit.rot
+            pos = solver.particles[i_p, i_b].pos.cast(qd.f64)
+            rest = solver.particles_solid_rest[i_p, i_b].cast(qd.f64)
+            goal = fit.cm + R @ (rest - fit.rest_cm)
+            delta = R.transpose() @ (goal - pos)
+            r = R.transpose() @ (pos - fit.cm) + fit.rest_cm - solver.cohesive.origin
+            weight = qd.f64(solver.particles_info[i_p].mass) * solver.clusters_info[i_c].stiffness / solver.particle_cluster_ptr[i_p].member_count
+            position_reaction = weight * delta
+            torque = r.cross(position_reaction)
+            for k in qd.static(range(3)):
+                solver.cohesive.nodes[i_n, i_b].rhs[k] += position_reaction[k] * solver.cohesive.length
+                solver.cohesive.nodes[i_n, i_b].rhs[k + 3] += torque[k]
+            # Bound only evaluation/accumulation roundoff, never material strength.
+            solver.cohesive.nodes[i_n, i_b].roundoff += weight * (r.norm() + solver.cohesive.length) ** 2
+    for i_e, i_b in qd.ndrange(solver.cohesive.n_edges, solver._B):
+        if solver.cohesive.rebuild[i_b]:
+            solver.cohesive.K[i_e, i_b].fill(0.0)
+    for i_l, i_b in qd.ndrange(solver._n_bonds, solver._B):
+        if solver.cohesive.rebuild[i_b] and solver.bonds_state[i_l, i_b].alive:
+            i_p, j_p = solver.bonds_info[i_l].i_p, solver.bonds_info[i_l].j_p
+            reduced_mass = 1.0 / (1.0 / qd.f64(solver.particles_info[i_p].mass) + 1.0 / qd.f64(solver.particles_info[j_p].mass))
+            r = 0.5 * (solver.particles_solid_rest[i_p, i_b].cast(qd.f64) + solver.particles_solid_rest[j_p, i_b].cast(qd.f64)) - solver.cohesive.origin
+            i_e = solver.cohesive.edge_map[solver.bonds_info[i_l].seam]
+            solver.cohesive.K[i_e, i_b] += func_cohesive_patch(r, reduced_mass, qd.f64(solver.cohesive.length))
+    func_factor_cohesive_graphs(solver)
+    func_solve_cohesive_graphs(solver)
+    for i_b in range(solver._B):
+        solver.cohesive.rebuild[i_b] = False
+        closure = func_validate_cohesive_closure(solver, i_b)
+        norm_rhs = qd.f64(0.0)
+        for i_n in range(solver.cohesive.n_nodes):
+            solver.cohesive.nodes[i_n, i_b].r.fill(0.0)
+            if i_n != solver.cohesive.roots[i_n, i_b]:
+                solver.cohesive.nodes[i_n, i_b].r = -solver.cohesive.nodes[i_n, i_b].rhs
+                norm_rhs += solver.cohesive.nodes[i_n, i_b].rhs.norm_sqr()
+        for i_e in range(solver.cohesive.n_edges):
+            edge = solver.cohesive.edges_info[i_e]
+            value = solver.cohesive.K[i_e, i_b] @ (solver.cohesive.nodes[edge.i, i_b].x - solver.cohesive.nodes[edge.j, i_b].x)
+            solver.cohesive.nodes[edge.i, i_b].r += value
+            solver.cohesive.nodes[edge.j, i_b].r -= value
+        residual = qd.f64(0.0)
+        for i_n in range(solver.cohesive.n_nodes):
+            if i_n != solver.cohesive.roots[i_n, i_b]:
+                residual += solver.cohesive.nodes[i_n, i_b].r.norm_sqr()
+        if qd.math.isnan(residual) or qd.math.isinf(residual) or qd.math.isnan(norm_rhs) or qd.math.isinf(norm_rhs) or residual > solver.cohesive.relative_tol**2 * norm_rhs:
+            qd.atomic_or(solver._errno[i_b], ErrorCode.INVALID_PBD_COHESIVE_REACTION)
+        solver.cohesive.stats[i_b][0] = 1.0
+        solver.cohesive.stats[i_b][1] = 0.0
+        if norm_rhs > 0.0:
+            solver.cohesive.stats[i_b][1] = qd.sqrt(residual / norm_rhs)
+        solver.cohesive.stats[i_b][2] = closure
+        solver.cohesive.stats[i_b][3] = qd.sqrt(norm_rhs)
+    for i_l, i_b in qd.ndrange(solver._n_bonds, solver._B):
+        solver.cohesive.overload[i_l, i_b] = 0.0
+        if solver.bonds_state[i_l, i_b].alive:
+            bond = solver.bonds_info[i_l]
+            edge = solver.cohesive.edges_info[solver.cohesive.edge_map[bond.seam]]
+            potential = solver.cohesive.nodes[edge.i, i_b].x - solver.cohesive.nodes[edge.j, i_b].x
+            translation = qd.Vector([potential[0], potential[1], potential[2]]) * solver.cohesive.length
+            angle = qd.Vector([potential[3], potential[4], potential[5]])
+            rest_i = solver.particles_solid_rest[bond.i_p, i_b].cast(qd.f64)
+            rest_j = solver.particles_solid_rest[bond.j_p, i_b].cast(qd.f64)
+            r = (rest_i + rest_j) * 0.5 - solver.cohesive.origin
+            shift = translation - r.cross(angle)
+            axis = (rest_i - rest_j) / bond.rest
+            normal = qd.abs(axis.dot(shift)) / bond.rest / bond.threshold
+            overload = normal
+            seam = solver.seams_info[bond.seam]
+            if seam.shear_threshold > 0.0:
+                overload = qd.max(overload, (shift - axis * axis.dot(shift)).norm() / bond.rest / seam.shear_threshold)
+            if seam.rotation_threshold > 0.0:
+                overload = qd.max(overload, angle.norm() / seam.rotation_threshold)
+            solver.cohesive.overload[i_l, i_b] = overload
+
 
 
 @qd.data_oriented
@@ -35,11 +622,13 @@ class PBDSolver(Solver):
         ELASTIC = 1
         LIQUID = 2
         PARTICLE = 3  # non-physics particles
+        SOLID = 4  # shape-matching cluster rigid / fracturable solid
 
     def __init__(self, scene, sim, options):
         super().__init__(scene, sim, options)
 
         # options
+        self.cohesive = None
         self._n_entity_particles = None
         self._upper_bound = np.array(options.upper_bound)
         self._lower_bound = np.array(options.lower_bound)
@@ -49,6 +638,7 @@ class PBDSolver(Solver):
         self._max_volume_solver_iterations = options.max_volume_solver_iterations
         self._max_density_solver_iterations = options.max_density_solver_iterations
         self._max_viscosity_solver_iterations = options.max_viscosity_solver_iterations
+        self._max_shape_matching_solver_iterations = options.max_shape_matching_solver_iterations
         self._diffusion_coeff = options.diffusion_coeff
 
         self._is_st_enabled = options.is_surface_tension_enabled
@@ -180,6 +770,7 @@ class PBDSolver(Solver):
         self.setup_boundary()
 
     def setup_boundary(self):
+        self._is_cube_boundary = self._boundary_cylinder is None
         if self._boundary_cylinder is None:
             self.boundary = CubeBoundary(
                 lower=self._lower_bound,
@@ -252,8 +843,19 @@ class PBDSolver(Solver):
         struct_vvert_info = qd.types.struct(
             support_idxs=qd.types.vector(self._n_vvert_supports, gs.qd_int),
             support_weights=qd.types.vector(self._n_vvert_supports, gs.qd_float),
+            # solid vverts follow one cluster's rigid transform instead of the support weights
+            is_solid=gs.qd_bool,
         )
         self.vverts_info = struct_vvert_info.field(shape=(max(self._n_vverts, 1),), layout=qd.Layout.SOA)
+        self.vverts_info.is_solid.fill(False)
+
+        # per-vvert solid binding: the owning cluster and the rest offset from its rest centroid; faces on a
+        # crack boundary bind to different fragments and split apart without stretching
+        self.vverts_solid_cluster = qd.field(dtype=gs.qd_int, shape=(max(self._n_vverts, 1),))
+        self.vverts_solid_offset = qd.field(dtype=gs.qd_vec3, shape=(max(self._n_vverts, 1),))
+        # Interior crack walls carry their pair seam id; connected endpoint clusters keep them hidden.
+        self.vverts_solid_seam = qd.field(dtype=gs.qd_int, shape=(max(self._n_vverts, 1),))
+        self.vverts_solid_seam.fill(-1)
 
         struct_vvert_state_render = qd.types.struct(
             pos=gs.qd_vec3,
@@ -281,6 +883,8 @@ class PBDSolver(Solver):
             air_resistance=gs.qd_float,
             density_relaxation=gs.qd_float,
             viscosity_relaxation=gs.qd_float,
+            # rigid shard owning a SOLID particle; globally unique across entities, fixed at build time
+            fragment=gs.qd_int,
         )
         # particles state (dynamic)
         struct_particle_state = qd.types.struct(
@@ -303,6 +907,9 @@ class PBDSolver(Solver):
             boundary_group=gs.qd_int,
             is_boundary=gs.qd_bool,
             boundary_set=gs.qd_int,  # owning boundary-ball set; meaningful only when is_boundary
+            # The PBD-fragment bridge owns this particle's fragment: every prediction, force, fit, contact and
+            # coupling path skips it, and the bridge rewrites its pos/vel from the native link at the substep tail.
+            is_native_owned=gs.qd_bool,
         )
 
         # single frame particle state for rendering
@@ -323,6 +930,8 @@ class PBDSolver(Solver):
         self.particles_ng_reordered = struct_particle_state_ng.field(
             shape=(self._n_particles, self._B), layout=qd.Layout.SOA
         )
+        self.particles_ng.is_native_owned.fill(False)
+        self.particles_ng_reordered.is_native_owned.fill(False)
         self.particles_render = struct_particle_state_render.field(
             shape=(self._n_particles, self._B), layout=qd.Layout.SOA
         )
@@ -398,6 +1007,142 @@ class PBDSolver(Solver):
         )
         self.elems_info = struct_elem_info.field(shape=(max(self._n_elems, 1),), layout=qd.Layout.SOA)
 
+    def init_cluster_fields(self):
+        # shape-matching clusters for SOLID entities (static parameters, shared across envs)
+        struct_cluster_info = qd.types.struct(
+            member_start=gs.qd_int,
+            member_count=gs.qd_int,
+            stiffness=gs.qd_float,
+            yield_threshold=gs.qd_float,
+            # legacy per-substep flow fraction; 0 when the cluster uses the plastic_flow_rate contract
+            plastic_creep=gs.qd_float,
+            # plastic flow rate gamma (1/s) of the substep-independent contract; 0 when the cluster
+            # uses the legacy plastic_creep contract
+            plastic_flow_rate=gs.qd_float,
+        )
+        self.clusters_info = struct_cluster_info.field(shape=(max(self._n_clusters, 1),), layout=qd.Layout.SOA)
+
+        # rest centroid per env: plasticity rewrites it at runtime, so it cannot be shared across envs
+        struct_cluster_rest = qd.types.struct(
+            cm=gs.qd_vec3,
+        )
+        self.clusters_rest = struct_cluster_rest.field(shape=(max(self._n_clusters, 1), self._B), layout=qd.Layout.SOA)
+        self.cluster_member_particles = qd.field(dtype=gs.qd_int, shape=(max(self._n_cluster_members, 1),))
+        self.cluster_member_clusters = (
+            qd.field(dtype=gs.qd_int, shape=(self._n_cluster_members,)) if self._n_cluster_members else None
+        )
+        struct_cluster_fit = qd.types.struct(
+            weight=qd.f64,
+            p_sum=qd.types.vector(3, qd.f64),
+            q_sum=qd.types.vector(3, qd.f64),
+            covariance=qd.types.matrix(3, 3, qd.f64),
+            rot=qd.types.matrix(3, 3, qd.f64),
+            cm=qd.types.vector(3, qd.f64),
+            rest_cm=qd.types.vector(3, qd.f64),
+        )
+        self.clusters_fit = (
+            struct_cluster_fit.field(shape=(self._n_clusters, self._B), layout=qd.Layout.SOA)
+            if self._n_clusters else None
+        )
+        self.is_velocity_projectable = qd.field(dtype=gs.qd_int, shape=(self._n_clusters, self._B)) if self._n_clusters else None
+        self.cluster_roots = (
+            qd.field(dtype=gs.qd_int, shape=(self._n_clusters, self._B)) if self._n_bonds else None
+        )
+        self.is_render_dirty = qd.field(dtype=gs.qd_bool, shape=(self._B,)) if self._n_clusters else None
+        if self._n_clusters:
+            self.is_render_dirty.fill(True)
+        self.cluster_roots_dirty = qd.field(dtype=gs.qd_int, shape=(self._B,)) if self._n_bonds else None
+        if self._n_bonds:
+            self.cluster_roots_dirty.fill(1)
+
+        # per-particle rest positions for SOLID entities. Plasticity creeps these toward the current shape;
+        # one shared rest per particle (instead of per membership) keeps overlapping clusters consistent
+        self.particles_solid_rest = qd.field(dtype=gs.qd_vec3, shape=(self._n_particles, self._B))
+        # scratch for the plastic flow accumulation pass (legacy fraction contract)
+        self.plastic_q_sum = qd.field(dtype=gs.qd_vec3, shape=(self._n_particles, self._B))
+        self.plastic_w_sum = qd.field(dtype=gs.qd_float, shape=(self._n_particles, self._B))
+        # scratch for the rate contract: membership-weighted gamma (1/s) times target and gamma alone;
+        # both stay zero for particles of legacy-contract clusters
+        self.plastic_rate_num = qd.field(dtype=gs.qd_vec3, shape=(self._n_particles, self._B))
+        self.plastic_rate_den = qd.field(dtype=gs.qd_float, shape=(self._n_particles, self._B))
+
+        # perfectly-plastic contact hold: per-plastic-entity mass-weighted vertical velocity sums,
+        # reset every substep by the apply pass (self-cleaning, so reset needs no extra handling)
+        self.plastic_contact_sum_m = qd.field(dtype=gs.qd_float, shape=(max(self._n_plastic_entities, 1), self._B))
+        self.plastic_contact_sum_mvz = qd.field(dtype=gs.qd_float, shape=(max(self._n_plastic_entities, 1), self._B))
+        self.plastic_contact_has = qd.field(dtype=gs.qd_int, shape=(max(self._n_plastic_entities, 1), self._B))
+        self.plastic_entity_start = qd.field(dtype=gs.qd_int, shape=(max(self._n_plastic_entities, 1),))
+        self.plastic_entity_end = qd.field(dtype=gs.qd_int, shape=(max(self._n_plastic_entities, 1),))
+        if self._n_plastic_entities:
+            starts = np.array([entity.particle_start for entity in self._plastic_entities], dtype=gs.np_int)
+            self.plastic_entity_start.from_numpy(starts)
+            ends = np.array(
+                [entity.particle_start + entity.n_particles for entity in self._plastic_entities], dtype=gs.np_int
+            )
+            self.plastic_entity_end.from_numpy(ends)
+
+        # dynamic cluster state
+        struct_cluster_state = qd.types.struct(
+            cm=gs.qd_vec3,
+            rot=gs.qd_mat3,
+            is_rest_dirty=gs.qd_bool,  # rest centroid must be rebuilt after plasticity moved a member's rest
+        )
+        self.clusters_state = struct_cluster_state.field(
+            shape=(max(self._n_clusters, 1), self._B), layout=qd.Layout.SOA
+        )
+
+        # particle -> clusters dual map
+        struct_particle_cluster_ptr = qd.types.struct(
+            member_start=gs.qd_int,
+            member_count=gs.qd_int,
+        )
+        self.particle_cluster_ptr = struct_particle_cluster_ptr.field(shape=(self._n_particles,), layout=qd.Layout.SOA)
+        self.particle_cluster_ids = qd.field(dtype=gs.qd_int, shape=(max(self._n_cluster_members, 1),))
+
+    def init_bond_fields(self):
+        # breakable links joining the fragments of fracturable SOLID entities (static, shared across envs)
+        struct_bond_info = qd.types.struct(
+            i_p=gs.qd_int,
+            j_p=gs.qd_int,
+            rest=gs.qd_float,
+            stiffness=gs.qd_float,
+            # strain |d - d0| / d0 beyond which the bond breaks
+            threshold=gs.qd_float,
+            seam=gs.qd_int,
+        )
+        self.bonds_info = struct_bond_info.field(shape=(max(self._n_bonds, 1),), layout=qd.Layout.SOA)
+        struct_bond_state = qd.types.struct(
+            alive=gs.qd_bool,
+        )
+        self.bonds_state = struct_bond_state.field(shape=(max(self._n_bonds, 1), self._B), layout=qd.Layout.SOA)
+
+
+        # One seam per bonded fragment pair or geometric cut interface, including zero-bond interfaces.
+        # Death changes cohesion; crack walls become visible only after the endpoint clusters separate.
+        struct_seam_info = qd.types.struct(
+            i_c=gs.qd_int,
+            j_c=gs.qd_int,
+            # tangential slip strain (slip / bond rest length) beyond which a bond overloads the seam
+            shear_threshold=gs.qd_float,
+            # relative fragment rotation (rad) beyond which a bond overloads the seam
+            rotation_threshold=gs.qd_float,
+            # accumulated overload fraction at which the seam dies; <= 0 restricts death to its last bond
+            failure_threshold=gs.qd_float,
+            # per-substep damage increment factor: 1.0 folds the legacy per-substep overload fraction,
+            # substep_dt / tau_damage integrates the same fraction over physical time
+            damage_factor=gs.qd_float,
+        )
+        self.seams_info = struct_seam_info.field(shape=(max(self._n_seams, 1),), layout=qd.Layout.SOA)
+        struct_seam_state = qd.types.struct(
+            alive_count=gs.qd_int,
+            # monotonic sum of per-substep overloaded-bond fractions; the scratch overload_count holds
+            # the current substep's numerator before the per-seam pass folds it in
+            damage=gs.qd_float,
+            overload_count=gs.qd_int,
+            is_dead=gs.qd_bool,
+        )
+        self.seams_state = struct_seam_state.field(shape=(max(self._n_seams, 1), self._B), layout=qd.Layout.SOA)
+
     def init_ckpt(self):
         self._ckpt = dict()
 
@@ -426,6 +1171,24 @@ class PBDSolver(Solver):
         self._n_elems = self.n_elems
         self._n_vverts = self.n_vverts
         self._n_vfaces = self.n_vfaces
+        self._n_clusters = self.n_clusters
+        self._n_cluster_members = self.n_cluster_members
+        self._n_bonds = self.n_bonds
+        self._n_seams = self.n_seams
+        self._n_fragments = self.n_fragments
+        self._has_plasticity = any(
+            entity.material.plastic_creep > 0.0 or entity.material.plastic_flow_rate is not None
+            for entity in self._entities
+            if isinstance(entity, PBD3DSolidEntity)
+        )
+        self._plastic_entities = [
+            entity
+            for entity in self._entities
+            if isinstance(entity, PBD3DSolidEntity)
+            and (entity.material.plastic_creep > 0.0 or entity.material.plastic_flow_rate is not None)
+        ]
+        self._has_plastic_contact_hold = self._has_plasticity and self._is_cube_boundary
+        self._n_plastic_entities = len(self._plastic_entities)
 
         if self._is_st_enabled and self._entities:
             # PBSTF denominators normalize the compliance by a default mass (the material density
@@ -434,16 +1197,48 @@ class PBDSolver(Solver):
 
         if self.is_active:
             self.sh.build(self._B)
+            self._errno = qd.field(dtype=gs.qd_int, shape=(self._B,))
+            self._errno.fill(0)
 
             self.init_particle_fields()
             self.init_edge_fields()
             self.init_elem_fields()
             self.init_vvert_fields()
+            self.init_cluster_fields()
+            self.init_bond_fields()
 
             self.init_ckpt()
 
             for entity in self._entities:
                 entity._add_to_solver()
+                if isinstance(entity, PBD3DSolidEntity) and entity.n_seams > 0:
+                    self._kernel_add_seam_fracture_params(
+                        entity.seam_start,
+                        entity.n_seams,
+                        (
+                            DEFAULT_SHEAR_THRESHOLD
+                            if entity.material.shear_threshold is None
+                            else entity.material.shear_threshold
+                        ),
+                        (
+                            DEFAULT_ROTATION_THRESHOLD
+                            if entity.material.rotation_threshold is None
+                            else entity.material.rotation_threshold
+                        ),
+                        (
+                            DEFAULT_SEAM_FAILURE_THRESHOLD
+                            if entity.material.seam_failure_threshold is None
+                            else entity.material.seam_failure_threshold
+                        ),
+                        (
+                            1.0
+                            if entity.material.seam_damage_time_constant is None
+                            else float(self._substep_dt / entity.material.seam_damage_time_constant)
+                        ),
+                    )
+
+            if self._n_bonds > 0:
+                self.cohesive = CohesiveProjection(self)
 
             if self.n_boundary_balls > 0:
                 # the ball mass mirrors the fluid material: with ball layers one spacing below the
@@ -588,7 +1383,7 @@ class PBDSolver(Solver):
 
     def add_entity(
         self, idx, material, morph, surface, name: str | None = None
-    ) -> "PBD2DEntity | PBD3DEntity | PBDParticleEntity | PBDFreeParticleEntity":
+    ) -> "PBD2DEntity | PBD3DEntity | PBDParticleEntity | PBDFreeParticleEntity | PBD3DSolidEntity":
         if isinstance(material, gs.materials.PBD.Cloth):
             entity = PBD2DEntity(
                 scene=self.scene,
@@ -646,6 +1441,26 @@ class PBDSolver(Solver):
                 particle_size=self._particle_size,
                 idx=idx,
                 particle_start=self.n_particles,
+                name=name,
+            )
+
+        elif isinstance(material, gs.materials.PBD.Solid):
+            entity = PBD3DSolidEntity(
+                scene=self.scene,
+                solver=self,
+                material=material,
+                morph=morph,
+                surface=surface,
+                particle_size=self._particle_size,
+                idx=idx,
+                particle_start=self.n_particles,
+                cluster_start=self.n_clusters,
+                cluster_member_start=self.n_cluster_members,
+                bond_start=self.n_bonds,
+                seam_start=self.n_seams,
+                fragment_start=self.n_fragments,
+                vvert_start=self.n_vverts,
+                vface_start=self.n_vfaces,
                 name=name,
             )
 
@@ -780,7 +1595,8 @@ class PBDSolver(Solver):
     def _kernel_store_initial_pos(self, f: qd.i32, preserve_boundary_ipos: qd.i32):
         for i_p, i_b in qd.ndrange(self._n_particles, self._B):
             if not (preserve_boundary_ipos and self.particles_ng[i_p, i_b].is_boundary):
-                self.particles[i_p, i_b].ipos = self.particles[i_p, i_b].pos
+                if not self.particles_ng[i_p, i_b].is_native_owned:
+                    self.particles[i_p, i_b].ipos = self.particles[i_p, i_b].pos
 
     @qd.kernel
     def _kernel_reorder_particles(self, f: qd.i32):
@@ -804,13 +1620,20 @@ class PBDSolver(Solver):
                 # a missed field here silently reads as False in every reordered-space gate
                 self.particles_ng_reordered[reordered_idx, i_b].is_boundary = self.particles_ng[i_p, i_b].is_boundary
                 self.particles_ng_reordered[reordered_idx, i_b].boundary_set = self.particles_ng[i_p, i_b].boundary_set
+                self.particles_ng_reordered[reordered_idx, i_b].is_native_owned = self.particles_ng[
+                    i_p, i_b
+                ].is_native_owned
 
     @qd.kernel
     def _kernel_apply_external_force(self, f: qd.i32, t: qd.f32):
+        if qd.static(self._n_clusters > 0):
+            for i_b in range(self._B):
+                self.is_render_dirty[i_b] = True
         for i_p, i_b in qd.ndrange(self._n_particles, self._B):
             # boundary balls are frozen: no force, no integration (a kinematic set is moved by
-            # set_boundary_ball_pose writing the position array directly)
-            if not self.particles_ng[i_p, i_b].is_boundary:
+            # set_boundary_ball_pose writing the position array directly); bridge-owned particles are
+            # likewise advanced by the native solver, with pos/vel synced from it at the substep tail
+            if not self.particles_ng[i_p, i_b].is_boundary and not self.particles_ng[i_p, i_b].is_native_owned:
                 if self.particles[i_p, i_b].free:
                     # gravity
                     self.particles[i_p, i_b].vel = self.particles[i_p, i_b].vel + self._gravity[i_b] * self._substep_dt
@@ -954,6 +1777,269 @@ class PBDSolver(Solver):
                     self.particles[i_p, i_b].dpos.fill(0)
 
     @qd.func
+    def _func_cluster_rigid_fit(self, i_c, i_b):
+        """Best rigid transform in f64 fitting the cluster's current particle positions.
+
+        The centroid sums run in f64: at f32 the mass-weighted accumulation over a large cluster carries a
+        systematic bias at the 1e-7 m scale, and the projection then steadily cancels that bias against
+        whatever moves the body (e.g. gravity).
+        """
+        member_start = self.clusters_info[i_c].member_start
+        member_count = self.clusters_info[i_c].member_count
+        cm64 = qd.Vector.zero(qd.f64, 3)
+        rest_cm64 = qd.Vector.zero(qd.f64, 3)
+        mass_sum64 = qd.f64(0.0)
+        for i_m in range(member_start, member_start + member_count):
+            i_p = self.cluster_member_particles[i_m]
+            mass64 = qd.f64(self.particles_info[i_p].mass) / qd.max(self.particle_cluster_ptr[i_p].member_count, 1)
+            cm64 += mass64 * self.particles[i_p, i_b].pos.cast(qd.f64)
+            rest_cm64 += mass64 * self.particles_solid_rest[i_p, i_b].cast(qd.f64)
+            mass_sum64 += mass64
+        cm64 /= mass_sum64
+        rest_cm64 /= mass_sum64
+
+        A_pq = qd.Matrix.zero(qd.f64, 3, 3)
+        for i_m in range(member_start, member_start + member_count):
+            i_p = self.cluster_member_particles[i_m]
+            mass = qd.f64(self.particles_info[i_p].mass) / qd.max(self.particle_cluster_ptr[i_p].member_count, 1)
+            p_off = self.particles[i_p, i_b].pos.cast(qd.f64) - cm64
+            q_off = self.particles_solid_rest[i_p, i_b].cast(qd.f64) - rest_cm64
+            A_pq += mass * p_off.outer_product(q_off)
+        return cm64, rest_cm64, func_pbd_polar_rotation(A_pq)
+
+    @qd.kernel
+    def _kernel_solve_shape_matching(self, f: qd.i32):
+        if qd.static(self._n_clusters > 0):
+            for i_b in range(self._B):
+                self.is_render_dirty[i_b] = True
+        for _ in qd.static(range(self._max_shape_matching_solver_iterations)):
+            func_fit_pbd_clusters(self, welded=True, render_only=False)
+            for i_m, i_b in qd.ndrange(self._n_cluster_members, self._B):
+                i_c = self.cluster_member_clusters[i_m]
+                i_p = self.cluster_member_particles[i_m]
+                i_fit = i_c
+                if qd.static(self._n_bonds > 0):
+                    i_fit = self.cluster_roots[i_c, i_b]
+                if self.particles[i_p, i_b].free and not self.particles_ng[i_p, i_b].is_native_owned:
+                    goal = (
+                        self.clusters_fit[i_fit, i_b].rot
+                        @ (self.particles_solid_rest[i_p, i_b].cast(qd.f64) - self.clusters_fit[i_fit, i_b].rest_cm)
+                        + self.clusters_fit[i_fit, i_b].cm
+                        - self.particles[i_p, i_b].pos.cast(qd.f64)
+                    ).cast(gs.qd_float)
+                    self.particles[i_p, i_b].dpos += (
+                        self.clusters_info[i_c].stiffness * goal
+                        / qd.max(self.particle_cluster_ptr[i_p].member_count, 1)
+                    )
+            for i_p, i_b in qd.ndrange(self._n_particles, self._B):
+                if (
+                    self.particles[i_p, i_b].free
+                    and not self.particles_ng[i_p, i_b].is_native_owned
+                    and self.particles_info[i_p].material_type == self.MATERIAL.SOLID
+                ):
+                    self.particles[i_p, i_b].vel += self.particles[i_p, i_b].dpos / self._substep_dt
+                    self.particles[i_p, i_b].pos = self.particles[i_p, i_b].pos + self.particles[i_p, i_b].dpos
+                    self.particles[i_p, i_b].dpos.fill(0)
+
+        func_project_pbd_rigid_velocities(self)
+
+    @qd.kernel
+    def _kernel_add_seam_fracture_params(
+        self,
+        seam_start: qd.i32,
+        n_seams: qd.i32,
+        shear_threshold: qd.f32,
+        rotation_threshold: qd.f32,
+        failure_threshold: qd.f32,
+        damage_factor: qd.f32,
+    ):
+        for i_s_ in range(n_seams):
+            self.seams_info[i_s_ + seam_start].shear_threshold = shear_threshold
+            self.seams_info[i_s_ + seam_start].rotation_threshold = rotation_threshold
+            self.seams_info[i_s_ + seam_start].failure_threshold = failure_threshold
+            self.seams_info[i_s_ + seam_start].damage_factor = damage_factor
+
+    @qd.func
+    def _func_relative_cluster_rotation(self, i_p, j_p, i_b):
+        """Rotation angle between independently fitted fragments before welded projection.
+
+        Each fracturable fragment owns one cluster. Independent fits retain the angular
+        load residual even when the fragments subsequently share a connected-group transform.
+        """
+        i_c_i = self.particle_cluster_ids[self.particle_cluster_ptr[i_p].member_start]
+        i_c_j = self.particle_cluster_ids[self.particle_cluster_ptr[j_p].member_start]
+        R_rel = self.clusters_state[i_c_i, i_b].rot.transpose() @ self.clusters_state[i_c_j, i_b].rot
+        # vee(R - R^T) has norm 2 sin(angle) and trace(R) - 1 = 2 cos(angle) for a pure rotation
+        skew_norm = qd.sqrt(
+            (R_rel[2, 1] - R_rel[1, 2]) ** 2 + (R_rel[0, 2] - R_rel[2, 0]) ** 2 + (R_rel[1, 0] - R_rel[0, 1]) ** 2
+        )
+        return qd.atan2(skew_norm, R_rel.trace() - 1.0)
+
+    @qd.kernel
+    def _kernel_fracture_bonds(self, f: qd.i32):
+        # runs before the constraint projection, so the strain measures the deformation left by the
+        # previous substep's contacts instead of an already-healed configuration
+        # Fit each fragment independently before healing any contact/prediction
+        # residual. Shared weld rotations must not disable angular failure.
+        func_compute_cohesive_reaction(self)
+        func_fit_pbd_clusters(self, welded=False, render_only=False)
+        for i_l, i_b in qd.ndrange(self._n_bonds, self._B):
+            if self.bonds_state[i_l, i_b].alive:
+                i_p = self.bonds_info[i_l].i_p
+                j_p = self.bonds_info[i_l].j_p
+                seam = self.bonds_info[i_l].seam
+                rest = self.bonds_info[i_l].rest
+                dist = (self.particles[i_p, i_b].pos - self.particles[j_p, i_b].pos).norm()
+                stretch = qd.abs(dist - rest) / rest / self.bonds_info[i_l].threshold
+                if stretch > 1.0 and self.seams_info[seam].failure_threshold <= 0.0:
+                    self.bonds_state[i_l, i_b].alive = False
+                    self.is_render_dirty[i_b] = True
+                    qd.atomic_or(self.cluster_roots_dirty[i_b], 1)
+                    self.cohesive.rebuild[i_b] = True
+                    qd.atomic_sub(self.seams_state[seam, i_b].alive_count, 1)
+                else:
+                    # Keep all overload samples until cohesive seam failure; removing
+                    # the stretched sample first would erase its share of accumulated load.
+                    seam_info = self.seams_info[seam]
+                    overload = qd.max(stretch, self.cohesive.overload[i_l, i_b])
+                    if seam_info.shear_threshold > 0.0:
+                        # the bond offset pulled back through fragment i's fit and differenced against
+                        # the rest offset: whole-body rigid motion cancels because the fit undoes the
+                        # common rotation, the axial component is stretch (distance threshold), and the
+                        # perpendicular remainder is tangential slip
+                        i_c_i = self.particle_cluster_ids[self.particle_cluster_ptr[i_p].member_start]
+                        rest_offset = self.particles_solid_rest[i_p, i_b] - self.particles_solid_rest[j_p, i_b]
+                        axis = rest_offset / rest
+                        local_offset = (
+                            self.clusters_state[i_c_i, i_b].rot.transpose()
+                            @ (self.particles[i_p, i_b].pos - self.particles[j_p, i_b].pos)
+                            - rest_offset
+                        )
+                        slip = (local_offset - axis * axis.dot(local_offset)).norm()
+                        overload = qd.max(overload, slip / rest / seam_info.shear_threshold)
+                    if seam_info.rotation_threshold > 0.0:
+                        overload = qd.max(
+                            overload,
+                            self._func_relative_cluster_rotation(i_p, j_p, i_b) / seam_info.rotation_threshold,
+                        )
+                    if overload >= 1.0:
+                        qd.atomic_add(self.seams_state[seam, i_b].overload_count, 1)
+
+        # fold the overloaded share of the still-alive bonds into the seam damage, then decide death:
+        # a seam dies atomically when its accumulated damage reaches the failure threshold or its last
+        # bond broke; the bond pass below then kills every remaining bond of the seam at once. The
+        # damage factor (1.0 for the legacy contract, substep_dt / tau_damage for the time contract)
+        # scales the increment, so both contracts share this path.
+        for i_s, i_b in qd.ndrange(self._n_seams, self._B):
+            if self.seams_state[i_s, i_b].overload_count > 0:
+                if self.seams_state[i_s, i_b].alive_count > 0:
+                    self.seams_state[i_s, i_b].damage += (
+                        qd.cast(
+                            self.seams_state[i_s, i_b].overload_count, gs.qd_float
+                        )
+                        / qd.cast(self.seams_state[i_s, i_b].alive_count, gs.qd_float)
+                        * self.seams_info[i_s].damage_factor
+                    )
+                self.seams_state[i_s, i_b].overload_count = 0
+            failure_threshold = self.seams_info[i_s].failure_threshold
+            is_overloaded = failure_threshold > 0.0 and self.seams_state[i_s, i_b].damage >= failure_threshold
+            if self.seams_state[i_s, i_b].alive_count == 0 or is_overloaded:
+                self.seams_state[i_s, i_b].is_dead = True
+                self.is_render_dirty[i_b] = True
+
+        for i_l, i_b in qd.ndrange(self._n_bonds, self._B):
+            if self.bonds_state[i_l, i_b].alive and self.seams_state[self.bonds_info[i_l].seam, i_b].is_dead:
+                self.bonds_state[i_l, i_b].alive = False
+                self.is_render_dirty[i_b] = True
+                qd.atomic_or(self.cluster_roots_dirty[i_b], 1)
+                self.cohesive.rebuild[i_b] = True
+                qd.atomic_sub(self.seams_state[self.bonds_info[i_l].seam, i_b].alive_count, 1)
+
+    @qd.kernel
+    def _kernel_update_plasticity(self, f: qd.i32):
+        if qd.static(self._n_clusters > 0):
+            for i_b in range(self._B):
+                self.is_render_dirty[i_b] = True
+        # runs before the shape-matching projection, so the rigid fit measures the deformation left by the
+        # previous substep's contacts instead of an already-healed configuration
+        for i_c, i_b in qd.ndrange(self._n_clusters, self._B):
+            # rate contract clusters (plastic_flow_rate > 0) and legacy clusters (plastic_creep > 0)
+            # can coexist; the trigger is shared
+            flow_rate = self.clusters_info[i_c].plastic_flow_rate
+            creep = self.clusters_info[i_c].plastic_creep
+            is_plastic = creep > 0.0 or flow_rate > 0.0
+            cm, rest_cm64, R = self._func_cluster_rigid_fit(i_c, i_b)
+            cm = cm.cast(gs.qd_float)
+            member_start = self.clusters_info[i_c].member_start
+            member_count = self.clusters_info[i_c].member_count
+            rest_cm = rest_cm64.cast(gs.qd_float)
+
+            max_dev = gs.qd_float(0.0)
+            for i_m in range(member_start, member_start + member_count):
+                i_p = self.cluster_member_particles[i_m]
+                goal = R @ (self.particles_solid_rest[i_p, i_b] - rest_cm) + cm
+                dev = (self.particles[i_p, i_b].pos - goal).norm()
+                max_dev = qd.max(max_dev, dev)
+
+            if is_plastic and max_dev > self.clusters_info[i_c].yield_threshold:
+                # accumulate the cluster's back-transformed desired rest positions per member; the
+                # particle pass below blends them into one shared rest position, so overlapping
+                # clusters never pull toward conflicting rest shapes. The rate contract weighs each
+                # membership by its normalized cluster share, so overlapping coverage cannot multiply
+                # the flow speed, and only over-yield clusters contribute to the update.
+                for i_m in range(member_start, member_start + member_count):
+                    i_p = self.cluster_member_particles[i_m]
+                    q_hat = R.transpose() @ (self.particles[i_p, i_b].pos - cm) + rest_cm
+                    if flow_rate > 0.0:
+                        weighted = flow_rate / qd.cast(self.particle_cluster_ptr[i_p].member_count, gs.qd_float)
+                        self.plastic_rate_num[i_p, i_b] += weighted * q_hat
+                        self.plastic_rate_den[i_p, i_b] += weighted
+                    else:
+                        self.plastic_q_sum[i_p, i_b] += creep * q_hat
+                        self.plastic_w_sum[i_p, i_b] += creep
+                    # every cluster owning this member must rebuild its rest centroid afterwards
+                    for i_k in range(
+                        self.particle_cluster_ptr[i_p].member_start,
+                        self.particle_cluster_ptr[i_p].member_start + self.particle_cluster_ptr[i_p].member_count,
+                    ):
+                        self.clusters_state[self.particle_cluster_ids[i_k], i_b].is_rest_dirty = True
+
+        for i_p, i_b in qd.ndrange(self._n_particles, self._B):
+            if self.particles_info[i_p].material_type == self.MATERIAL.SOLID:
+                rate = self.plastic_rate_den[i_p, i_b]
+                if rate > 0.0:
+                    blend = 1.0 - qd.exp(-rate * self._substep_dt)
+                    self.particles_solid_rest[i_p, i_b] += blend * (
+                        self.plastic_rate_num[i_p, i_b] / rate - self.particles_solid_rest[i_p, i_b]
+                    )
+                    self.plastic_rate_num[i_p, i_b] = qd.Vector.zero(gs.qd_float, 3)
+                    self.plastic_rate_den[i_p, i_b] = 0.0
+                w_sum = self.plastic_w_sum[i_p, i_b]
+                if w_sum > 0.0:
+                    self.particles_solid_rest[i_p, i_b] += qd.min(w_sum, 1.0) * (
+                        self.plastic_q_sum[i_p, i_b] / w_sum - self.particles_solid_rest[i_p, i_b]
+                    )
+                    self.plastic_q_sum[i_p, i_b] = qd.Vector.zero(gs.qd_float, 3)
+                    self.plastic_w_sum[i_p, i_b] = 0.0
+
+        # rebuild the rest centroid of clusters whose members' rest positions crept (f64 sums; see
+        # _func_cluster_rigid_fit for why the centroid cannot be accumulated in f32)
+        for i_c, i_b in qd.ndrange(self._n_clusters, self._B):
+            if self.clusters_state[i_c, i_b].is_rest_dirty:
+                self.clusters_state[i_c, i_b].is_rest_dirty = False
+                member_start = self.clusters_info[i_c].member_start
+                member_count = self.clusters_info[i_c].member_count
+
+                rest_cm64 = qd.Vector.zero(qd.f64, 3)
+                mass_sum64 = qd.f64(0.0)
+                for i_m in range(member_start, member_start + member_count):
+                    i_p = self.cluster_member_particles[i_m]
+                    mass64 = qd.f64(self.particles_info[i_p].mass)
+                    rest_cm64 += mass64 * self.particles_solid_rest[i_p, i_b].cast(qd.f64)
+                    mass_sum64 += mass64
+                self.clusters_rest[i_c, i_b].cm = (rest_cm64 / mass_sum64).cast(gs.qd_float)
+
+    @qd.func
     def _func_solve_collision(self, i, j, i_b):
         """j -> i"""
 
@@ -962,7 +2048,26 @@ class PBDSolver(Solver):
             self.particles_info_reordered[i, i_b].pos_rest - self.particles_info_reordered[j, i_b].pos_rest
         ).norm(gs.EPS)
         target_dist = self._particle_size  # target particle distance is 2 * particle radius, i.e. particle_size
-        if cur_dist < target_dist and rest_dist > target_dist:
+
+        # Solid particles in one welded connected cluster share a rigid fit.
+        # Only separated components may collide, including after seam failure.
+        is_separated = rest_dist > target_dist
+        if (
+            self.particles_info_reordered[i, i_b].material_type == self.MATERIAL.SOLID
+            and self.particles_info_reordered[j, i_b].material_type == self.MATERIAL.SOLID
+        ):
+            is_separated = (
+                self.particles_info_reordered[i, i_b].fragment != self.particles_info_reordered[j, i_b].fragment
+            )
+            if is_separated:
+                orig_i = self.particles_ng_reordered[i, i_b].original_idx
+                orig_j = self.particles_ng_reordered[j, i_b].original_idx
+                if qd.static(self._n_bonds > 0):
+                    i_c = self.particle_cluster_ids[self.particle_cluster_ptr[orig_i].member_start]
+                    j_c = self.particle_cluster_ids[self.particle_cluster_ptr[orig_j].member_start]
+                    is_separated = self.cluster_roots[i_c, i_b] != self.cluster_roots[j_c, i_b]
+
+        if cur_dist < target_dist and is_separated:
             wi = self.particles_reordered[i, i_b].free / self.particles_info_reordered[i, i_b].mass
             wj = self.particles_reordered[j, i_b].free / self.particles_info_reordered[j, i_b].mass
             n = (self.particles_reordered[i, i_b].pos - self.particles_reordered[j, i_b].pos) / cur_dist
@@ -1213,7 +2318,10 @@ class PBDSolver(Solver):
     @qd.kernel
     def _kernel_solve_collision(self, f: qd.i32):
         for i_p, i_b in qd.ndrange(self._n_particles, self._B):
-            if self.particles_info_reordered[i_p, i_b].material_type != self.MATERIAL.PARTICLE:
+            if (
+                self.particles_info_reordered[i_p, i_b].material_type != self.MATERIAL.PARTICLE
+                and not self.particles_ng_reordered[i_p, i_b].is_native_owned
+            ):
                 if qd.static(self._has_boundary_balls):
                     # The hash is built before density/viscosity projection.  Querying boundary
                     # balls from the projected end position can therefore miss a wall completely
@@ -1367,6 +2475,7 @@ class PBDSolver(Solver):
                         ):
                             if (
                                 i_p != j
+                                and not self.particles_ng_reordered[j, i_b].is_native_owned
                                 and (self.particles_reordered[i_p, i_b].free or self.particles_reordered[j, i_b].free)
                                 and not (
                                     self.particles_info_reordered[i_p, i_b].material_type == self.MATERIAL.LIQUID
@@ -1378,8 +2487,13 @@ class PBDSolver(Solver):
         for i_p, i_b in qd.ndrange(self._n_particles, self._B):
             if (
                 self.particles_reordered[i_p, i_b].free
+                and not self.particles_ng_reordered[i_p, i_b].is_native_owned
                 and self.particles_info_reordered[i_p, i_b].material_type != self.MATERIAL.PARTICLE
             ):
+                if self.particles_info_reordered[i_p, i_b].material_type == self.MATERIAL.SOLID:
+                    self.particles_reordered[i_p, i_b].vel += (
+                        self.particles_reordered[i_p, i_b].dpos / self._substep_dt
+                    )
                 self.particles_reordered[i_p, i_b].pos = (
                     self.particles_reordered[i_p, i_b].pos + self.particles_reordered[i_p, i_b].dpos
                 )
@@ -1387,6 +2501,9 @@ class PBDSolver(Solver):
 
     @qd.kernel
     def _kernel_solve_boundary_collision(self, f: qd.i32):
+        if qd.static(self._n_clusters > 0):
+            for i_b in range(self._B):
+                self.is_render_dirty[i_b] = True
         for i_p, i_b in qd.ndrange(self._n_particles, self._B):
             # boundary is enforced regardless of whether free
             # pre-declare before the branches: qd's AST resolver cannot see names that are
@@ -1421,10 +2538,134 @@ class PBDSolver(Solver):
                 corrected_pos, corrected_vel = self.boundary_cup.impose_pos_vel(corrected_pos, corrected_vel)
             if qd.static(self._has_boundary_plane):
                 corrected_pos, corrected_vel = self.boundary3.impose_pos_vel(corrected_pos, corrected_vel)
-            # boundary balls ARE the boundary: no analytic clamp, no velocity writeback
-            if not self.particles_ng[i_p, i_b].is_boundary:
+            # boundary balls ARE the boundary: no analytic clamp, no velocity writeback; bridge-owned
+            # particles keep their derived pose untouched (their fragment collides natively)
+            if not self.particles_ng[i_p, i_b].is_boundary and not self.particles_ng[i_p, i_b].is_native_owned:
+                if self.particles[i_p, i_b].free and self.particles_info[i_p].material_type == self.MATERIAL.SOLID:
+                    friction_pos = self._func_solve_boundary_friction(
+                        self.particles[i_p, i_b].pos,
+                        corrected_pos,
+                        self.particles[i_p, i_b].ipos,
+                        self.particles_info[i_p].mu_s,
+                        self.particles_info[i_p].mu_k,
+                    )
+                    friction_shift = friction_pos - corrected_pos
+                    # the velocity folds in the tangential correction, so the next substep integrates
+                    # the damped motion instead of re-advancing the pre-friction velocity
+                    corrected_vel = corrected_vel + friction_shift / self._substep_dt
+                    corrected_pos = friction_pos
+                    if qd.static(self._is_cube_boundary):
+                        if self._func_particle_has_plastic_cluster(i_p, i_b):
+                            corrected_vel = self._func_zero_boundary_separation_velocity(corrected_pos, corrected_vel)
+                    if qd.static(self._has_plastic_contact_hold):
+                        self._func_accumulate_plastic_contact(i_p, i_b, corrected_pos, corrected_vel)
                 self.particles[i_p, i_b].pos = corrected_pos
                 self.particles[i_p, i_b].vel = corrected_vel
+
+    @qd.func
+    def _func_solve_boundary_friction(self, pos_pre, pos_clamped, ipos, mu_s, mu_k):
+        """Tangential Coulomb friction for a solid particle against an analytic boundary projection.
+
+        Applies the unified particle physics contact friction (Macklin et al. 2014, eq. 23/24), the
+        same model as `_func_apply_ball_friction`: the tangential displacement accumulated since the
+        substep start is canceled when it fits inside the static cone (`|dpos_tan| < mu_s * d`) and
+        otherwise scaled by `mu_k * d / |dpos_tan|`, with `d` the normal correction the projection
+        just applied. The boundary is static, so the particle carries the full correction. Returns
+        the corrected position.
+        """
+        pos_frictioned = pos_clamped
+        correction = pos_clamped - pos_pre
+        d = correction.norm()
+        if d > gs.EPS:
+            n = correction / d
+            dpos_tan = pos_clamped - ipos
+            dpos_tan = -(dpos_tan - n * n.dot(dpos_tan))
+            dpos_tan_norm = dpos_tan.norm()
+            # the stick test and the slip scale both divide by the tangential displacement, which is
+            # far below sqrt(f32 epsilon); a floored norm there crushes the correction, so the guard
+            # is an explicit tiny constant instead of the squared-epsilon `.norm(eps)` convention
+            if dpos_tan_norm < mu_s * d:
+                pos_frictioned = pos_clamped + dpos_tan
+            else:
+                pos_frictioned = pos_clamped + dpos_tan * qd.min(1.0, mu_k * d / qd.max(dpos_tan_norm, 1e-30))
+        return pos_frictioned
+
+    @qd.func
+    def _func_particle_has_plastic_cluster(self, i_p: qd.i32, i_b: qd.i32):
+        has_plastic = False
+        for i_k in range(
+            self.particle_cluster_ptr[i_p].member_start,
+            self.particle_cluster_ptr[i_p].member_start + self.particle_cluster_ptr[i_p].member_count,
+        ):
+            i_c = self.particle_cluster_ids[i_k]
+            if self.clusters_info[i_c].plastic_creep > 0.0 or self.clusters_info[i_c].plastic_flow_rate > 0.0:
+                has_plastic = True
+        return has_plastic
+
+    @qd.func
+    def _func_zero_boundary_separation_velocity(self, pos, vel):
+        """Perfectly-plastic contact against the analytic domain boundary for plastic solid particles.
+
+        A plastic impact must deposit its compression into the rest shape instead of rebounding,
+        so while a member sits within one particle radius of a domain face, the face-normal
+        velocity component is zeroed regardless of sign. Without the hold, the shape-matching
+        pass re-adds separation velocity inside the contact every substep and launches the body
+        whose deformation the plasticity just locked in; the approach side is already covered by
+        the boundary projection itself. Tangential velocity (sliding, tumbling) is untouched.
+        """
+        for i in qd.static(range(3)):
+            if (
+                pos[i] <= self.boundary.lower_qd[i] + self.particle_radius
+                or pos[i] >= self.boundary.upper_qd[i] - self.particle_radius
+            ):
+                vel[i] = 0.0
+        return vel
+
+    @qd.func
+    def _func_accumulate_plastic_contact(self, i_p, i_b, pos, vel):
+        """Body-level bookkeeping for the perfectly-plastic contact hold (see the apply kernel).
+
+        Every plastic solid particle contributes its mass-weighted vertical velocity, and a
+        particle inside the boundary contact band marks its entity as in contact. The
+        shape-matching pass re-adds separation velocity to positions and velocities every
+        substep, so a per-particle velocity hold alone cannot keep a plastically compressed body
+        down; the entity-level vertical-momentum projection can.
+        """
+        is_in_band = False
+        for i in qd.static(range(3)):
+            if (
+                pos[i] <= self.boundary.lower_qd[i] + self.particle_radius
+                or pos[i] >= self.boundary.upper_qd[i] - self.particle_radius
+            ):
+                is_in_band = True
+        for i_e in range(self._n_plastic_entities):
+            if self.plastic_entity_start[i_e] <= i_p and i_p < self.plastic_entity_end[i_e]:
+                qd.atomic_add(self.plastic_contact_sum_m[i_e, i_b], self.particles_info[i_p].mass)
+                qd.atomic_add(self.plastic_contact_sum_mvz[i_e, i_b], self.particles_info[i_p].mass * vel[2])
+                if is_in_band:
+                    qd.atomic_or(self.plastic_contact_has[i_e, i_b], 1)
+
+    @qd.kernel
+    def _kernel_apply_plastic_contact_hold(self):
+        """Perfectly-plastic contact at body level: while a plastic solid entity touches the boundary,
+        its mass-weighted vertical (contact-normal) velocity is projected out every substep.
+
+        The shape-matching constraint transmits any member's separation velocity to the whole
+        body, so the entity, not the particle, is the unit that must be prevented from
+        rebounding. The projection removes only the shared vertical mode: internal deformation
+        modes survive and are absorbed by the plastic flow, and horizontal motion (sliding,
+        tumbling about the contact) is untouched. Sums are reset here, so no separate reset path
+        is needed.
+        """
+        for i_e, i_b in qd.ndrange(self._n_plastic_entities, self._B):
+            if self.plastic_contact_has[i_e, i_b] == 1:
+                vz_body = self.plastic_contact_sum_mvz[i_e, i_b] / qd.max(self.plastic_contact_sum_m[i_e, i_b], 1e-12)
+                for i_p in range(self.plastic_entity_start[i_e], self.plastic_entity_end[i_e]):
+                    if self.particles[i_p, i_b].free and self.particles_info[i_p].material_type == self.MATERIAL.SOLID:
+                        self.particles[i_p, i_b].vel[2] -= vz_body
+            self.plastic_contact_has[i_e, i_b] = 0
+            self.plastic_contact_sum_m[i_e, i_b] = 0.0
+            self.plastic_contact_sum_mvz[i_e, i_b] = 0.0
 
     @qd.func
     def _adh_take(self, ok, C, n, ok_b, C_b, n_b):
@@ -1828,16 +3069,27 @@ class PBDSolver(Solver):
     @qd.kernel
     def _kernel_compute_velocity(self, f: qd.i32):
         for i_p, i_b in qd.ndrange(self._n_particles, self._B):
-            self.particles_reordered[i_p, i_b].vel = (
-                self.particles_reordered[i_p, i_b].pos - self.particles_reordered[i_p, i_b].ipos
-            ) / self._substep_dt
+            if not (
+                self.particles_info_reordered[i_p, i_b].material_type == self.MATERIAL.SOLID
+                and self.particles_reordered[i_p, i_b].free
+                and not self.particles_ng_reordered[i_p, i_b].is_boundary
+            ):
+                self.particles_reordered[i_p, i_b].vel = (
+                    self.particles_reordered[i_p, i_b].pos - self.particles_reordered[i_p, i_b].ipos
+                ) / self._substep_dt
 
     @qd.kernel
     def _kernel_copy_from_reordered(self, f: qd.i32):
+        if qd.static(self._n_clusters > 0):
+            for i_b in range(self._B):
+                self.is_render_dirty[i_b] = True
         for i_p, i_b in qd.ndrange(self._n_particles, self._B):
             if self.particles_ng[i_p, i_b].active:
                 reordered_idx = self.particles_ng[i_p, i_b].reordered_idx
                 self.particles[i_p, i_b] = self.particles_reordered[reordered_idx, i_b]
+                func_validate_pbd_particle(
+                    i_b, self.particles[i_p, i_b].pos, self.particles[i_p, i_b].vel, self._errno
+                )
 
     # ------------------------------------------------------------------------------------
     # ------------------------------------ stepping --------------------------------------
@@ -1849,6 +3101,15 @@ class PBDSolver(Solver):
 
     def process_input_grad(self):
         pass
+
+    def check_errno(self):
+        errno = np.bitwise_or.reduce(qd_to_numpy(self._errno, transpose=True))
+        if errno & ErrorCode.INVALID_PBD_VELOCITY_PROJECTION:
+            gs.raise_exception("PBD rigid velocity projection has invalid inertia or momentum. Simulation halted.")
+        if errno & ErrorCode.INVALID_PBD_COHESIVE_REACTION:
+            gs.raise_exception("PBD cohesive reaction graph has invalid factors, residual or balance. Simulation halted.")
+        if errno & ErrorCode.INVALID_PBD_STATE:
+            gs.raise_exception("PBD particle position or velocity is non-finite. Simulation halted.")
 
     def substep_pre_coupling(self, f):
         if self.is_active:
@@ -1872,6 +3133,15 @@ class PBDSolver(Solver):
             if self._n_elems > 0:
                 self._kernel_solve_volume(f)
 
+            if self._n_bonds > 0:
+                self._kernel_fracture_bonds(f)
+
+            if self._has_plasticity:
+                self._kernel_update_plasticity(f)
+
+            if self._n_clusters > 0:
+                self._kernel_solve_shape_matching(f)
+
             # perform spatial hashing
             self._kernel_reorder_particles(f)
 
@@ -1881,7 +3151,7 @@ class PBDSolver(Solver):
                 self._st_topo_counter += 1
 
             # spatial constraints
-            if self._n_particles > 0:
+            if self._n_fluid_particles > 0:
                 self._kernel_solve_density(f)
                 self._kernel_solve_viscosity(f)
 
@@ -1905,6 +3175,8 @@ class PBDSolver(Solver):
 
             # boundary collision
             self._kernel_solve_boundary_collision(f)
+            if self._has_plastic_contact_hold:
+                self._kernel_apply_plastic_contact_hold()
 
             if self._velocity_damping < 1.0:
                 kernel_apply_velocity_damping(f, self)
@@ -1936,6 +3208,7 @@ class PBDSolver(Solver):
     def load_ckpt(self, ckpt_name):
         pass
 
+    @mutates(StateChange.GEOMETRY, StateChange.DYNAMICS)
     def set_state(self, f, state, envs_idx=None):
         if self.is_active:
             self._kernel_set_state(
@@ -1947,7 +3220,18 @@ class PBDSolver(Solver):
                 state.c,
                 state.boundary_group,
                 state.active,
+                state.solid_rest,
+                state.cluster_rest_cm,
+                state.bonds_alive,
+                state.seams_alive_count,
+                state.seams_damage,
+                state.seams_is_dead,
             )
+            if self._n_clusters > 0:
+                # the restored trajectory's last fit is meaningless for the new positions; the bond
+                # fracture pass reads the cluster rotations before shape matching refits them, so a
+                # stale fit would measure a phantom relative rotation and kill restored seams
+                self._kernel_refit_clusters()
 
     @qd.kernel
     def _kernel_set_state(
@@ -1960,22 +3244,69 @@ class PBDSolver(Solver):
         c: qd.types.ndarray(),
         boundary_group: qd.types.ndarray(),
         active: qd.types.ndarray(),
+        solid_rest: qd.types.ndarray(),  # shape [B, _n_entity_particles, 3]
+        cluster_rest_cm: qd.types.ndarray(),  # shape [B, _n_clusters, 3]
+        bonds_alive: qd.types.ndarray(),  # shape [B, _n_bonds]
+        seams_alive_count: qd.types.ndarray(),  # shape [B, _n_seams]
+        seams_damage: qd.types.ndarray(),  # shape [B, _n_seams]
+        seams_is_dead: qd.types.ndarray(),  # shape [B, _n_seams]
     ):
         # Boundary balls are solver-owned geometry, never restored through a Scene state.
+        for i_b_local in range(envs_idx.shape[0]):
+            self._errno[envs_idx[i_b_local]] = 0
+            if qd.static(self._n_clusters > 0):
+                self.is_render_dirty[envs_idx[i_b_local]] = True
+            if qd.static(self._n_bonds > 0):
+                self.cluster_roots_dirty[envs_idx[i_b_local]] = True
+                self.cohesive.rebuild[envs_idx[i_b_local]] = True
         for i_p, i_b_local in qd.ndrange(self._n_entity_particles, envs_idx.shape[0]):
             i_b = envs_idx[i_b_local]
             for j in qd.static(range(3)):
                 self.particles[i_p, i_b].pos[j] = pos[i_b, i_p, j]
                 self.particles[i_p, i_b].vel[j] = vel[i_b, i_p, j]
+                self.particles_solid_rest[i_p, i_b][j] = solid_rest[i_b, i_p, j]
             self.particles[i_p, i_b].free = free[i_b, i_p]
             self.particles[i_p, i_b].c = c[i_b, i_p]
             self.particles_ng[i_p, i_b].boundary_group = boundary_group[i_b, i_p]
             self.particles_ng[i_p, i_b].active = active[i_b, i_p]
+            if self.particles_ng[i_p, i_b].active:
+                func_validate_pbd_particle(
+                    i_b, self.particles[i_p, i_b].pos, self.particles[i_p, i_b].vel, self._errno
+                )
+
+        for i_c, i_b_local in qd.ndrange(self._n_clusters, envs_idx.shape[0]):
+            i_b = envs_idx[i_b_local]
+            for j in qd.static(range(3)):
+                self.clusters_rest[i_c, i_b].cm[j] = cluster_rest_cm[i_b, i_c, j]
+
+        for i_l, i_b_local in qd.ndrange(self._n_bonds, envs_idx.shape[0]):
+            i_b = envs_idx[i_b_local]
+            self.bonds_state[i_l, i_b].alive = bonds_alive[i_b, i_l]
+
+        for i_s, i_b_local in qd.ndrange(self._n_seams, envs_idx.shape[0]):
+            i_b = envs_idx[i_b_local]
+            self.seams_state[i_s, i_b].alive_count = seams_alive_count[i_b, i_s]
+            self.seams_state[i_s, i_b].damage = seams_damage[i_b, i_s]
+            self.seams_state[i_s, i_b].is_dead = seams_is_dead[i_b, i_s]
 
     def get_state(self, f):
         if self.is_active:
             state = PBDFluidSolverState(self.scene)
-            self._kernel_get_state(f, state.pos, state.vel, state.free, state.c, state.boundary_group, state.active)
+            self._kernel_get_state(
+                f,
+                state.pos,
+                state.vel,
+                state.free,
+                state.c,
+                state.boundary_group,
+                state.active,
+                state.solid_rest,
+                state.cluster_rest_cm,
+                state.bonds_alive,
+                state.seams_alive_count,
+                state.seams_damage,
+                state.seams_is_dead,
+            )
         else:
             state = None
         return state
@@ -2008,18 +3339,45 @@ class PBDSolver(Solver):
         c: qd.types.ndarray(),
         boundary_group: qd.types.ndarray(),
         active: qd.types.ndarray(),
+        solid_rest: qd.types.ndarray(),  # shape [B, _n_entity_particles, 3]
+        cluster_rest_cm: qd.types.ndarray(),  # shape [B, _n_clusters, 3]
+        bonds_alive: qd.types.ndarray(),  # shape [B, _n_bonds]
+        seams_alive_count: qd.types.ndarray(),  # shape [B, _n_seams]
+        seams_damage: qd.types.ndarray(),  # shape [B, _n_seams]
+        seams_is_dead: qd.types.ndarray(),  # shape [B, _n_seams]
     ):
         for i_p, i_b in qd.ndrange(self._n_entity_particles, self._B):
             for j in qd.static(range(3)):
                 pos[i_b, i_p, j] = self.particles[i_p, i_b].pos[j]
                 vel[i_b, i_p, j] = self.particles[i_p, i_b].vel[j]
+                solid_rest[i_b, i_p, j] = self.particles_solid_rest[i_p, i_b][j]
             free[i_b, i_p] = qd.cast(self.particles[i_p, i_b].free, gs.qd_bool)
             c[i_b, i_p] = self.particles[i_p, i_b].c
             boundary_group[i_b, i_p] = self.particles_ng[i_p, i_b].boundary_group
             active[i_b, i_p] = self.particles_ng[i_p, i_b].active
 
+        for i_c, i_b in qd.ndrange(self._n_clusters, self._B):
+            for j in qd.static(range(3)):
+                cluster_rest_cm[i_b, i_c, j] = self.clusters_rest[i_c, i_b].cm[j]
+
+        for i_l, i_b in qd.ndrange(self._n_bonds, self._B):
+            bonds_alive[i_b, i_l] = self.bonds_state[i_l, i_b].alive
+
+        for i_s, i_b in qd.ndrange(self._n_seams, self._B):
+            seams_alive_count[i_b, i_s] = self.seams_state[i_s, i_b].alive_count
+            seams_damage[i_b, i_s] = self.seams_state[i_s, i_b].damage
+            seams_is_dead[i_b, i_s] = self.seams_state[i_s, i_b].is_dead
+
     def update_render_fields(self):
+        # the cached cluster transforms lag the solver state: set_particles_pos, set_state, and the
+        # corrections after the last shape-matching iteration all move particles without refitting
+        if self._n_clusters > 0:
+            self._kernel_refit_clusters()
         self._kernel_update_render_fields(self.sim.cur_substep_local)
+
+    @qd.kernel
+    def _kernel_refit_clusters(self):
+        func_fit_pbd_clusters(self, welded=True, render_only=True)
 
     @qd.kernel
     def _kernel_update_render_fields(self, f: qd.i32):
@@ -2037,16 +3395,65 @@ class PBDSolver(Solver):
 
         for i_v, i_b in qd.ndrange(self._n_vverts, self._B):
             vvert_pos = qd.Vector.zero(gs.qd_float, 3)
-            for j in range(self._n_vvert_supports):
-                vvert_pos += (
-                    self.particles[self.vverts_info.support_idxs[i_v][j], i_b].pos
-                    * self.vverts_info.support_weights[i_v][j]
-                )
+            if self.vverts_info[i_v].is_solid:
+                vvert_pos = self.vverts_render[i_v, i_b].pos
+                if qd.static(self._n_clusters > 0):
+                    if self.is_render_dirty[i_b]:
+                        i_c = self.vverts_solid_cluster[i_v]
+                        # Plastic bodies bend neighboring cluster fits apart, so rigid cluster patches
+                        # tear the render mesh into conflicting transforms (flipped, speckled faces);
+                        # their surface follows the deformed particles through support skinning
+                        # instead. Fracturable solids keep the patch path: fragments are rigid and
+                        # must stay unsmoothed across dead seams.
+                        is_plastic_surface = (
+                            self.clusters_info[i_c].plastic_creep > 0.0
+                            or self.clusters_info[i_c].plastic_flow_rate > 0.0
+                        )
+                        if is_plastic_surface:
+                            # the stored position must not leak into the sum: skinning replaces, never
+                            # accumulates onto, the previous render position
+                            vvert_pos = qd.Vector.zero(gs.qd_float, 3)
+                            for j in range(self._n_vvert_supports):
+                                vvert_pos += (
+                                    self.particles[self.vverts_info.support_idxs[i_v][j], i_b].pos
+                                    * self.vverts_info.support_weights[i_v][j]
+                                )
+                        else:
+                            seam = self.vverts_solid_seam[i_v]
+                            is_exposed = seam < 0
+                            if seam >= 0:
+                                if self.seams_state[seam, i_b].is_dead:
+                                    i_c_i = self.seams_info[seam].i_c
+                                    i_c_j = self.seams_info[seam].j_c
+                                    is_exposed = i_c_i != i_c_j
+                                    if qd.static(self._n_bonds > 0):
+                                        is_exposed = self.cluster_roots[i_c_i, i_b] != self.cluster_roots[i_c_j, i_b]
+                            if is_exposed:
+                                # Surface faces follow their cluster; separated dead interfaces reveal both walls.
+                                vvert_pos = (
+                                    self.clusters_state[i_c, i_b].rot @ self.vverts_solid_offset[i_v]
+                                    + self.clusters_state[i_c, i_b].cm
+                                )
+                            else:
+                                # Unexposed interface: collapse onto the centroid, hiding the zero-area face.
+                                vvert_pos = self.clusters_state[i_c, i_b].cm
+            else:
+                # support-weight skinning
+                for j in range(self._n_vvert_supports):
+                    vvert_pos += (
+                        self.particles[self.vverts_info.support_idxs[i_v][j], i_b].pos
+                        * self.vverts_info.support_weights[i_v][j]
+                    )
             self.vverts_render[i_v, i_b].pos = vvert_pos
             self.vverts_render[i_v, i_b].active = self.particles_render[
                 self.vverts_info.support_idxs[i_v][0], i_b
             ].active
 
+        if qd.static(self._n_clusters > 0):
+            for i_b in range(self._B):
+                self.is_render_dirty[i_b] = False
+
+    @mutates(StateChange.GEOMETRY, StateChange.DYNAMICS)
     @qd.kernel
     def _kernel_set_particles_pos(
         self,
@@ -2057,9 +3464,12 @@ class PBDSolver(Solver):
         for i_p_, i_b_ in qd.ndrange(particles_idx.shape[1], envs_idx.shape[0]):
             i_p = particles_idx[i_b_, i_p_]
             i_b = envs_idx[i_b_]
+            if qd.static(self._n_clusters > 0):
+                self.is_render_dirty[i_b] = True
             for i in qd.static(range(3)):
                 self.particles[i_p, i_b].pos[i] = poss[i_b_, i_p_, i]
             self.particles[i_p, i_b].vel.fill(0.0)
+            func_validate_pbd_particle(i_b, self.particles[i_p, i_b].pos, self.particles[i_p, i_b].vel, self._errno)
 
     @qd.kernel
     def _kernel_get_particles_pos(
@@ -2075,6 +3485,7 @@ class PBDSolver(Solver):
             for i in qd.static(range(3)):
                 poss[i_b_, i_p_, i] = self.particles[i_p, i_b].pos[i]
 
+    @mutates(StateChange.DYNAMICS)
     @qd.kernel
     def _kernel_set_particles_vel(
         self,
@@ -2087,6 +3498,7 @@ class PBDSolver(Solver):
             i_b = envs_idx[i_b_]
             for i in qd.static(range(3)):
                 self.particles[i_p, i_b].vel[i] = vels[i_b_, i_p_, i]
+            func_validate_pbd_particle(i_b, self.particles[i_p, i_b].pos, self.particles[i_p, i_b].vel, self._errno)
 
     @gs.assert_built
     def set_animate_particles_by_link(
@@ -2113,6 +3525,7 @@ class PBDSolver(Solver):
             for i in qd.static(range(3)):
                 vels[i_b_, i_p_, i] = self.particles[i_p, i_b].vel[i]
 
+    @mutates(StateChange.GEOMETRY)
     @qd.kernel
     def _kernel_set_particles_active(
         self,
@@ -2185,6 +3598,36 @@ class PBDSolver(Solver):
         if self.is_built:
             return self._n_fluid_particles
         return sum(entity.n_fluid_particles for entity in self._entities if isinstance(entity, PBDParticleEntity))
+
+    @property
+    def n_clusters(self):
+        if self.is_built:
+            return self._n_clusters
+        return sum(entity.n_clusters for entity in self._entities if isinstance(entity, PBD3DSolidEntity))
+
+    @property
+    def n_bonds(self):
+        if self.is_built:
+            return self._n_bonds
+        return sum(entity.n_bonds for entity in self._entities if isinstance(entity, PBD3DSolidEntity))
+
+    @property
+    def n_seams(self):
+        if self.is_built:
+            return self._n_seams
+        return sum(entity.n_seams for entity in self._entities if isinstance(entity, PBD3DSolidEntity))
+
+    @property
+    def n_fragments(self):
+        if self.is_built:
+            return self._n_fragments
+        return sum(entity.n_fragments for entity in self._entities if isinstance(entity, PBD3DSolidEntity))
+
+    @property
+    def n_cluster_members(self):
+        if self.is_built:
+            return self._n_cluster_members
+        return sum(entity.n_cluster_members for entity in self._entities if isinstance(entity, PBD3DSolidEntity))
 
     @property
     def n_edges(self):
@@ -2654,3 +4097,10 @@ def kernel_solve_diffusion(f: int, solver: V_ANNOTATION):
             solver.particles_reordered[i_p, i_b].c = (
                 solver.particles_reordered[i_p, i_b].c + solver.particles_reordered[i_p, i_b].dc
             )
+
+
+
+
+
+
+

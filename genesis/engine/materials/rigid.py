@@ -98,7 +98,7 @@ class Rigid(Kinematic["RigidEntity"]):
     use_visual_raycasting: StrictBool = False
 
     rho: ValidFloat | None = None
-    friction: Annotated[ValidFloat, Field(ge=0.01, le=5.0)] | None = None
+    friction: Annotated[ValidFloat, Field(ge=0.0, le=5.0)] | None = None
     friction_torsional: Annotated[ValidFloat, Field(ge=0.0)] | None = None
     friction_rolling: Annotated[ValidFloat, Field(ge=0.0)] | None = None
     needs_coup: StrictBool = True

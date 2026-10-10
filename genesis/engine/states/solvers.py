@@ -104,6 +104,10 @@ class RigidSolverState:
         self.i_pos_shift = gs.zeros((_B, scene.sim.rigid_solver.n_links, 3), **args)
         self.mass_shift = gs.zeros((_B, scene.sim.rigid_solver.n_links), **args)
         self.friction_ratio = gs.ones((_B, scene.sim.rigid_solver.n_geoms), **args)
+        # Fragment lifecycle switches (0/1), restored bit-exactly by set_state (see is_externally_driven /
+        # is_contact_enabled in array_class.py)
+        self.links_externally_driven = gs.zeros((_B, scene.sim.rigid_solver.n_links), **args)
+        self.links_contact_enabled = gs.ones((_B, scene.sim.rigid_solver.n_links), **args)
 
     def serializable(self):
         self.scene = None
@@ -115,6 +119,8 @@ class RigidSolverState:
         self.i_pos_shift = self.i_pos_shift.detach()
         self.mass_shift = self.mass_shift.detach()
         self.friction_ratio = self.friction_ratio.detach()
+        self.links_externally_driven = self.links_externally_driven.detach()
+        self.links_contact_enabled = self.links_contact_enabled.detach()
 
     @property
     def s_global(self):
@@ -561,7 +567,11 @@ class IPBFSolverState(_ParticleFluidSolverState):
 
 
 class PBDFluidSolverState(PBDSolverState):
-    """Particle liquid state including concentrations, activation and container membership."""
+    """Particle liquid state including concentrations, activation and container membership.
+
+    The solid extensions (rest positions, cluster rest centroids, bond and seam liveness) let a Scene
+    snapshot restore fracturable / plastic bodies exactly.
+    """
 
     def __init__(self, scene):
         super().__init__(scene)
@@ -569,12 +579,25 @@ class PBDFluidSolverState(PBDSolverState):
         self._c = gs.zeros(shape, dtype=gs.tc_float, scene=scene)
         self._active = gs.zeros(shape, dtype=gs.tc_bool, scene=scene)
         self._boundary_group = gs.zeros(shape, dtype=gs.tc_int, scene=scene)
+        solver = scene.sim.pbd_solver
+        self._solid_rest = gs.zeros(self._pos.shape, dtype=gs.tc_float, scene=scene)
+        self._cluster_rest_cm = gs.zeros((shape[0], solver.n_clusters, 3), dtype=gs.tc_float, scene=scene)
+        self._bonds_alive = gs.zeros((shape[0], solver.n_bonds), dtype=gs.tc_bool, scene=scene)
+        self._seams_alive_count = gs.zeros((shape[0], solver.n_seams), dtype=gs.tc_int, scene=scene)
+        self._seams_damage = gs.zeros((shape[0], solver.n_seams), dtype=gs.tc_float, scene=scene)
+        self._seams_is_dead = gs.zeros((shape[0], solver.n_seams), dtype=gs.tc_bool, scene=scene)
 
     def serializable(self):
         super().serializable()
         self._c = self._c.detach()
         self._active = self._active.detach()
         self._boundary_group = self._boundary_group.detach()
+        self._solid_rest = self._solid_rest.detach()
+        self._cluster_rest_cm = self._cluster_rest_cm.detach()
+        self._bonds_alive = self._bonds_alive.detach()
+        self._seams_alive_count = self._seams_alive_count.detach()
+        self._seams_damage = self._seams_damage.detach()
+        self._seams_is_dead = self._seams_is_dead.detach()
 
     @property
     def c(self):
@@ -587,3 +610,27 @@ class PBDFluidSolverState(PBDSolverState):
     @property
     def boundary_group(self):
         return self._boundary_group
+
+    @property
+    def solid_rest(self):
+        return self._solid_rest
+
+    @property
+    def cluster_rest_cm(self):
+        return self._cluster_rest_cm
+
+    @property
+    def bonds_alive(self):
+        return self._bonds_alive
+
+    @property
+    def seams_alive_count(self):
+        return self._seams_alive_count
+
+    @property
+    def seams_damage(self):
+        return self._seams_damage
+
+    @property
+    def seams_is_dead(self):
+        return self._seams_is_dead

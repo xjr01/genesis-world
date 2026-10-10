@@ -420,6 +420,11 @@ class RigidSolver(KinematicSolver):
 
         super().build()
 
+        # Default lifecycle state for every link: self-driven with contacts enabled (see is_externally_driven /
+        # is_contact_enabled in array_class.py); the PBD-fragment bridge flips both per link and env.
+        self.dyn_state.links.is_externally_driven.fill(False)
+        self.dyn_state.links.is_contact_enabled.fill(True)
+
         self._init_mass_mat()
 
         self._init_vert_fields()
@@ -1861,6 +1866,8 @@ class RigidSolver(KinematicSolver):
                 state.links_quat,
                 state.mass_shift,
                 state.friction_ratio,
+                state.links_externally_driven,
+                state.links_contact_enabled,
                 self.dyn_state,
                 self.rigid_info,
                 self.rigid_config,
@@ -1900,6 +1907,8 @@ class RigidSolver(KinematicSolver):
             cfrc_ang_dst = qd_to_torch(self.dyn_state.links.cfrc_applied_ang, transpose=True, copy=False)
             mass_dst = qd_to_torch(self.dyn_state.links.mass_shift, transpose=True, copy=False)
             fric_dst = qd_to_torch(self.dyn_state.geoms.friction_ratio, transpose=True, copy=False)
+            driven_dst = qd_to_torch(self.dyn_state.links.is_externally_driven, transpose=True, copy=False)
+            contact_dst = qd_to_torch(self.dyn_state.links.is_contact_enabled, transpose=True, copy=False)
             # Setting the state is a discontinuity: wake every body in the affected envs (a body left hibernated would
             # stay frozen), restoring the flags and the compact awake lists alongside the other state buffers.
             if self._use_hibernation:
@@ -1948,6 +1957,8 @@ class RigidSolver(KinematicSolver):
                 cfrc_vel_dst.masked_fill_(envs_mask[:, None, None], 0.0)
                 cfrc_ang_dst.masked_fill_(envs_mask[:, None, None], 0.0)
                 torch.where(envs_mask[:, None], state.mass_shift, mass_dst, out=mass_dst)
+                driven_dst[envs_mask] = state.links_externally_driven[envs_mask] > 0.5
+                contact_dst[envs_mask] = state.links_contact_enabled[envs_mask] > 0.5
                 if self.n_geoms:
                     torch.where(envs_mask[:, None], state.friction_ratio, fric_dst, out=fric_dst)
                 if self._use_hibernation:
@@ -1978,6 +1989,8 @@ class RigidSolver(KinematicSolver):
                 cfrc_vel_dst[envs_idx] = 0.0
                 cfrc_ang_dst[envs_idx] = 0.0
                 mass_dst[envs_idx] = state.mass_shift[envs_idx]
+                driven_dst[envs_idx] = state.links_externally_driven[envs_idx] > 0.5
+                contact_dst[envs_idx] = state.links_contact_enabled[envs_idx] > 0.5
                 if self.n_geoms:
                     fric_dst[envs_idx] = state.friction_ratio[envs_idx]
                 if self._use_hibernation:
@@ -2040,6 +2053,11 @@ class RigidSolver(KinematicSolver):
         for entity in self.entities:
             if isinstance(entity, DroneEntity):
                 entity._prev_prop_t = -1
+
+        # The restored lifecycle switches re-own the shadow fragments: the bridge rebuilds its ownership, clears
+        # pending handoffs and rewrites the particle ownership flags for the restored environments.
+        if self.sim._pbd_rigid_fragment_bridge is not None:
+            self.sim._pbd_rigid_fragment_bridge.restore_lifecycle_from_links(envs_idx)
 
     def process_input(self, in_backward=False):
         for entity in self._entities:
