@@ -55,7 +55,8 @@ VIDEO_PATH = os.path.join(EXPERIMENTS_DIR, "videos", f"phase9_deepbed_full{TAG}.
 
 DT = 1.0 / 60.0
 SC = 0.5
-PARTICLE_RADIUS = 3.125e-3 * SC
+PARTICLE_RADIUS = 3.125e-3  # coarse profile (3.125 mm, matches the run); SC still sizes only the
+                            # walls / shovel geometry, so it stays 0.5
 BOX_LOWER = (-0.35 * SC, -0.30 * SC, 0.0)
 BOX_UPPER = (0.35 * SC, 0.30 * SC, 0.80 * SC)
 WALL_THICK = 0.01 * SC
@@ -281,8 +282,9 @@ def main():
             upper_bound=BOX_UPPER,
         ),
         flip_options=gs.options.FLIPOptions(
-            grid_res=128,
-            viscosity_coeff=0.01,
+            grid_res=64,  # must mirror the run: FLIP seeds ~1 particle per grid sub-cell, so a
+                          # mismatch changes n_water and trips the assert below
+            viscosity_coeff=4.0,
             lower_bound=BOX_LOWER,
             upper_bound=BOX_UPPER,
         ),
@@ -341,10 +343,10 @@ def main():
         dem_ents.append(ghost)
 
     water = scene.add_entity(
-        # droplet radius mirrors phase9_deepbed_full.py DROPLET_RADIUS (0.016 = 0.02 * 0.8,
-        # user decision 2026-09-01); meta.json has no droplet_radius field, so keep this in
-        # sync by hand -- the assert below catches a mismatch against meta["n_water"]
-        morph=gs.morphs.Sphere(pos=(meta.get("droplet_x", -0.01), 0.0, 0.35), radius=0.016),
+        # droplet radius from the run's meta (written since the coarse-profile change); the
+        # assert below catches a mismatch against meta["n_water"]
+        morph=gs.morphs.Sphere(pos=(meta.get("droplet_x", -0.01), 0.0, 0.35),
+                               radius=meta.get("droplet_radius", 0.016)),
         material=gs.materials.FLIP.Liquid(),
         surface=gs.surfaces.Default(color=(0.2, 0.5, 0.9), opacity=0.85),
     )

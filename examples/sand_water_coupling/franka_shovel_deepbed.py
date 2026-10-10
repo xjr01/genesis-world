@@ -2,6 +2,10 @@
 complete v5 wincombo scoop trajectory with the Franka follower (user request 2026-08-28:
 "初始采样改到1.8倍 ... 等沙子不再沉降了再滴水 然后完整仿真铲子").
 
+Coarse fast profile (2026-10-10): grid_res 64 + 3.125 mm grains (both were res 128 / 1.5625 mm)
+and VISCOSITY 4.0 -- ~8x fewer sand and water particles and half the DEM substeps, cutting the
+full run from ~16 h to well under 1 h at coarser visual fidelity.
+
 Evolution of experiments/phase9_probe_deepbed.py (2 s probe) into the full demo:
 
   Phase A  sand bed filled to 1.8x the current height (0.10 m -> 0.18 m) with the poisson-disk
@@ -57,20 +61,26 @@ TAG = sys.argv[2] if len(sys.argv) > 2 else ("_smoke" if MODE == "smoke" else ""
 OUT_DIR = os.path.join(HERE, "recordings", f"phase9_deepbed_full{TAG}")
 
 DT = 1.0 / 60.0
-PARTICLE_RADIUS = 3.125e-3 * 0.5  # 1.5625 mm
+PARTICLE_RADIUS = 3.125e-3  # 3.125 mm coarse profile: grain diameter 6.25 mm ~ the res-64 dx
+                            # (0.35 m extent / 64 = 5.47 mm), same grain-to-dx ratio as the
+                            # 1.5625 mm grains at res 128, so sand AND water counts drop ~8x
 BOX_LOWER = (-0.175, -0.15, 0.0)
 BOX_UPPER = (0.175, 0.15, 0.40)
 MAX_RATIO = 0.3
 SURFACE_TENSION = 0.02
-VISCOSITY = 0.8  # sand<->water quadratic drag (C++ m_ViscosityCoeff, flip._viscosity_coeff;
+VISCOSITY = 4.0  # sand<->water quadratic drag (C++ m_ViscosityCoeff, flip._viscosity_coeff;
                  # ONLY used by _kernel_cal_coupling's cf += dv*|dv|*12*pi*r^2*visc -- not the
-                 # water's own viscosity). 0.4 -> 0.8 (user decision 2026-09-01), combined with
-                 # the 0.8x droplet radius below. History: 0.01 -> 2.0 (2026-08-29) fixed the
-                 # percolation (probes: 0.01 -> p1 depth 0.0826, 0.05 -> 0.0683, 0.25 -> 0.0532,
-                 # 2.0 -> 0.0359 PASS; log fit depth = 0.0407 - 0.00914*ln(visc)); 2.0 -> 0.4
-                 # with r0.8 droplet measured 0.0424 FAIL, with r0.7 droplet 0.0384 FAIL +
-                 # too-small wet clump (n_wet 1621); the r0.8 measured/log-model ratio ~0.865
-                 # extrapolates visc = 0.8 + r0.8 to p1 ~0.037 (borderline band, user-aware).
+                 # water's own viscosity). 0.8 -> 4.0 (2026-10-10, res-64 coarse profile): the
+                 # res-64/visc-4 absorb calibration (experiments/phase5_absorb_visc4_res64.log)
+                 # shows absorption stays rate-limited at ~2-3 water particles/step in the tail,
+                 # so ABSORB_MAX = 700 below still bounds the phase. History: 0.01 -> 2.0
+                 # (2026-08-29) fixed the percolation (probes: 0.01 -> p1 depth 0.0826,
+                 # 0.05 -> 0.0683, 0.25 -> 0.0532, 2.0 -> 0.0359 PASS; log fit depth =
+                 # 0.0407 - 0.00914*ln(visc)); 2.0 -> 0.4 with r0.8 droplet measured 0.0424 FAIL,
+                 # with r0.7 droplet 0.0384 FAIL + too-small wet clump (n_wet 1621); the r0.8
+                 # measured/log-model ratio ~0.865 extrapolates visc = 0.8 + r0.8 to p1 ~0.037
+                 # (borderline band, user-aware); 0.4 -> 0.8 (user decision 2026-09-01) combined
+                 # with the 0.8x droplet radius below.
                  # C++ reference default is m_ViscosityCoeff = 1 (flip_solver.py comment),
                  # our original 0.01 was the outlier.
 RESTITUTION = 0.5
@@ -81,8 +91,9 @@ BED_FILL_Z = 0.18  # 1.8 x the current 0.10 m bed (user request 2026-08-28)
 DROPLET_X = -0.01
 DROPLET_RADIUS = 0.016  # 0.02 * 0.8 (user decision 2026-09-01: back to r0.8 after the r0.7
                         # probe gave n_wet 1621 = too-small wet clump). Volume ~0.512x the
-                        # original, n_water ~19064 -> ~9700 (read dynamically via
-                        # water.n_particles)
+                        # original; n_water scales with the FLIP grid (~19064 at res 128 with
+                        # r 0.02, ~9700 at res 128 with r 0.016, ~1200 at res 64; read
+                        # dynamically via water.n_particles)
 DROPLET_INIT = (DROPLET_X, 0.0, 0.35)  # parked high; deactivated until phase B
 DROPLET_GAP = 0.05  # center height above the measured surface. 0.0225 -> 0.05 (user request
                     # 2026-09-02, "水滴更高"): free fall from ~S1+0.05-0.016 gives impact
@@ -141,7 +152,9 @@ ABSORB_MIN, ABSORB_MAX, ABSORB_DRY_N = 60, 700, 5
 # ABSORB_MAX 240 -> 700 (2026-08-29): with VISCOSITY = 2.0 the visc2.0 probe showed absorption
 # is rate-limited to ~23 water particles/step in the tail (decaying to ~14), zero at ~step
 # 470-630 after release -- the old 240 cap (set for visc = 0.01, ~60 steps) would have started
-# the blade descent with ~5000 water particles still floating on the bed.
+# the blade descent with ~5000 water particles still floating on the bed. Kept at 700 for the
+# res-64 + visc 4.0 profile: the dedicated calibration (experiments/phase5_absorb_visc4_res64)
+# measured a ~2-3 particles/step tail, projecting full absorption at ~550-650 steps.
 APPROACH_MAX = 200
 DESCEND_MAX = 120
 
@@ -266,7 +279,7 @@ def main():
             upper_bound=BOX_UPPER,
         ),
         flip_options=gs.options.FLIPOptions(
-            grid_res=128,
+            grid_res=64,  # coarse profile: dx 5.47 mm over the 0.35 m extent ~ the sand diameter
             viscosity_coeff=VISCOSITY,
             lower_bound=BOX_LOWER,
             upper_bound=BOX_UPPER,
@@ -380,6 +393,7 @@ def main():
     t0 = time.time()
     meta = {
         "dt": DT, "particle_radius": PARTICLE_RADIUS, "max_ratio": MAX_RATIO,
+        "grid_res": 64, "droplet_radius": DROPLET_RADIUS,
         "n_sand": int(sand.n_particles), "n_water": int(n_water),
         "sampler": "poisson", "poisson_ratio": 0.3, "bed_fill_z": BED_FILL_Z,
         "droplet_x": DROPLET_X,
