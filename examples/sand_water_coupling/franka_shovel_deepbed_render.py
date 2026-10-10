@@ -352,11 +352,16 @@ def main():
     )
     cam = scene.add_camera(
         res=(1280, 720),
-        # 20% farther out along the view axis than the probe close-up (same sightline and fov):
-        # wider framing, and the lifted shovel (z~0.25) keeps clearance from the frame top
-        pos=(0.516, -0.576, 0.504),
-        lookat=(-0.06, 0.0, 0.12),
-        fov=40,
+        # Full-arm framing (validated by camcheck_armframe.py, 2026-10-11): same azimuth as the
+        # probe close-up, pulled back 45% horizontally + raised 0.24 m and aimed at z=0.30
+        # (3-D back-off factor 1.40 vs the wide20 camera, pitch unchanged ~21 deg, fov 40->45).
+        # A pure pull-back along the sight line cannot fit the arm: the kinematic envelope
+        # (base column + swept elbow locus + padded TCP, top z~0.71) needs the raised aim point;
+        # margins then pass 5% frame edges on arm/scoop/bed/sand/water with zero wall occlusion
+        # of the arm body. See frames/camcheck_armframe{,_report}.log.
+        pos=(0.7752, -0.8352, 0.744),
+        lookat=(-0.06, 0.0, 0.30),
+        fov=45,
     )
 
     scene.build()
