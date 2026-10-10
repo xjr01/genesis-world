@@ -8,6 +8,7 @@ import sys
 import tempfile
 from typing import NamedTuple
 
+import numba
 import numpy as np
 
 import igl
@@ -591,15 +592,22 @@ class ReconstructedConcentrationMesh(NamedTuple):
     concentrations: np.ndarray
 
 
+@numba.njit(cache=True, nogil=True)
 def concentration_colors(concentrations):
     """Map passive concentrations from pale water to dark coffee as OpenGL float32 colors."""
-    concentration = np.clip(concentrations[..., None], 0.0, 1.0)
-    water = np.array((1.0, 1.0, 1.0, 1.0))
-    mixed = np.array((0.95, 0.78, 0.30, 1.0))
-    coffee = np.array((0.30, 0.14, 0.05, 1.0))
-    low = water + 2.0 * concentration * (mixed - water)
-    high = mixed + (2.0 * concentration - 1.0) * (coffee - mixed)
-    return np.where(concentration <= 0.5, low, high).astype(np.float32)
+    colors = np.empty((*concentrations.shape, 4), dtype=np.float32)
+    water = (1.0, 1.0, 1.0, 1.0)
+    mixed = (0.95, 0.78, 0.30, 1.0)
+    coffee = (0.30, 0.14, 0.05, 1.0)
+    for index in np.ndindex(concentrations.shape):
+        concentration = min(max(concentrations[index], 0.0), 1.0)
+        for channel in range(4):
+            if concentration <= 0.5:
+                value = water[channel] + 2.0 * concentration * (mixed[channel] - water[channel])
+            else:
+                value = mixed[channel] + (2.0 * concentration - 1.0) * (coffee[channel] - mixed[channel])
+            colors[index + (channel,)] = value
+    return colors
 
 
 def particles_to_mesh_with_concentration(positions, radius, backend, concentrations):

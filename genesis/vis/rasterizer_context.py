@@ -867,7 +867,8 @@ class RasterizerContext:
                         self.jit.update_buffer(node, "pos", particles_pos[env_slot, span].astype(np.float32))
                         self.jit.update_buffer(node, "vertex", pu.concentration_colors(concentrations[env_slot, span]))
                     elif solver is not self.sim.pbd_solver or self.render_particle_as == "sphere":
-                        poses = np.tile(np.eye(4), (entity.n_particles, 1, 1))
+                        # OpenGL consumes float32 instance matrices.
+                        poses = np.tile(np.eye(4, dtype=np.float32), (entity.n_particles, 1, 1))
                         poses[:, :3, 3] = particles_pos[env_slot, span]
                         self.jit.update_buffer(node, "model", poses.transpose((0, 2, 1)))
                         if node.mesh.primitives[0].is_color_instanced:
