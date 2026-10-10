@@ -107,6 +107,7 @@ class MPMEntity(ParticleEntity):
             self._material.idx,
             self._material._default_Jp,
             self._material.rho,
+            self._particle_size**3 * self._solver.particle_volume_scale,
             self._particles,
         )
 

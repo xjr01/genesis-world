@@ -1103,6 +1103,24 @@ class Scene(RBC):
         self._reset(state, envs_idx=envs_idx)
         self._recorder_manager.reset(envs_idx)
 
+    @gs.assert_built
+    def restore(self, state: SimState, envs_idx=None):
+        """Restore a checkpoint without replacing the Scene's registered initial state.
+
+        Unlike ``reset(state)``, this method preserves the state used by a later bare ``reset()``. It is intended for
+        resumable checkpoints whose task-controller state is restored separately.
+
+        Parameters
+        ----------
+        state : SimState
+            The checkpoint returned by :meth:`get_state`.
+        envs_idx : None | array_like, optional
+            The environments to restore. If None, all environments are restored.
+        """
+        gs.logger.debug(f"Restoring Scene ~~~<{self._uid}>~~~ from checkpoint.")
+        self._reset(state, envs_idx=envs_idx, keep_init=True)
+        self._recorder_manager.reset(envs_idx)
+
     def _reset(self, state: SimState | None = None, *, envs_idx=None, keep_init: bool = False):
         if self._is_built:
             if state is None:

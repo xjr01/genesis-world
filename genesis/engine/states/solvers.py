@@ -13,12 +13,14 @@ class SimState(RBC):
         s_global,
         f_local,
         solvers,
+        coupler_state=None,
     ):
         self._scene = scene
         self._s_global = s_global
-        self._solvers_state = list()
+        self._solvers_state = []
         for solver in solvers:
             self._solvers_state.append(solver.get_state(f_local))
+        self._coupler_state = coupler_state
 
     def serializable(self):
         self._scene = None
@@ -38,6 +40,10 @@ class SimState(RBC):
     @property
     def solvers_state(self):
         return self._solvers_state
+
+    @property
+    def coupler_state(self):
+        return self._coupler_state
 
     def __iter__(self):
         return iter(self._solvers_state)
