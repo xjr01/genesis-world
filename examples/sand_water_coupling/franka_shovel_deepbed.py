@@ -8,7 +8,9 @@ to well under 1 h at coarser visual fidelity. A4 absorption profile (2026-10-11)
 VISCOSITY 1.0 + droplet r 0.020 (probed in experiments/res64_absorb_tuning/TUNING.md): 146 steps
 to dry vs 661 at the old 0.3/4.0/0.016, with the largest spread AND percolation depth. Safety
 gear (2026-10-11): ddt_safety defaults to the fast gear 1.0 (argv[3] selects; see SAFETY_GEARS),
-probed full-run safe on this scene.
+probed full-run safe on this scene. Young gear (2026-10-11): the sand Young's modulus defaults
+to the soft gear 1e5 (argv[4] selects; see YOUNG_GEARS), probed full-run safe on this scene
+with the wet retention intact (100%).
 
 Evolution of experiments/phase9_probe_deepbed.py (2 s probe) into the full demo:
 
@@ -40,11 +42,13 @@ Outputs (do NOT collide with the phase9_franka_shovel_sdf final products):
   experiments/recordings/phase9_deepbed_full{tag}/frame_*.npz + meta.json + ik_log.csv
 Render: experiments/phase9_deepbed_full_render.py [tag] -> videos/phase9_deepbed_full{tag}.mp4
 
-Usage: python phase9_deepbed_full.py [mode] [tag] [safety]
+Usage: python phase9_deepbed_full.py [mode] [tag] [safety] [young]
   mode    "smoke": build + 30 settle steps + one full-restart IK solve, then exit
           "full" (default): the whole A-H sequence
   safety  DEM substep safety gear: "1.0"/"fast" (default) or "0.5"/"archive"
           (see SAFETY_GEARS below)
+  young   sand Young's modulus gear: "1e5"/"soft" (default) or "1e6"/"archive"
+          (see YOUNG_GEARS below)
 """
 import json
 import math
@@ -110,6 +114,24 @@ RESTITUTION = 0.5
 #   new scene (smoke / short run, watch for NaN and popcorn) before relying on the fast gear.
 SAFETY_GEARS = {"1.0": 1.0, "fast": 1.0, "0.5": 0.5, "archive": 0.5}
 SAFETY = SAFETY_GEARS[sys.argv[3] if len(sys.argv) > 3 else "1.0"]
+# Sand Young's modulus gear (argv[4] selects, written to meta.json as "young_modulus"); passed to
+# the Sand material, so the DEM substep formula follows it automatically (ddt ~ sqrt(1/young)):
+#   1e5 "soft" (default) -- 10x softer grains than the C++ reference value: ddt stretches by
+#       sqrt(10), cutting DEM substeps ~2148 -> ~680 per control step at safety 1.0. Full A-H
+#       probe on THIS scene ran zero NaN / no popcorn with wet retention 299/299 = 100%: 1159
+#       steps / 9.65 min / 0.460 s median per step (experiments/e1e5_gear_verify/RESULT_E1E5.md,
+#       2026-10-11). Measured soft-bed physics vs the archive gear: bed surface ~13 mm lower,
+#       percolation 0.0242 (-23%), drying 154 steps (+39%, still ~73 s wall), scoop load 583
+#       (-15%), blade tip ends 4.1 mm below the floor (the S2-anchored 2.8 cm insertion depth on
+#       a lower bed; same geometric side effect as every other soft-gear probe).
+#   1e6 "archive" -- the C++ reference value: the value behind every archived A4 number (1105
+#       steps / 54.9 min at safety 0.5; 1110 steps / 25.8 min at safety 1.0). The two gears'
+#       trajectories diverge from the settle phase on, so their runs are not comparable
+#       frame-by-frame. The wincombo window (young x0.25) scales with the gear: 2.5e4 vs 2.5e5.
+#   1e5 was validated on this scene only (with safety 1.0); denser high-impact regimes are not
+#   covered -- probe a new scene before relying on the soft gear.
+YOUNG_GEARS = {"1e5": 1e5, "soft": 1e5, "1e6": 1e6, "archive": 1e6}
+YOUNG = YOUNG_GEARS[sys.argv[4] if len(sys.argv) > 4 else "1e5"]
 # user request 2026-08-27/28: poisson_ratio stays at the library default 0.3 -- never touched
 
 BED_FILL_Z = 0.18  # 1.8 x the current 0.10 m bed (user request 2026-08-28)
@@ -319,7 +341,7 @@ def main():
             pos=(0.0, 0.0, 0.00025 + BED_FILL_Z / 2.0),
             size=(0.34, 0.29, BED_FILL_Z),
         ),
-        material=gs.materials.DEM.Sand(sampler="poisson", rho=2.5, max_ratio=MAX_RATIO),
+        material=gs.materials.DEM.Sand(sampler="poisson", rho=2.5, max_ratio=MAX_RATIO, young_modulus=YOUNG),
     )
     water = scene.add_entity(
         morph=gs.morphs.Sphere(pos=DROPLET_INIT, radius=DROPLET_RADIUS),
@@ -421,6 +443,7 @@ def main():
     meta = {
         "dt": DT, "particle_radius": PARTICLE_RADIUS, "max_ratio": MAX_RATIO,
         "grid_res": 64, "droplet_radius": DROPLET_RADIUS, "ddt_safety": SAFETY,
+        "young_modulus": YOUNG,
         "n_sand": int(sand.n_particles), "n_water": int(n_water),
         "sampler": "poisson", "poisson_ratio": 0.3, "bed_fill_z": BED_FILL_Z,
         "droplet_x": DROPLET_X,
