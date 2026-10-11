@@ -3,8 +3,10 @@ complete v5 wincombo scoop trajectory with the Franka follower (user request 202
 "初始采样改到1.8倍 ... 等沙子不再沉降了再滴水 然后完整仿真铲子").
 
 Coarse fast profile (2026-10-10): grid_res 64 + 3.125 mm grains (both were res 128 / 1.5625 mm)
-and VISCOSITY 4.0 -- ~8x fewer sand and water particles and half the DEM substeps, cutting the
-full run from ~16 h to well under 1 h at coarser visual fidelity.
+-- ~8x fewer sand and water particles and half the DEM substeps, cutting the full run from ~16 h
+to well under 1 h at coarser visual fidelity. A4 absorption profile (2026-10-11): MAX_RATIO 0.5 +
+VISCOSITY 1.0 + droplet r 0.020 (probed in experiments/res64_absorb_tuning/TUNING.md): 146 steps
+to dry vs 661 at the old 0.3/4.0/0.016, with the largest spread AND percolation depth.
 
 Evolution of experiments/phase9_probe_deepbed.py (2 s probe) into the full demo:
 
@@ -66,14 +68,21 @@ PARTICLE_RADIUS = 3.125e-3  # 3.125 mm coarse profile: grain diameter 6.25 mm ~ 
                             # 1.5625 mm grains at res 128, so sand AND water counts drop ~8x
 BOX_LOWER = (-0.175, -0.15, 0.0)
 BOX_UPPER = (0.175, 0.15, 0.40)
-MAX_RATIO = 0.3
+# 0.3 -> 0.5 (2026-10-11, A4 profile; experiments/res64_absorb_tuning/TUNING.md): the engine's
+# usable cap (the absorption fraction floor 1-0.74*(1+max_ratio) clamps negative above ~0.35,
+# flip_solver.py; the A5 = 0.6 probe showed zero gain past 0.5). Going 0.3 -> 0.5 alone cut the
+# probe's drying time 661 -> 255 steps (at visc 4.0); the full A4 combo dries in 146.
+MAX_RATIO = 0.5
 SURFACE_TENSION = 0.02
-VISCOSITY = 4.0  # sand<->water quadratic drag (C++ m_ViscosityCoeff, flip._viscosity_coeff;
+VISCOSITY = 1.0  # sand<->water quadratic drag (C++ m_ViscosityCoeff, flip._viscosity_coeff;
                  # ONLY used by _kernel_cal_coupling's cf += dv*|dv|*12*pi*r^2*visc -- not the
-                 # water's own viscosity). 0.8 -> 4.0 (2026-10-10, res-64 coarse profile): the
-                 # res-64/visc-4 absorb calibration (experiments/phase5_absorb_visc4_res64.log)
-                 # shows absorption stays rate-limited at ~2-3 water particles/step in the tail,
-                 # so ABSORB_MAX = 700 below still bounds the phase. History: 0.01 -> 2.0
+                 # water's own viscosity). 4.0 -> 1.0 (2026-10-11, A4 profile): in the res64
+                 # absorb-tuning matrix (experiments/res64_absorb_tuning/TUNING.md) this is the
+                 # biggest drying-speed lever (255 -> 85 steps at max_ratio 0.5), and A4
+                 # (0.5/1.0/r0.020) keeps 146-step drying with the largest wet spread. History:
+                 # 0.8 -> 4.0 (2026-10-10, res-64 coarse profile) compensated the coarse grid's
+                 # percolation but slowed the absorption tail to ~2-3 water particles/step;
+                 # 0.01 -> 2.0
                  # (2026-08-29) fixed the percolation (probes: 0.01 -> p1 depth 0.0826,
                  # 0.05 -> 0.0683, 0.25 -> 0.0532, 2.0 -> 0.0359 PASS; log fit depth =
                  # 0.0407 - 0.00914*ln(visc)); 2.0 -> 0.4 with r0.8 droplet measured 0.0424 FAIL,
@@ -89,11 +98,13 @@ SAFETY = 0.5
 
 BED_FILL_Z = 0.18  # 1.8 x the current 0.10 m bed (user request 2026-08-28)
 DROPLET_X = -0.01
-DROPLET_RADIUS = 0.016  # 0.02 * 0.8 (user decision 2026-09-01: back to r0.8 after the r0.7
-                        # probe gave n_wet 1621 = too-small wet clump). Volume ~0.512x the
-                        # original; n_water scales with the FLIP grid (~19064 at res 128 with
-                        # r 0.02, ~9700 at res 128 with r 0.016, ~1200 at res 64; read
-                        # dynamically via water.n_particles)
+DROPLET_RADIUS = 0.020  # 0.016 -> 0.020 (2026-10-11, A4 profile): the only knob raising BOTH
+                        # spread and depth in the res64 absorb-tuning matrix (probe A4 vs A3:
+                        # x span 0.037 -> 0.054, p1 depth 0.022 -> 0.031, n_wet 122 -> 294);
+                        # volume ~1.95x, n_water ~540 -> ~1400 at res 64 (probe measured 1408;
+                        # read dynamically via water.n_particles). History: 0.02 * 0.8 = 0.016
+                        # (user decision 2026-09-01: back to r0.8 after the r0.7 probe gave
+                        # n_wet 1621 = too-small wet clump).
 DROPLET_INIT = (DROPLET_X, 0.0, 0.35)  # parked high; deactivated until phase B
 DROPLET_GAP = 0.05  # center height above the measured surface. 0.0225 -> 0.05 (user request
                     # 2026-09-02, "水滴更高"): free fall from ~S1+0.05-0.016 gives impact
@@ -152,9 +163,9 @@ ABSORB_MIN, ABSORB_MAX, ABSORB_DRY_N = 60, 700, 5
 # ABSORB_MAX 240 -> 700 (2026-08-29): with VISCOSITY = 2.0 the visc2.0 probe showed absorption
 # is rate-limited to ~23 water particles/step in the tail (decaying to ~14), zero at ~step
 # 470-630 after release -- the old 240 cap (set for visc = 0.01, ~60 steps) would have started
-# the blade descent with ~5000 water particles still floating on the bed. Kept at 700 for the
-# res-64 + visc 4.0 profile: the dedicated calibration (experiments/phase5_absorb_visc4_res64)
-# measured a ~2-3 particles/step tail, projecting full absorption at ~550-650 steps.
+# the blade descent with ~5000 water particles still floating on the bed. Kept at 700 for the A4
+# profile (0.5/1.0/r0.020): probe A4 dried in 146 steps (the old 0.3/4.0/0.016 needed 661 and
+# capped out at 700 in the full run), so the cap holds a ~4.8x margin.
 APPROACH_MAX = 200
 DESCEND_MAX = 120
 
