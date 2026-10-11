@@ -6,7 +6,9 @@ Coarse fast profile (2026-10-10): grid_res 64 + 3.125 mm grains (both were res 1
 -- ~8x fewer sand and water particles and half the DEM substeps, cutting the full run from ~16 h
 to well under 1 h at coarser visual fidelity. A4 absorption profile (2026-10-11): MAX_RATIO 0.5 +
 VISCOSITY 1.0 + droplet r 0.020 (probed in experiments/res64_absorb_tuning/TUNING.md): 146 steps
-to dry vs 661 at the old 0.3/4.0/0.016, with the largest spread AND percolation depth.
+to dry vs 661 at the old 0.3/4.0/0.016, with the largest spread AND percolation depth. Safety
+gear (2026-10-11): ddt_safety defaults to the fast gear 1.0 (argv[3] selects; see SAFETY_GEARS),
+probed full-run safe on this scene.
 
 Evolution of experiments/phase9_probe_deepbed.py (2 s probe) into the full demo:
 
@@ -38,9 +40,11 @@ Outputs (do NOT collide with the phase9_franka_shovel_sdf final products):
   experiments/recordings/phase9_deepbed_full{tag}/frame_*.npz + meta.json + ik_log.csv
 Render: experiments/phase9_deepbed_full_render.py [tag] -> videos/phase9_deepbed_full{tag}.mp4
 
-Usage: python phase9_deepbed_full.py [mode] [tag]
-  mode  "smoke": build + 30 settle steps + one full-restart IK solve, then exit
-        "full" (default): the whole A-H sequence
+Usage: python phase9_deepbed_full.py [mode] [tag] [safety]
+  mode    "smoke": build + 30 settle steps + one full-restart IK solve, then exit
+          "full" (default): the whole A-H sequence
+  safety  DEM substep safety gear: "1.0"/"fast" (default) or "0.5"/"archive"
+          (see SAFETY_GEARS below)
 """
 import json
 import math
@@ -93,7 +97,19 @@ VISCOSITY = 1.0  # sand<->water quadratic drag (C++ m_ViscosityCoeff, flip._visc
                  # C++ reference default is m_ViscosityCoeff = 1 (flip_solver.py comment),
                  # our original 0.01 was the outlier.
 RESTITUTION = 0.5
-SAFETY = 0.5
+# DEM substep safety gear (ddt_safety; argv[3] selects, written to meta.json as "ddt_safety"):
+#   1.0 "fast" (default) -- ddt at the C++ formula's stability limit itself (radius*pi*
+#       sqrt(rho/Young)/2): half the DEM substeps of 0.5. Full A-H probe on THIS scene ran zero
+#       NaN / no popcorn across all phases incl. the two historical risk windows (droplet impact,
+#       lift start): 1110 steps / 25.8 min / 1.394 s/step, wet retention 297/297 = 100%
+#       (experiments/safety10_probe/RESULT_SAFETY10.md, 2026-10-11).
+#   0.5 "archive" -- half the limit: the C++-conservative margin and the value behind every
+#       archived A4 number (1105 steps / 54.9 min / 2.98 s/step). The two gears' trajectories
+#       diverge from the settle phase on, so their runs are not comparable frame-by-frame.
+#   1.0 was validated on this scene only; denser high-impact regimes are not covered -- probe a
+#   new scene (smoke / short run, watch for NaN and popcorn) before relying on the fast gear.
+SAFETY_GEARS = {"1.0": 1.0, "fast": 1.0, "0.5": 0.5, "archive": 0.5}
+SAFETY = SAFETY_GEARS[sys.argv[3] if len(sys.argv) > 3 else "1.0"]
 # user request 2026-08-27/28: poisson_ratio stays at the library default 0.3 -- never touched
 
 BED_FILL_Z = 0.18  # 1.8 x the current 0.10 m bed (user request 2026-08-28)
@@ -404,7 +420,7 @@ def main():
     t0 = time.time()
     meta = {
         "dt": DT, "particle_radius": PARTICLE_RADIUS, "max_ratio": MAX_RATIO,
-        "grid_res": 64, "droplet_radius": DROPLET_RADIUS,
+        "grid_res": 64, "droplet_radius": DROPLET_RADIUS, "ddt_safety": SAFETY,
         "n_sand": int(sand.n_particles), "n_water": int(n_water),
         "sampler": "poisson", "poisson_ratio": 0.3, "bed_fill_z": BED_FILL_Z,
         "droplet_x": DROPLET_X,
