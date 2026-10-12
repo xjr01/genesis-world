@@ -1,6 +1,7 @@
 from dataclasses import replace
 import math
 import pickle
+import sys
 import time
 
 import numpy as np
@@ -8,7 +9,7 @@ import numpy as np
 import av
 import pytest
 
-from examples.genesis_origin_example.rendering.replay_checkpoints import Command, Playback, ReplayPlayer
+from examples.genesis_origin_example.rendering.replay_checkpoints import Command, Playback, ReplayPlayer, main
 
 import genesis as gs
 from genesis.utils.checkpoint_replay import CheckpointReader, CheckpointWriter, apply_frame
@@ -98,16 +99,31 @@ def test_checkpoint_roundtrip(tmp_path, n_envs, vis_mode, show_viewer):
     reader = CheckpointReader(writer.directory)
     assert_equal(len(reader.frames), 2)
     assert_equal(reader.read_frame(1).time, 0.002)
-    for index in (0, 1, 0):
-        apply_frame(scene, reader.read_frame(index))
-        assert_allclose(rigid.get_pos(), rigid_initial + index * 0.03, atol=1e-7)
-        assert_allclose(sponge.get_particles_pos(), sponge_initial * (1.0 + index * 0.2), atol=1e-7)
-        if liquid is not None:
-            assert_allclose(liquid.get_particles_pos(), liquid_initial + index * 0.04, atol=1e-7)
-            assert_equal(liquid.get_particles_concentration(), index * 0.75)
-            assert_equal(liquid.get_particles_active(), is_active if index else True)
-        image, *_ = camera.render()
-        assert_allclose(image, image_changed if index else image_initial, atol=1.0)
+    recorded_modes = tuple(entity.surface.vis_mode for entity in reader.description.entities)
+    for liquid_vis_mode in ("recon", "particle"):
+        overridden = CheckpointReader(writer.directory, liquid_vis_mode=liquid_vis_mode)
+        for original, entity in zip(reader.description.entities, overridden.description.entities):
+            expected_mode = liquid_vis_mode if original.kind == "pbstf" else original.surface.vis_mode
+            assert_equal(entity.surface.vis_mode == expected_mode, True)
+        for original, restored in zip(reader.read_frame(1).arrays, overridden.read_frame(1).arrays):
+            assert_equal(restored, original)
+    assert_equal(
+        tuple(entity.surface.vis_mode for entity in CheckpointReader(writer.directory).description.entities)
+        == recorded_modes,
+        True,
+    )
+    for cache_directory in (None, tmp_path / "surfaces", tmp_path / "surfaces"):
+        reader = CheckpointReader(writer.directory, surface_cache=cache_directory)
+        for index in (0, 1, 0):
+            apply_frame(scene, reader.read_frame(index))
+            assert_allclose(rigid.get_pos(), rigid_initial + index * 0.03, atol=1e-7)
+            assert_allclose(sponge.get_particles_pos(), sponge_initial * (1.0 + index * 0.2), atol=1e-7)
+            if liquid is not None:
+                assert_allclose(liquid.get_particles_pos(), liquid_initial + index * 0.04, atol=1e-7)
+                assert_equal(liquid.get_particles_concentration(), index * 0.75)
+                assert_equal(liquid.get_particles_active(), is_active if index else True)
+            image, *_ = camera.render()
+            assert_allclose(image, image_changed if index else image_initial, atol=1.0)
 
     with pytest.raises(FileExistsError, match="must be empty"):
         CheckpointWriter(scene, writer.directory, dt=0.002)
@@ -131,7 +147,7 @@ def test_checkpoint_roundtrip(tmp_path, n_envs, vis_mode, show_viewer):
 
 
 @pytest.mark.required
-def test_playback_timeline():
+def test_playback_timeline(monkeypatch, capsys):
     playback = Playback(dt=0.002, frame_count=101)
     assert_equal(playback.is_playing, False)
     playback.toggle()
@@ -170,15 +186,36 @@ def test_playback_timeline():
     assert_equal(playback.frame_index, 0)
     playback.toggle()
     assert_equal(playback.repeat_seek(now=64.0), False)
+    for dt, fps, expected in (
+        (0.002, 50, (0, 10, 20, 23)),
+        (0.003, 50, (0, 6, 13, 20, 23)),
+        (0.002, 25, (0, 20, 23)),
+        (0.04, 50, tuple(range(24))),
+    ):
+        for is_sequential in (False, True):
+            playback = Playback(dt=dt, frame_count=24, fps=fps, is_sequential=is_sequential)
+            indices = [playback.frame_index]
+            while playback.frame_index < playback.frame_count - 1:
+                playback.frame_index = playback.next_index(playback.frame_index)
+                indices.append(playback.frame_index)
+            assert_equal(indices, np.arange(24) if is_sequential else expected)
+    playback = Playback(dt=0.002, frame_count=101, sample_origin=11)
+    assert_equal(playback.next_index(11), 21)
+    monkeypatch.setattr(sys, "argv", ["replay_checkpoints.py", "checkpoints", "--surface", "--particles"])
+    with pytest.raises(SystemExit) as error:
+        main()
+    assert_equal(error.value.code, 2)
+    assert "not allowed with argument --surface" in capsys.readouterr().err
 
 
 @pytest.mark.required
 @pytest.mark.skipif(not IS_INTERACTIVE_VIEWER_AVAILABLE, reason=SKIP_NO_VIEWER)
+@pytest.mark.parametrize("is_sequential", [False, True])
 @pytest.mark.parametrize(
     "dt, sample_indices",
     [(0.002, (0, 10, 20)), (0.003, (0, 6, 13, 20)), (0.04, np.repeat(np.arange(21), 2))],
 )
-def test_replay_recording(tmp_path, dt, sample_indices):
+def test_replay_recording(tmp_path, dt, sample_indices, is_sequential):
     scene = gs.Scene(
         viewer_options=gs.options.ViewerOptions(
             res=(960, 720),
@@ -203,7 +240,7 @@ def test_replay_recording(tmp_path, dt, sample_indices):
     for index in range(21):
         entity.set_pos((index * 0.01, 0.0, 0.1))
         writer.write_frame()
-    player = ReplayPlayer(CheckpointReader(writer.directory), scene, tmp_path / "videos")
+    player = ReplayPlayer(CheckpointReader(writer.directory), scene, tmp_path / "videos", is_sequential=is_sequential)
     try:
         player.controls.viewer.on_key_press(Key.RIGHT, modifiers=0)
         player.handle_command(player.controls.commands.get_nowait(), now=0.0)
@@ -236,28 +273,30 @@ def test_replay_recording(tmp_path, dt, sample_indices):
                 player.handle_command(Command.RECORD, now=0.0)
             player.handle_command(Command.PLAY_PAUSE, now=0.0)
             visited_frames = [0]
+            pause_index = 5 if is_sequential else np.unique(sample_indices)[1]
             is_pause_checked = False
             start = time.perf_counter()
             while player.playback.is_playing and time.perf_counter() - start < 15.0:
                 # Large clock jumps exercise playback under arbitrarily slow loading or rendering.
-                player.tick(now=100.0 * (time.perf_counter() - start))
+                now = 100.0 * (time.perf_counter() - start)
+                player.tick(now)
                 index = player.playback.frame_index
                 assert_allclose(entity.get_pos(), (index * 0.01, 0.0, 0.1), atol=1e-7)
                 if index != visited_frames[-1]:
                     visited_frames.append(index)
-                if index == 5 and not is_pause_checked:
-                    player.handle_command(Command.PLAY_PAUSE, now=100.0)
+                if index == pause_index and not is_pause_checked:
+                    player.handle_command(Command.PLAY_PAUSE, now)
                     if is_recording:
                         player.controls.viewer.set_size(width=800, height=480)
                         player.controls.viewer.dispatch_events()
-                    player.tick(now=1000.0)
-                    assert_equal(player.playback.frame_index, 5)
+                    player.tick(now=now + 1000.0)
+                    assert_equal(player.playback.frame_index, pause_index)
                     assert_allclose(scene.viewer.camera_pose, camera_pose, atol=1e-7)
-                    player.handle_command(Command.PLAY_PAUSE, now=1000.0)
+                    player.handle_command(Command.PLAY_PAUSE, now)
                     is_pause_checked = True
                 scene.viewer.update()
                 time.sleep(0.001)
-            assert_equal(visited_frames, np.arange(21))
+            assert_equal(visited_frames, np.arange(21) if is_sequential else np.unique(sample_indices))
             assert_equal(is_pause_checked, True)
             assert_equal(player.playback.is_playing, False)
             assert_equal(player.is_recording, False)
@@ -283,18 +322,38 @@ def test_replay_recording(tmp_path, dt, sample_indices):
                 )
                 assert np.abs(frame / 255.0 - reference / 255.0).mean() < 1.0 / 255.0
         first_path = player.video_path
-        player.show_frame(index=11)
-        player.handle_command(Command.RECORD, now=200.0)
-        player.handle_command(Command.NEXT, now=200.0)
-        player.handle_command(Command.PREVIOUS, now=200.0)
-        player.handle_command(Command.RELEASE_PREVIOUS, now=200.0)
-        player.tick(now=1000.0)
-        player.handle_command(Command.RECORD, now=1000.0)
-        assert player.video_path != first_path
-        with av.open(str(player.video_path)) as video:
-            stream = video.streams.video[0]
-            assert_equal((stream.width, stream.height), (800, 480))
-            assert_equal(len(list(video.decode(video=0))), math.ceil(3 * dt * 50))
+        for is_playing in (False, True):
+            player.show_frame(index=11)
+            player.handle_command(Command.RECORD, now=200.0)
+            player.handle_command(Command.NEXT, now=200.0)
+            player.handle_command(Command.PREVIOUS, now=200.0)
+            player.handle_command(Command.RELEASE_PREVIOUS, now=200.0)
+            seek_indices = (11, 12, 11)
+            if is_playing:
+                seek_indices += tuple(range(12, 21))
+                player.handle_command(Command.PLAY_PAUSE, now=200.0)
+                start = time.perf_counter()
+                while player.playback.is_playing and time.perf_counter() - start < 15.0:
+                    player.tick(now=200.0 + 100.0 * (time.perf_counter() - start))
+                    scene.viewer.update()
+                    time.sleep(0.001)
+                assert_equal(player.playback.frame_index, 20)
+                assert_equal(player.is_recording, False)
+            else:
+                player.tick(now=1000.0)
+                player.handle_command(Command.RECORD, now=1000.0)
+            assert player.video_path != first_path
+            with av.open(str(player.video_path)) as video:
+                stream = video.streams.video[0]
+                assert_equal((stream.width, stream.height), (800, 480))
+                frames = [frame.to_ndarray(format="rgb24") for frame in video.decode(video=0)]
+                assert_equal(len(frames), math.ceil(len(seek_indices) * dt * 50))
+                for sample, frame in enumerate(frames):
+                    player.show_frame(seek_indices[math.floor(sample / (dt * 50))])
+                    reference, *_ = scene.viewer.render_offscreen(
+                        player.controls.camera, player.controls.render_target, skip_markers=True
+                    )
+                    assert np.abs(frame / 255.0 - reference / 255.0).mean() < 1.0 / 255.0
         player.handle_command(Command.RECORD, now=1000.0)
         reference, *_ = scene.viewer.render_offscreen(
             player.controls.camera, player.controls.render_target, skip_markers=True

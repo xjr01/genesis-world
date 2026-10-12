@@ -570,16 +570,16 @@ def update_motion(demo, time, observation=None):
     return target, max(errors)
 
 
-def step_scene(demo):
+def step_scene(demo, *, is_rendering=True):
     """Advance contact steps with one-way fluid boundaries synchronized to measured rigid poses."""
-    for _ in range(CONTACT_SUBSTEPS):
+    for substep in range(CONTACT_SUBSTEPS):
         if demo.scene.pbstf_solver.is_active:
             demo.scene.pbstf_solver.set_static_colliders_pose(
                 demo.scene.rigid_solver.get_links_pos(demo.observed_links_idx[:2]),
                 demo.scene.rigid_solver.get_links_quat(demo.observed_links_idx[:2]),
                 colliders_idx=(2, 3),
             )
-        demo.scene.step()
+        demo.scene.step(update_visualizer=is_rendering and substep + 1 == CONTACT_SUBSTEPS)
 
 
 def water_cup_pose(time):
@@ -1001,6 +1001,9 @@ def main():
     )
     dt = demo.scene.dt * CONTACT_SUBSTEPS
     steps = args.steps if args.steps is not None else round(MOTION_END / dt)
+    render_stride = 1
+    if demo.scene.viewer is not None:
+        render_stride = max(1, round(1.0 / (demo.scene.viewer.refresh_rate * dt)))
     initial_mass = None
     if demo.coffee is not None:
         initial_mass = tensor_to_array(demo.coffee.get_mass() + demo.water.get_mass()).sum()
@@ -1017,6 +1020,7 @@ def main():
     gripper_clearance = math.inf
     previous_stir_angle = None
     measured_stir_angle = 0.0
+    target = None
     gripper_geoms_idx = tuple(field.geom_idx for field in demo.gripper_distance_fields)
     with (output / "metrics.csv").open("w", newline="", encoding="ascii") as metrics:
         writer = csv.writer(metrics)
@@ -1054,11 +1058,11 @@ def main():
             )
         )
         for step in range(steps):
-            if args.steps is None and step > 0 and target.right_phase == target.left_phase == Phase.REST:
+            if args.steps is None and target is not None and target.right_phase == target.left_phase == Phase.REST:
                 break
             time = (step + 1) * dt
             target, ik_error = update_motion(demo, time, observation)
-            step_scene(demo)
+            step_scene(demo, is_rendering=(step + 1) % render_stride == 0 or step + 1 == steps)
             observation = observe_scene(demo)
             measurement = measure_motion(time, target, observation)
             if measurement.hands_position_error[1] > 0.005 or (

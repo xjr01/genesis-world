@@ -1,6 +1,7 @@
 import ctypes
-from multiprocessing import Process, Queue
+import ctypes.util
 import os
+from pathlib import Path
 import platform
 import shutil
 import subprocess
@@ -390,54 +391,57 @@ class ReconstructedParticleArrays(NamedTuple):
     concentrations: np.ndarray | None
 
 
-def _splashsurf_worker(positions, radius, options, result_queue, concentrations):
-    try:
-        # The reconstruction interface requires contiguous float64 arrays and a named attribute mapping.
-        attributes = None
-        if concentrations is not None:
-            attributes = {"concentration": np.ascontiguousarray(concentrations, dtype=np.float64)}
-        mesh_with_data, _ = pysplashsurf.reconstruction_pipeline(
-            np.ascontiguousarray(positions, dtype=np.float64),
-            attributes_to_interpolate=attributes,
-            particle_radius=radius * options.radius_scale,
-            smoothing_length=2.0,
-            cube_size=0.8,
-            iso_surface_threshold=0.6,
-            mesh_smoothing_weights=True,
-            mesh_smoothing_iters=options.smoothing_iterations,
-            normals_smoothing_iters=10,
-            mesh_cleanup=True,
-            compute_normals=True,
-            multi_threading=True,
-        )
-        result_queue.put_nowait(
-            ReconstructedParticleArrays(
-                mesh_with_data.mesh.vertices,
-                mesh_with_data.mesh.triangles,
-                mesh_with_data.point_attributes["normals"],
-                mesh_with_data.point_attributes["concentration"] if concentrations is not None else None,
+def _splashsurf_reconstruct(positions, radius, options, concentrations=None, cache_path=None):
+    """Reconstruct particle attributes in the caller's process and release native working allocations."""
+    if cache_path is not None and cache_path.is_file():
+        with np.load(cache_path, allow_pickle=False) as data:
+            return ReconstructedParticleArrays(
+                data["arr_0"], data["arr_1"], data["arr_2"], data["arr_3"] if concentrations is not None else None
             )
-        )
-    except Exception as e:
-        result_queue.put_nowait(e)
-        raise
-
-
-def _splashsurf_reconstruct(positions, radius, options, concentrations=None):
-    # Reclaim native reconstruction allocations between frames to bound memory during long recordings.
-    result_queue = Queue()
+    # The reconstruction interface requires contiguous float64 arrays and a named attribute mapping.
+    attributes = None
+    if concentrations is not None:
+        attributes = {"concentration": np.ascontiguousarray(concentrations, dtype=np.float64)}
+    mesh_with_data, _ = pysplashsurf.reconstruction_pipeline(
+        np.ascontiguousarray(positions, dtype=np.float64),
+        attributes_to_interpolate=attributes,
+        particle_radius=radius * options.radius_scale,
+        smoothing_length=2.0,
+        cube_size=0.8,
+        iso_surface_threshold=0.6,
+        mesh_smoothing_weights=True,
+        mesh_smoothing_iters=options.smoothing_iterations,
+        normals_smoothing_iters=10,
+        mesh_cleanup=True,
+        compute_normals=True,
+        multi_threading=True,
+    )
+    result = ReconstructedParticleArrays(
+        mesh_with_data.mesh.vertices,
+        mesh_with_data.mesh.triangles,
+        mesh_with_data.point_attributes["normals"],
+        mesh_with_data.point_attributes["concentration"] if concentrations is not None else None,
+    )
+    del mesh_with_data
     if malloc_trim is not None:
-        _splashsurf_worker(positions, radius, options, result_queue, concentrations)
-        result = result_queue.get()
         malloc_trim(0)
-    else:
-        proc = Process(target=_splashsurf_worker, args=(positions, radius, options, result_queue, concentrations))
-        proc.start()
-        result = result_queue.get()
-        proc.join()
-        if proc.exitcode != 0:
-            gs.raise_exception_from(f"splashsurf subprocess failed with exit code {proc.exitcode}", result)
-    result_queue.close()
+    if cache_path is not None:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(mode="wb", dir=cache_path.parent, suffix=".part", delete=False) as stream:
+                temporary = Path(stream.name)
+                np.savez(
+                    stream,
+                    result.vertices,
+                    result.triangles,
+                    result.normals,
+                    result.concentrations if concentrations is not None else np.empty(0),
+                )
+            temporary.replace(cache_path)
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
     return result
 
 
@@ -461,7 +465,8 @@ def _parse_recon_backend(backend):
     return options
 
 
-def particles_to_mesh(positions, radius, backend):
+def particles_to_mesh(positions, radius, backend, *, cache_path=None):
+    """Reconstruct a surface; an optional splashsurf cache path must identify immutable inputs and settings."""
     if positions.shape[0] == 0:
         return trimesh.Trimesh(vertices=np.zeros((0, 3)), faces=np.zeros((0, 3)))
 
@@ -501,7 +506,7 @@ def particles_to_mesh(positions, radius, backend):
 
         return trimesh.Trimesh(vertices, faces, process=False)
     elif "splashsurf" in backend:
-        result = _splashsurf_reconstruct(positions, radius, options)
+        result = _splashsurf_reconstruct(positions, radius, options, cache_path=cache_path)
         mesh = trimesh.Trimesh(
             vertices=result.vertices, faces=result.triangles, vertex_normals=result.normals, process=False
         )
@@ -610,13 +615,15 @@ def concentration_colors(concentrations):
     return colors
 
 
-def particles_to_mesh_with_concentration(positions, radius, backend, concentrations):
-    """Reconstruct a liquid surface and interpolate concentrations at its vertices with splashsurf."""
+def particles_to_mesh_with_concentration(positions, radius, backend, concentrations, *, cache_path=None):
+    """Reconstruct a surface with vertex concentrations; cache paths must identify immutable inputs and settings."""
     if "splashsurf" not in backend:
         gs.raise_exception("Concentration surface rendering requires a splashsurf reconstruction backend.")
     if len(positions) == 0:
         return ReconstructedConcentrationMesh(trimesh.Trimesh(), np.empty(0))
-    mesh_data = _splashsurf_reconstruct(positions, radius, _parse_recon_backend(backend), concentrations)
+    mesh_data = _splashsurf_reconstruct(
+        positions, radius, _parse_recon_backend(backend), concentrations, cache_path=cache_path
+    )
     return ReconstructedConcentrationMesh(
         trimesh.Trimesh(
             vertices=mesh_data.vertices,

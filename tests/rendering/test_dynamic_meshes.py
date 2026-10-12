@@ -21,7 +21,7 @@ def test_pbd_reconstruction_uses_pbd_particle_radius(monkeypatch, renderer):
     particle_size = 0.04
     reconstructed_radii = []
 
-    def reconstruct_surface(positions, radius, backend):
+    def reconstruct_surface(positions, radius, backend, *, cache_path=None):
         reconstructed_radii.append(radius)
         mesh = trimesh.creation.icosphere(subdivisions=1, radius=radius)
         if len(positions) > 0:

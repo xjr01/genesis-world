@@ -2,11 +2,16 @@
 
 Run ``python -m examples.genesis_origin_example.rendering.replay_checkpoints PATH`` where PATH contains scene.pkl and
 frame-*.npz.
+--surface reconstructs liquid surfaces with concentration colors; --particles displays liquid particles at lower cost.
+These flags are mutually exclusive; omitting both uses the recorded display modes. Existing checkpoints support either.
 Space plays/pauses, Left/Right step or hold to scrub, R starts/stops a video, I expands the viewer help, and Esc exits.
 Holding an arrow repeats up to 30 checkpoints per second after a short delay. Mouse orbit, pan, and zoom stay available
-while paused. Playback displays every checkpoint in sequence, waiting for loading and drawing to finish. Recording
-samples checkpoint changes at 50 frames per second using their simulation interval dt, including manual seeks.
-Pauses add no frames. Video duration rounds up to the next 0.02 seconds; slower checkpoint rates repeat video frames.
+while paused. Playback samples checkpoints at 50 frames per second; --fps selects another rate. --sequential displays
+every checkpoint for inspection at the cost of slower playback. Recording retains simulation duration when playback
+skips checkpoints; manual seeks each contribute one checkpoint interval. Pauses add no frames. Video duration rounds
+up to one output frame; slower checkpoint rates repeat video frames.
+--cache-surfaces DIRECTORY reuses reconstructed surfaces across runs, trading disk space for faster replay.
+--precompute fills that cache at the selected playback rate without opening a viewer; use it before repeated playback.
 Resize the window before pressing R: each video keeps the window resolution from the start of its recording.
 Constant-quality encoding preserves detail at the cost of longer encoding time and potentially larger files.
 Scene descriptions use pickle and must come from a trusted recording process with the same Genesis checkout/assets.
@@ -47,11 +52,14 @@ class Command(Enum):
 
 @dataclass
 class Playback:
-    """A sequential checkpoint cursor with bounded, repeatable manual seeks."""
+    """A sampled checkpoint cursor with exact single-checkpoint manual seeks."""
 
     dt: float
     frame_count: int
+    fps: int = 50
+    is_sequential: bool = False
     frame_index: int = 0
+    sample_origin: int = 0
     is_playing: bool = False
     seek_offset: int = 0
     next_seek_time: float = 0.0
@@ -60,6 +68,14 @@ class Playback:
     def time(self) -> float:
         return self.frame_index * self.dt
 
+    def next_index(self, index: int) -> int:
+        """Return the next output sample's checkpoint, including the sequence's final checkpoint."""
+        if self.is_sequential:
+            return min(index + 1, self.frame_count - 1)
+        ratio = Fraction(str(self.dt)) * self.fps
+        sample = math.ceil((index - self.sample_origin + 1) * ratio)
+        return min(self.sample_origin + sample // ratio, self.frame_count - 1)
+
     def toggle(self) -> None:
         self.seek_offset = 0
         if self.is_playing:
@@ -67,6 +83,7 @@ class Playback:
         else:
             if self.frame_index == self.frame_count - 1:
                 self.frame_index = 0
+                self.sample_origin = 0
             self.is_playing = True
 
     def seek(self, offset: int) -> None:
@@ -156,18 +173,19 @@ class ReplayControls(ViewerPlugin):
 
 
 class ReplayPlayer:
-    """Display every checkpoint and stream recorded views to video with one frame of read-ahead in host memory."""
+    """Display sampled checkpoints and stream video with one frame of read-ahead in host memory."""
 
-    def __init__(self, reader: CheckpointReader, scene: gs.Scene, output: Path):
+    def __init__(self, reader: CheckpointReader, scene: gs.Scene, output: Path, *, fps=50, is_sequential=False):
         self.reader = reader
         self.scene = scene
         self.output = Path(output)
-        self.fps = 50
+        self.fps = fps
         # Rational intervals keep video samples aligned with checkpoint boundaries over long recordings.
         self.recording_frame_ratio = Fraction(str(reader.description.dt)) * self.fps
         self.recorded_checkpoint_count = 0
         self.recorded_frame_count = 0
-        self.playback = Playback(reader.description.dt, len(reader.frames))
+        self.playback = Playback(reader.description.dt, len(reader.frames), fps=fps, is_sequential=is_sequential)
+        self.next_play_time = 0.0
         self.controls = ReplayControls()
         self.encoder: VideoEncoder | None = None
         self.video_path: Path | None = None
@@ -182,7 +200,7 @@ class ReplayPlayer:
     def is_recording(self) -> bool:
         return self.encoder is not None
 
-    def show_frame(self, index: int, frame: ReplayFrame | None = None) -> None:
+    def show_frame(self, index: int, frame: ReplayFrame | None = None, *, checkpoint_count: int = 1) -> None:
         self.playback.frame_index = index
         self.update_status()
         if index != self.displayed_frame:
@@ -193,11 +211,12 @@ class ReplayPlayer:
                 apply_frame(self.scene, frame)
             self.displayed_frame = index
             self.is_viewer_updated = True
-            self.capture_frame()
+            self.capture_frame(checkpoint_count)
 
-    def capture_frame(self) -> None:
+    def capture_frame(self, checkpoint_count: int = 1) -> None:
         if self.encoder is not None and self.scene.viewer.is_alive():
-            self.recorded_checkpoint_count += 1
+            self.recorded_checkpoint_count += checkpoint_count
+            self.playback.sample_origin = self.playback.frame_index + 1 - self.recorded_checkpoint_count
             frame_count = math.ceil(self.recorded_checkpoint_count * self.recording_frame_ratio)
             if self.recorded_frame_count < frame_count:
                 rgb, *_ = self.scene.viewer.render_offscreen(
@@ -213,18 +232,22 @@ class ReplayPlayer:
                 self.encoder.close()
             finally:
                 self.encoder = None
+                self.playback.sample_origin = 0
             if self.video_path.is_file():
                 gs.logger.info(f"Saved video: {self.video_path}")
             else:
                 gs.logger.info("Recording ended before playback produced a video frame.")
 
     def handle_command(self, command: Command, now: float) -> None:
-        if command in (Command.PLAY_PAUSE, Command.PREVIOUS, Command.NEXT):
-            if self.pending_frame is not None:
-                self.pending_frame.cancel()
-                self.pending_frame = None
+        if (
+            command in (Command.PLAY_PAUSE, Command.PREVIOUS, Command.NEXT, Command.RECORD)
+            and self.pending_frame is not None
+        ):
+            self.pending_frame.cancel()
+            self.pending_frame = None
         if command == Command.PLAY_PAUSE:
             self.playback.toggle()
+            self.next_play_time = now + max(self.playback.dt, 1.0 / self.fps)
             self.show_frame(self.playback.frame_index)
         elif command in (Command.PREVIOUS, Command.NEXT):
             self.playback.hold(offset=-1 if command == Command.PREVIOUS else 1, now=now)
@@ -260,20 +283,27 @@ class ReplayPlayer:
                 )
 
     def tick(self, now: float) -> None:
-        """Consume one sequential checkpoint after the current frame has been drawn in the window."""
+        """Display the next sampled checkpoint once the current frame has been drawn and its interval elapsed."""
         if self.controls.is_frame_drawn and self.playback.repeat_seek(now):
             self.show_frame(self.playback.frame_index)
         if self.playback.is_playing:
             frame = None
-            if self.controls.is_frame_drawn and self.pending_frame is not None and self.pending_frame.done():
+            if (
+                self.controls.is_frame_drawn
+                and now >= self.next_play_time
+                and self.pending_frame is not None
+                and self.pending_frame.done()
+            ):
                 frame = self.pending_frame.result()
                 self.pending_frame = None
             if self.pending_frame is None:
-                index = (frame.index if frame is not None else self.playback.frame_index) + 1
-                if index < self.playback.frame_count:
+                current = frame.index if frame is not None else self.playback.frame_index
+                index = self.playback.next_index(current)
+                if index > current:
                     self.pending_frame = self.loader.submit(self.reader.read_frame, index)
             if frame is not None:
-                self.show_frame(frame.index, frame)
+                self.show_frame(frame.index, frame, checkpoint_count=frame.index - self.playback.frame_index)
+                self.next_play_time = now + max(self.playback.dt, 1.0 / self.fps)
             if self.playback.frame_index == self.playback.frame_count - 1 and self.controls.is_frame_drawn:
                 self.playback.is_playing = False
                 self.stop_recording()
@@ -312,11 +342,69 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("directory", type=Path, help="Directory containing scene.pkl and frame-*.npz.")
     parser.add_argument("--output", type=Path, help="Video output directory (default: DIRECTORY/recordings).")
+    liquid_display = parser.add_mutually_exclusive_group()
+    liquid_display.add_argument(
+        "--surface",
+        dest="liquid_vis_mode",
+        action="store_const",
+        const="recon",
+        help="Override recorded liquid display modes with reconstructed surfaces, adding reconstruction cost.",
+    )
+    liquid_display.add_argument(
+        "--particles",
+        dest="liquid_vis_mode",
+        action="store_const",
+        const="particle",
+        help="Override recorded liquid display modes with particles for faster inspection of individual samples.",
+    )
+    parser.add_argument(
+        "--fps", type=int, default=50, help="Preview and video rate; higher rates retain more motion detail."
+    )
+    parser.add_argument(
+        "--sequential",
+        dest="is_sequential",
+        action="store_true",
+        help="Display every checkpoint for inspection, including checkpoints between video samples.",
+    )
+    parser.add_argument(
+        "--cache-surfaces",
+        type=Path,
+        help="Store liquid surface meshes here for faster repeated replay at extra disk cost.",
+    )
+    parser.add_argument(
+        "--precompute",
+        dest="is_precomputing",
+        action="store_true",
+        help="Prepare sampled surface meshes without a viewer; requires --cache-surfaces.",
+    )
     args = parser.parse_args()
-    reader = CheckpointReader(args.directory)
+    if args.fps <= 0:
+        parser.error("--fps must be positive.")
+    if args.is_precomputing and args.cache_surfaces is None:
+        parser.error("--precompute requires --cache-surfaces DIRECTORY.")
+    reader = CheckpointReader(args.directory, surface_cache=args.cache_surfaces, liquid_vis_mode=args.liquid_vis_mode)
+    if args.is_precomputing and not any(
+        isinstance(entity.material, gs.materials.PBSTF.Liquid) and entity.surface.vis_mode == "recon"
+        for entity in reader.description.entities
+    ):
+        parser.error("--precompute requires liquid surfaces; select --surface or use a surface-mode recording.")
     gs.init(backend=gs.cuda, precision=reader.description.precision, logging_level="info")
-    scene = reader.build_scene()
-    player = ReplayPlayer(reader, scene, args.output or args.directory / "recordings")
+    scene = reader.build_scene(is_viewer_shown=not args.is_precomputing)
+    if args.is_precomputing:
+        playback = Playback(reader.description.dt, len(reader.frames), fps=args.fps, is_sequential=args.is_sequential)
+        try:
+            while True:
+                apply_frame(scene, reader.read_frame(playback.frame_index))
+                gs.logger.info(f"Cached checkpoint {playback.frame_index}/{playback.frame_count - 1}")
+                if playback.frame_index == playback.frame_count - 1:
+                    break
+                playback.frame_index = playback.next_index(playback.frame_index)
+        finally:
+            scene.destroy()
+        return
+    player = ReplayPlayer(
+        reader, scene, args.output or args.directory / "recordings", fps=args.fps, is_sequential=args.is_sequential
+    )
     player.run()
 
 

@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import numpy as np
 import torch
 
@@ -96,6 +98,8 @@ class RasterizerContext:
         self.render_particle_as = options.render_particle_as
         self.rendered_envs_idx = list(options.rendered_envs_idx) if options.rendered_envs_idx is not None else None
         self.env_separate_rigid = options.env_separate_rigid
+        # Set for the duration of an immutable checkpoint render by apply_frame in checkpoint_replay.py.
+        self.particle_surface_cache: Path | None = None
 
         # nodes
         self.world_frame_node = None
@@ -830,6 +834,9 @@ class RasterizerContext:
             recon_entities = [entity for entity in liquids if entity.surface.vis_mode == "recon"]
             for env_slot, idx in enumerate(self.rendered_envs_idx):
                 if recon_entities:
+                    cache_path = None
+                    if self.particle_surface_cache is not None:
+                        cache_path = self.particle_surface_cache / f"{recon_entities[0].idx}-{idx}.npz"
                     spans = [slice(entity.particle_start, entity.particle_end) for entity in recon_entities]
                     positions = np.concatenate(
                         [particles_pos[env_slot, span][is_active[env_slot, span]] for span in spans]
@@ -844,7 +851,11 @@ class RasterizerContext:
                         for entity in recon_entities
                     ):
                         recon = pu.particles_to_mesh_with_concentration(
-                            positions, solver.particle_radius, recon_entities[0].surface.recon_backend, values
+                            positions,
+                            solver.particle_radius,
+                            recon_entities[0].surface.recon_backend,
+                            values,
+                            cache_path=cache_path,
                         )
                         mesh = recon.mesh
                         mesh.visual = trimesh.visual.ColorVisuals(
@@ -852,7 +863,10 @@ class RasterizerContext:
                         )
                     else:
                         mesh = pu.particles_to_mesh(
-                            positions, solver.particle_radius, recon_entities[0].surface.recon_backend
+                            positions,
+                            solver.particle_radius,
+                            recon_entities[0].surface.recon_backend,
+                            cache_path=cache_path,
                         )
                         mesh.visual = mu.surface_uvs_to_trimesh_visual(
                             recon_entities[0].surface, n_verts=len(mesh.vertices)

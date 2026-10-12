@@ -6,7 +6,7 @@ created by a trusted recording process. Frames contain only numerical arrays and
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import math
 from pathlib import Path
 import pickle
@@ -22,6 +22,7 @@ from genesis.engine.entities.rigid_entity import RigidEntity
 from genesis.engine.materials.base import Material
 from genesis.options.morphs import Morph
 from genesis.options.surfaces import Surface
+from genesis.utils.mesh import get_hashkey
 from genesis.utils.misc import tensor_to_array
 
 
@@ -57,6 +58,7 @@ class ReplayFrame:
     time: float
     # Entity order follows ReplayScene: rigid qpos; particle pos, active, then liquid concentration.
     arrays: tuple[np.ndarray, ...]
+    surface_cache: Path | None = None
 
 
 def describe_scene(scene: gs.Scene, dt: float) -> ReplayScene:
@@ -137,10 +139,19 @@ class CheckpointWriter:
 
 
 class CheckpointReader:
-    """Index a completed checkpoint prefix and load one numerical frame at a time."""
+    """Load numerical frames with recorded liquid display modes or a particle/reconstructed-surface override."""
 
-    def __init__(self, directory: Path):
+    def __init__(
+        self,
+        directory: Path,
+        *,
+        surface_cache: Path | None = None,
+        liquid_vis_mode: Literal["particle", "recon"] | None = None,
+    ):
+        if liquid_vis_mode not in (None, "particle", "recon"):
+            raise ValueError("Liquid replay mode must be 'particle', 'recon', or None for the recorded mode.")
         self.directory = Path(directory)
+        self.surface_cache = Path(surface_cache) if surface_cache is not None else None
         path = self.directory / "scene.pkl"
         try:
             with path.open("rb") as stream:
@@ -151,6 +162,15 @@ class CheckpointReader:
             raise ValueError("Unsupported checkpoint scene format; record a new sequence with this checkout.")
         if not math.isfinite(description.dt) or description.dt <= 0 or description.precision not in ("32", "64"):
             raise ValueError("Invalid checkpoint time interval or precision.")
+        if liquid_vis_mode is not None:
+            entities = []
+            for entity in description.entities:
+                if isinstance(entity.material, gs.materials.PBSTF.Liquid):
+                    surface = entity.surface.model_copy(deep=True)
+                    surface.vis_mode = liquid_vis_mode
+                    entity = replace(entity, surface=surface)
+                entities.append(entity)
+            description = replace(description, entities=tuple(entities))
         self.description = description
         self.frames = tuple(sorted(self.directory.glob("frame-*.npz")))
         if not self.frames:
@@ -194,7 +214,16 @@ class CheckpointReader:
                         raise ValueError("Checkpoint contains non-finite state.")
         except (OSError, ValueError, EOFError, BadZipFile) as error:
             raise ValueError(f"Cannot read checkpoint {path}: {error}") from error
-        return ReplayFrame(index, saved_time.item(), arrays)
+        cache_path = None
+        if self.surface_cache is not None:
+            # Display overrides can change which liquids share a reconstructed surface.
+            cache_path = self.surface_cache / get_hashkey(
+                (self.directory / "scene.pkl").resolve(),
+                path.resolve(),
+                "particle-surface-v2",
+                tuple(entity.surface.vis_mode for entity in self.description.entities),
+            )
+        return ReplayFrame(index, saved_time.item(), arrays, cache_path)
 
     def build_scene(self, *, is_viewer_shown: bool = True) -> gs.Scene:
         """Rebuild the recorded entities and initialize their rendering resources."""
@@ -247,4 +276,11 @@ def apply_frame(scene: gs.Scene, frame: ReplayFrame) -> None:
                 entity.set_particles_concentration(next(arrays))
         else:
             raise ValueError(f"Unsupported replay entity: {entity.name}")
-    scene.visualizer.update(force=True)
+    context = scene.visualizer.context
+    context.particle_surface_cache = frame.surface_cache
+    try:
+        scene.visualizer.update(force=True)
+        if frame.surface_cache is not None and scene.viewer is None:
+            context.update()
+    finally:
+        context.particle_surface_cache = None
