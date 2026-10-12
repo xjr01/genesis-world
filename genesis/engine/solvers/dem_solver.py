@@ -601,10 +601,19 @@ class DEMSolver(Solver):
             self._n_particles, self.particles.pos, self.particles.active, self.particles_ng.reordered_idx
         )
 
+        # only the fields read back from the reordered layout are copied: the contact kernel's
+        # pos/vel/active/saturate_rate/inv_mass_eff plus acc (assembled there, returned by
+        # _kernel_copy_acc_from_reordered); the remaining wet-sand fields are consumed from the
+        # canonical layout only, so copying them here is pure traffic
         for i_p, i_b in qd.ndrange(self._n_particles, self._B):
             if self.particles[i_p, i_b].active:
                 reordered_idx = self.particles_ng[i_p, i_b].reordered_idx
-                self.particles_reordered[reordered_idx, i_b] = self.particles[i_p, i_b]
+                self.particles_reordered[reordered_idx, i_b].pos = self.particles[i_p, i_b].pos
+                self.particles_reordered[reordered_idx, i_b].vel = self.particles[i_p, i_b].vel
+                self.particles_reordered[reordered_idx, i_b].acc = self.particles[i_p, i_b].acc
+                self.particles_reordered[reordered_idx, i_b].active = self.particles[i_p, i_b].active
+                self.particles_reordered[reordered_idx, i_b].saturate_rate = self.particles[i_p, i_b].saturate_rate
+                self.particles_reordered[reordered_idx, i_b].inv_mass_eff = self.particles[i_p, i_b].inv_mass_eff
 
     @qd.func
     def _func_bezier_G(self, sr: qd.f32):
@@ -666,6 +675,7 @@ class DEMSolver(Solver):
         k_tang: qd.f32,
         tan_fric: qd.f32,
         c_norm: qd.f32,
+        gate2: qd.f32,
     ):
         # C++ DEMForce::getForce(pi, pj), force on particle i; strictly elastic, no damping in the
         # reference. Recorded deviation (user request 2026-08-22): when DEMOptions.restitution < 1,
@@ -675,7 +685,9 @@ class DEMSolver(Solver):
         pos_j = self.particles_reordered[j, i_b].pos
         dij = pos_j - pos_i
         dist2 = dij.dot(dij)
-        if dist2 < 6.0 * particle_radius * particle_radius:
+        # gate2 = (2r + d_rupture)^2 with slack (see _material_constants): beyond it the pair
+        # contributes exactly zero force (no penetration, ruptured liquid bridge)
+        if dist2 < gate2:
             dist = qd.sqrt(dist2)
             if dist >= 0.001 * particle_radius:
                 n = dij / dist
@@ -715,6 +727,7 @@ class DEMSolver(Solver):
         k_tang: qd.f32,
         tan_fric: qd.f32,
         c_norm: qd.f32,
+        gate2: qd.f32,
     ):
         for i_p, i_b in qd.ndrange(self._n_particles, self._B):
             if self.particles_reordered[i_p, i_b].active:
@@ -727,7 +740,7 @@ class DEMSolver(Solver):
                     ):
                         if i_p != j and self.particles_reordered[j, i_b].active:
                             self._func_contact_force(
-                                i_p, j, i_b, particle_radius, k_norm, k_tang, tan_fric, c_norm
+                                i_p, j, i_b, particle_radius, k_norm, k_tang, tan_fric, c_norm, gate2
                             )
 
     @qd.kernel
@@ -1234,51 +1247,62 @@ class DEMSolver(Solver):
         kick = ddt * flip._inv_dx**3
         for i_p, i_b in qd.ndrange(self._n_particles, self._B):
             if self.particles[i_p, i_b].active:
-                pos = self.particles[i_p, i_b].pos
                 cf = self.particles[i_p, i_b].coupling_force
-                for axis in qd.static(range(3)):
-                    offsets = qd.Vector([0.5, 0.5, 0.5])
-                    offsets[axis] = 0.0
-                    rel = (pos - flip._lower_v) * flip._inv_dx - offsets
-                    base = qd.floor(rel, gs.qd_int)
-                    frac = rel - base
-                    for i, j, k in qd.static(qd.ndrange(2, 2, 2)):
-                        w = (frac[0] if i else 1.0 - frac[0]) * (frac[1] if j else 1.0 - frac[1]) * (
-                            frac[2] if k else 1.0 - frac[2]
-                        )
-                        idx = base + qd.Vector([i, j, k], dt=gs.qd_int)
-                        if axis == 0:
-                            idx = self._func_clamp_flip_idx(idx, qd.Vector(flip.coupling_force_u.shape, dt=gs.qd_int) - 1)
-                            qd.atomic_add(flip.coupling_force_u[idx], cf[0] * w * scale)
-                            qd.atomic_add(flip.vel_u[idx], -cf[0] * w * kick)
-                        elif axis == 1:
-                            idx = self._func_clamp_flip_idx(idx, qd.Vector(flip.coupling_force_v.shape, dt=gs.qd_int) - 1)
-                            qd.atomic_add(flip.coupling_force_v[idx], cf[1] * w * scale)
-                            qd.atomic_add(flip.vel_v[idx], -cf[1] * w * kick)
-                        else:
-                            idx = self._func_clamp_flip_idx(idx, qd.Vector(flip.coupling_force_w.shape, dt=gs.qd_int) - 1)
-                            qd.atomic_add(flip.coupling_force_w[idx], cf[2] * w * scale)
-                            qd.atomic_add(flip.vel_w[idx], -cf[2] * w * kick)
+                # cal_coupling leaves an exact zero force on grains outside the fluid, and adding
+                # exact zeros is idempotent, so those grains skip the whole trilinear scatter
+                if cf[0] != 0.0 or cf[1] != 0.0 or cf[2] != 0.0:
+                    pos = self.particles[i_p, i_b].pos
+                    for axis in qd.static(range(3)):
+                        offsets = qd.Vector([0.5, 0.5, 0.5])
+                        offsets[axis] = 0.0
+                        rel = (pos - flip._lower_v) * flip._inv_dx - offsets
+                        base = qd.floor(rel, gs.qd_int)
+                        frac = rel - base
+                        for i, j, k in qd.static(qd.ndrange(2, 2, 2)):
+                            w = (
+                                (frac[0] if i else 1.0 - frac[0])
+                                * (frac[1] if j else 1.0 - frac[1])
+                                * (frac[2] if k else 1.0 - frac[2])
+                            )
+                            idx = base + qd.Vector([i, j, k], dt=gs.qd_int)
+                            if axis == 0:
+                                idx = self._func_clamp_flip_idx(
+                                    idx, qd.Vector(flip.coupling_force_u.shape, dt=gs.qd_int) - 1
+                                )
+                                qd.atomic_add(flip.coupling_force_u[idx], cf[0] * w * scale)
+                                qd.atomic_add(flip.vel_u[idx], -cf[0] * w * kick)
+                            elif axis == 1:
+                                idx = self._func_clamp_flip_idx(
+                                    idx, qd.Vector(flip.coupling_force_v.shape, dt=gs.qd_int) - 1
+                                )
+                                qd.atomic_add(flip.coupling_force_v[idx], cf[1] * w * scale)
+                                qd.atomic_add(flip.vel_v[idx], -cf[1] * w * kick)
+                            else:
+                                idx = self._func_clamp_flip_idx(
+                                    idx, qd.Vector(flip.coupling_force_w.shape, dt=gs.qd_int) - 1
+                                )
+                                qd.atomic_add(flip.coupling_force_w[idx], cf[2] * w * scale)
+                                qd.atomic_add(flip.vel_w[idx], -cf[2] * w * kick)
                 self.particles[i_p, i_b].coupling_force = qd.Vector.zero(gs.qd_float, 3)
 
-    def _dem_substep_coupled(self, f, ddt, dt_f, k_norm, k_tang, tan_fric, c_norm):
+    def _dem_substep_coupled(self, f, ddt, dt_f, k_norm, k_tang, tan_fric, c_norm, gate2):
         # C++ MoveDEMParticlesSplit (coupled): saturate rate, coupling force (reads the previous
         # sub-substep's acc), force assembly, contact, reaction scatter, collider, integrate
         self._kernel_update_saturate_rate(f)
         self._kernel_cal_coupling(f)
         self._kernel_reset_acc_coupled(f, dt_f)
         self._kernel_reorder_particles(f)
-        self._kernel_contact_forces(f, self._particle_radius, k_norm, k_tang, tan_fric, c_norm)
+        self._kernel_contact_forces(f, self._particle_radius, k_norm, k_tang, tan_fric, c_norm, gate2)
         self._kernel_copy_acc_from_reordered(f)
         self._kernel_transfer_coupling_forces(f, ddt, dt_f)
         self._kernel_move_obstacle(ddt)
         self._kernel_enforce_boundary(f, self._particle_radius, tan_fric)
         self._kernel_integrate(f, ddt)
 
-    def _dem_substep(self, f, ddt, inv_mass, k_norm, k_tang, tan_fric, c_norm):
+    def _dem_substep(self, f, ddt, inv_mass, k_norm, k_tang, tan_fric, c_norm, gate2):
         self._kernel_reset_acc(f)
         self._kernel_reorder_particles(f)
-        self._kernel_contact_forces(f, self._particle_radius, k_norm, k_tang, tan_fric, c_norm)
+        self._kernel_contact_forces(f, self._particle_radius, k_norm, k_tang, tan_fric, c_norm, gate2)
         self._kernel_copy_acc_from_reordered(f)
         self._kernel_move_obstacle(ddt)
         self._kernel_enforce_boundary(f, self._particle_radius, tan_fric)
@@ -1309,32 +1333,40 @@ class DEMSolver(Solver):
             L = -math.log(e)
             xi = L / math.sqrt(math.pi * math.pi + L * L)
             c_norm = float(2.0 * xi * math.sqrt(k_norm * 0.5 * mass))
-        return inv_mass, k_norm, k_tang, tan_fric, c_norm
+        # squared contact gate: beyond 2r + d_rupture (the liquid-bridge rupture distance of
+        # _func_capillary_force) both force terms are exactly zero, so the pair loop may skip such
+        # pairs before its sqrt and force work; the relative slack keeps the fp-rounded squared
+        # gate on the safe side of the capillary branch's own H < d_rupture comparison
+        contact_angle = 30.0 / 180.0 * 3.141592653589793
+        bridge_vol = 4.0 / 3.0 * 3.141592653589793 * self._particle_radius**3 * 1e-4
+        d_rupture = (1.0 + 0.5 * contact_angle) * (bridge_vol ** (1.0 / 3.0) + 0.1 * bridge_vol ** (2.0 / 3.0))
+        contact_gate2 = (2.0 * self._particle_radius + d_rupture) ** 2 * (1.0 + 1e-6)
+        return inv_mass, k_norm, k_tang, tan_fric, c_norm, contact_gate2
 
     def _advance(self, dt_total, f):
         # fixed sub-substep (the reference's velocity-adaptive clamp is removed by user decision):
         # as many full `ddt` steps as fit into dt_total, plus one remainder step
-        inv_mass, k_norm, k_tang, tan_fric, c_norm = self._material_constants()
+        inv_mass, k_norm, k_tang, tan_fric, c_norm, gate2 = self._material_constants()
         ddt = self._m_ddt * self._ddt_safety
         n_full = int(dt_total / ddt)
         for _ in range(n_full):
-            self._dem_substep(f, ddt, inv_mass, k_norm, k_tang, tan_fric, c_norm)
+            self._dem_substep(f, ddt, inv_mass, k_norm, k_tang, tan_fric, c_norm, gate2)
         remainder = dt_total - n_full * ddt
         if remainder > 0.0:
-            self._dem_substep(f, remainder, inv_mass, k_norm, k_tang, tan_fric, c_norm)
+            self._dem_substep(f, remainder, inv_mass, k_norm, k_tang, tan_fric, c_norm, gate2)
 
     def advance_coupled(self, f, dt_f):
         # C++ MoveDEMParticles(dt_f): fresh fluid density, then the ddt sub-substep loop whose
         # total duration is exactly dt_f (called by the FLIP solver before each water step)
         self._sim.flip_solver._kernel_cal_density(f)
-        inv_mass, k_norm, k_tang, tan_fric, c_norm = self._material_constants()
+        inv_mass, k_norm, k_tang, tan_fric, c_norm, gate2 = self._material_constants()
         ddt = self._m_ddt * self._ddt_safety
         n_full = int(dt_f / ddt)
         for _ in range(n_full):
-            self._dem_substep_coupled(f, ddt, dt_f, k_norm, k_tang, tan_fric, c_norm)
+            self._dem_substep_coupled(f, ddt, dt_f, k_norm, k_tang, tan_fric, c_norm, gate2)
         remainder = dt_f - n_full * ddt
         if remainder > 0.0:
-            self._dem_substep_coupled(f, remainder, dt_f, k_norm, k_tang, tan_fric, c_norm)
+            self._dem_substep_coupled(f, remainder, dt_f, k_norm, k_tang, tan_fric, c_norm, gate2)
 
     def substep_pre_coupling_grad(self, f):
         pass

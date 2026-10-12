@@ -10,3 +10,7 @@
 # Force LF for Docker-related files
 Dockerfile text eol=lf
 *.dockerignore text eol=lf
+
+# Preserve imported garment geometry bytes and their source hashes.
+examples/garment_folding/assets/**/*.obj -text -whitespace
+examples/garment_folding/assets/**/*.urdf -text -whitespace

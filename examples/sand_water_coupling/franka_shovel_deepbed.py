@@ -2,6 +2,16 @@
 complete v5 wincombo scoop trajectory with the Franka follower (user request 2026-08-28:
 "初始采样改到1.8倍 ... 等沙子不再沉降了再滴水 然后完整仿真铲子").
 
+Coarse fast profile (2026-10-10): grid_res 64 + 3.125 mm grains (both were res 128 / 1.5625 mm)
+-- ~8x fewer sand and water particles and half the DEM substeps, cutting the full run from ~16 h
+to well under 1 h at coarser visual fidelity. A4 absorption profile (2026-10-11): MAX_RATIO 0.5 +
+VISCOSITY 1.0 + droplet r 0.020 (probed in experiments/res64_absorb_tuning/TUNING.md): 146 steps
+to dry vs 661 at the old 0.3/4.0/0.016, with the largest spread AND percolation depth. Safety
+gear (2026-10-11): ddt_safety defaults to the fast gear 1.0 (argv[3] selects; see SAFETY_GEARS),
+probed full-run safe on this scene. Young gear (2026-10-11): the sand Young's modulus defaults
+to the soft gear 1e5 (argv[4] selects; see YOUNG_GEARS), probed full-run safe on this scene
+with the wet retention intact (100%).
+
 Evolution of experiments/phase9_probe_deepbed.py (2 s probe) into the full demo:
 
   Phase A  sand bed filled to 1.8x the current height (0.10 m -> 0.18 m) with the poisson-disk
@@ -32,9 +42,13 @@ Outputs (do NOT collide with the phase9_franka_shovel_sdf final products):
   experiments/recordings/phase9_deepbed_full{tag}/frame_*.npz + meta.json + ik_log.csv
 Render: experiments/phase9_deepbed_full_render.py [tag] -> videos/phase9_deepbed_full{tag}.mp4
 
-Usage: python phase9_deepbed_full.py [mode] [tag]
-  mode  "smoke": build + 30 settle steps + one full-restart IK solve, then exit
-        "full" (default): the whole A-H sequence
+Usage: python phase9_deepbed_full.py [mode] [tag] [safety] [young]
+  mode    "smoke": build + 30 settle steps + one full-restart IK solve, then exit
+          "full" (default): the whole A-H sequence
+  safety  DEM substep safety gear: "1.0"/"fast" (default) or "0.5"/"archive"
+          (see SAFETY_GEARS below)
+  young   sand Young's modulus gear: "1e5"/"soft" (default) or "1e6"/"archive"
+          (see YOUNG_GEARS below)
 """
 import json
 import math
@@ -57,32 +71,78 @@ TAG = sys.argv[2] if len(sys.argv) > 2 else ("_smoke" if MODE == "smoke" else ""
 OUT_DIR = os.path.join(HERE, "recordings", f"phase9_deepbed_full{TAG}")
 
 DT = 1.0 / 60.0
-PARTICLE_RADIUS = 3.125e-3 * 0.5  # 1.5625 mm
+PARTICLE_RADIUS = 3.125e-3  # 3.125 mm coarse profile: grain diameter 6.25 mm ~ the res-64 dx
+                            # (0.35 m extent / 64 = 5.47 mm), same grain-to-dx ratio as the
+                            # 1.5625 mm grains at res 128, so sand AND water counts drop ~8x
 BOX_LOWER = (-0.175, -0.15, 0.0)
 BOX_UPPER = (0.175, 0.15, 0.40)
-MAX_RATIO = 0.3
+# 0.3 -> 0.5 (2026-10-11, A4 profile; experiments/res64_absorb_tuning/TUNING.md): the engine's
+# usable cap (the absorption fraction floor 1-0.74*(1+max_ratio) clamps negative above ~0.35,
+# flip_solver.py; the A5 = 0.6 probe showed zero gain past 0.5). Going 0.3 -> 0.5 alone cut the
+# probe's drying time 661 -> 255 steps (at visc 4.0); the full A4 combo dries in 146.
+MAX_RATIO = 0.5
 SURFACE_TENSION = 0.02
-VISCOSITY = 0.8  # sand<->water quadratic drag (C++ m_ViscosityCoeff, flip._viscosity_coeff;
+VISCOSITY = 1.0  # sand<->water quadratic drag (C++ m_ViscosityCoeff, flip._viscosity_coeff;
                  # ONLY used by _kernel_cal_coupling's cf += dv*|dv|*12*pi*r^2*visc -- not the
-                 # water's own viscosity). 0.4 -> 0.8 (user decision 2026-09-01), combined with
-                 # the 0.8x droplet radius below. History: 0.01 -> 2.0 (2026-08-29) fixed the
-                 # percolation (probes: 0.01 -> p1 depth 0.0826, 0.05 -> 0.0683, 0.25 -> 0.0532,
-                 # 2.0 -> 0.0359 PASS; log fit depth = 0.0407 - 0.00914*ln(visc)); 2.0 -> 0.4
-                 # with r0.8 droplet measured 0.0424 FAIL, with r0.7 droplet 0.0384 FAIL +
-                 # too-small wet clump (n_wet 1621); the r0.8 measured/log-model ratio ~0.865
-                 # extrapolates visc = 0.8 + r0.8 to p1 ~0.037 (borderline band, user-aware).
+                 # water's own viscosity). 4.0 -> 1.0 (2026-10-11, A4 profile): in the res64
+                 # absorb-tuning matrix (experiments/res64_absorb_tuning/TUNING.md) this is the
+                 # biggest drying-speed lever (255 -> 85 steps at max_ratio 0.5), and A4
+                 # (0.5/1.0/r0.020) keeps 146-step drying with the largest wet spread. History:
+                 # 0.8 -> 4.0 (2026-10-10, res-64 coarse profile) compensated the coarse grid's
+                 # percolation but slowed the absorption tail to ~2-3 water particles/step;
+                 # 0.01 -> 2.0
+                 # (2026-08-29) fixed the percolation (probes: 0.01 -> p1 depth 0.0826,
+                 # 0.05 -> 0.0683, 0.25 -> 0.0532, 2.0 -> 0.0359 PASS; log fit depth =
+                 # 0.0407 - 0.00914*ln(visc)); 2.0 -> 0.4 with r0.8 droplet measured 0.0424 FAIL,
+                 # with r0.7 droplet 0.0384 FAIL + too-small wet clump (n_wet 1621); the r0.8
+                 # measured/log-model ratio ~0.865 extrapolates visc = 0.8 + r0.8 to p1 ~0.037
+                 # (borderline band, user-aware); 0.4 -> 0.8 (user decision 2026-09-01) combined
+                 # with the 0.8x droplet radius below.
                  # C++ reference default is m_ViscosityCoeff = 1 (flip_solver.py comment),
                  # our original 0.01 was the outlier.
 RESTITUTION = 0.5
-SAFETY = 0.5
+# DEM substep safety gear (ddt_safety; argv[3] selects, written to meta.json as "ddt_safety"):
+#   1.0 "fast" (default) -- ddt at the C++ formula's stability limit itself (radius*pi*
+#       sqrt(rho/Young)/2): half the DEM substeps of 0.5. Full A-H probe on THIS scene ran zero
+#       NaN / no popcorn across all phases incl. the two historical risk windows (droplet impact,
+#       lift start): 1110 steps / 25.8 min / 1.394 s/step, wet retention 297/297 = 100%
+#       (experiments/safety10_probe/RESULT_SAFETY10.md, 2026-10-11).
+#   0.5 "archive" -- half the limit: the C++-conservative margin and the value behind every
+#       archived A4 number (1105 steps / 54.9 min / 2.98 s/step). The two gears' trajectories
+#       diverge from the settle phase on, so their runs are not comparable frame-by-frame.
+#   1.0 was validated on this scene only; denser high-impact regimes are not covered -- probe a
+#   new scene (smoke / short run, watch for NaN and popcorn) before relying on the fast gear.
+SAFETY_GEARS = {"1.0": 1.0, "fast": 1.0, "0.5": 0.5, "archive": 0.5}
+SAFETY = SAFETY_GEARS[sys.argv[3] if len(sys.argv) > 3 else "1.0"]
+# Sand Young's modulus gear (argv[4] selects, written to meta.json as "young_modulus"); passed to
+# the Sand material, so the DEM substep formula follows it automatically (ddt ~ sqrt(1/young)):
+#   1e5 "soft" (default) -- 10x softer grains than the C++ reference value: ddt stretches by
+#       sqrt(10), cutting DEM substeps ~2148 -> ~680 per control step at safety 1.0. Full A-H
+#       probe on THIS scene ran zero NaN / no popcorn with wet retention 299/299 = 100%: 1159
+#       steps / 9.65 min / 0.460 s median per step (experiments/e1e5_gear_verify/RESULT_E1E5.md,
+#       2026-10-11). Measured soft-bed physics vs the archive gear: bed surface ~13 mm lower,
+#       percolation 0.0242 (-23%), drying 154 steps (+39%, still ~73 s wall), scoop load 583
+#       (-15%), blade tip ends 4.1 mm below the floor (the S2-anchored 2.8 cm insertion depth on
+#       a lower bed; same geometric side effect as every other soft-gear probe).
+#   1e6 "archive" -- the C++ reference value: the value behind every archived A4 number (1105
+#       steps / 54.9 min at safety 0.5; 1110 steps / 25.8 min at safety 1.0). The two gears'
+#       trajectories diverge from the settle phase on, so their runs are not comparable
+#       frame-by-frame. The wincombo window (young x0.25) scales with the gear: 2.5e4 vs 2.5e5.
+#   1e5 was validated on this scene only (with safety 1.0); denser high-impact regimes are not
+#   covered -- probe a new scene before relying on the soft gear.
+YOUNG_GEARS = {"1e5": 1e5, "soft": 1e5, "1e6": 1e6, "archive": 1e6}
+YOUNG = YOUNG_GEARS[sys.argv[4] if len(sys.argv) > 4 else "1e5"]
 # user request 2026-08-27/28: poisson_ratio stays at the library default 0.3 -- never touched
 
 BED_FILL_Z = 0.18  # 1.8 x the current 0.10 m bed (user request 2026-08-28)
 DROPLET_X = -0.01
-DROPLET_RADIUS = 0.016  # 0.02 * 0.8 (user decision 2026-09-01: back to r0.8 after the r0.7
-                        # probe gave n_wet 1621 = too-small wet clump). Volume ~0.512x the
-                        # original, n_water ~19064 -> ~9700 (read dynamically via
-                        # water.n_particles)
+DROPLET_RADIUS = 0.020  # 0.016 -> 0.020 (2026-10-11, A4 profile): the only knob raising BOTH
+                        # spread and depth in the res64 absorb-tuning matrix (probe A4 vs A3:
+                        # x span 0.037 -> 0.054, p1 depth 0.022 -> 0.031, n_wet 122 -> 294);
+                        # volume ~1.95x, n_water ~540 -> ~1400 at res 64 (probe measured 1408;
+                        # read dynamically via water.n_particles). History: 0.02 * 0.8 = 0.016
+                        # (user decision 2026-09-01: back to r0.8 after the r0.7 probe gave
+                        # n_wet 1621 = too-small wet clump).
 DROPLET_INIT = (DROPLET_X, 0.0, 0.35)  # parked high; deactivated until phase B
 DROPLET_GAP = 0.05  # center height above the measured surface. 0.0225 -> 0.05 (user request
                     # 2026-09-02, "水滴更高"): free fall from ~S1+0.05-0.016 gives impact
@@ -141,7 +201,9 @@ ABSORB_MIN, ABSORB_MAX, ABSORB_DRY_N = 60, 700, 5
 # ABSORB_MAX 240 -> 700 (2026-08-29): with VISCOSITY = 2.0 the visc2.0 probe showed absorption
 # is rate-limited to ~23 water particles/step in the tail (decaying to ~14), zero at ~step
 # 470-630 after release -- the old 240 cap (set for visc = 0.01, ~60 steps) would have started
-# the blade descent with ~5000 water particles still floating on the bed.
+# the blade descent with ~5000 water particles still floating on the bed. Kept at 700 for the A4
+# profile (0.5/1.0/r0.020): probe A4 dried in 146 steps (the old 0.3/4.0/0.016 needed 661 and
+# capped out at 700 in the full run), so the cap holds a ~4.8x margin.
 APPROACH_MAX = 200
 DESCEND_MAX = 120
 
@@ -266,7 +328,7 @@ def main():
             upper_bound=BOX_UPPER,
         ),
         flip_options=gs.options.FLIPOptions(
-            grid_res=128,
+            grid_res=64,  # coarse profile: dx 5.47 mm over the 0.35 m extent ~ the sand diameter
             viscosity_coeff=VISCOSITY,
             lower_bound=BOX_LOWER,
             upper_bound=BOX_UPPER,
@@ -279,7 +341,7 @@ def main():
             pos=(0.0, 0.0, 0.00025 + BED_FILL_Z / 2.0),
             size=(0.34, 0.29, BED_FILL_Z),
         ),
-        material=gs.materials.DEM.Sand(sampler="poisson", rho=2.5, max_ratio=MAX_RATIO),
+        material=gs.materials.DEM.Sand(sampler="poisson", rho=2.5, max_ratio=MAX_RATIO, young_modulus=YOUNG),
     )
     water = scene.add_entity(
         morph=gs.morphs.Sphere(pos=DROPLET_INIT, radius=DROPLET_RADIUS),
@@ -380,6 +442,8 @@ def main():
     t0 = time.time()
     meta = {
         "dt": DT, "particle_radius": PARTICLE_RADIUS, "max_ratio": MAX_RATIO,
+        "grid_res": 64, "droplet_radius": DROPLET_RADIUS, "ddt_safety": SAFETY,
+        "young_modulus": YOUNG,
         "n_sand": int(sand.n_particles), "n_water": int(n_water),
         "sampler": "poisson", "poisson_ratio": 0.3, "bed_fill_z": BED_FILL_Z,
         "droplet_x": DROPLET_X,
