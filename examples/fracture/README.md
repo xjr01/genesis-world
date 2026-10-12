@@ -9,7 +9,8 @@ while the PBD render mesh remains the single visual representation.
 
 ## Running
 
-Requires a CUDA GPU and Genesis installed from this repository.
+Requires a CUDA GPU with a matching PyTorch build and Genesis installed from this repository
+(`python -m pip install -e ".[dev]"`). Run from the repository root.
 
 ```bash
 python examples/fracture/pbd_vase_fracture.py --record
@@ -38,7 +39,9 @@ python examples/fracture/pbd_vase_fracture.py --duration 3
 
 ## Key simulation parameters (set in source)
 
-These are hardcoded in `pbd_vase_fracture.py` and control the fracture behavior:
+These are hardcoded in `main()` of `pbd_vase_fracture.py` and control the fracture behavior. The
+scene uses Z-up, lengths in metres, and a 5 mm PBD particle spacing. To change the table dimensions,
+initial pose, or material, edit `main()` directly.
 
 | Parameter | Default | Effect |
 |-----------|---------|--------|
@@ -48,8 +51,8 @@ These are hardcoded in `pbd_vase_fracture.py` and control the fracture behavior:
 | `seam_failure_threshold` | 1.0 | Seam damage threshold at fragment interfaces. |
 | `bond_radius_factor` | 1.15 | Bond search radius multiplier; higher = more neighbor bonds. |
 | `fragment_seeds` | 12 (6 sectors × 2 bands) | Voronoi seed layout for the partition; `sector_seeds(8)` gives 16 denser fragments. |
-| `dt` | 2e-3 s | Simulation timestep. |
-| `substeps` | 10 | PBD solver iterations per frame step. |
+| `dt` | 2e-3 s | Simulation timestep per outer step. |
+| `substeps` | 10 | PBD solver iterations per outer step. |
 
 ## Outputs
 
@@ -59,8 +62,9 @@ motion (`realtime_factor=0.24`). The simulation runs for `--duration` seconds of
 
 ## Performance
 
-On an RTX 4060 the sim runs at roughly 90–100 ms per frame step (10 substeps × 2 ms dt), dominated by
-the PBD constraint solve. The 8 s default duration takes about 80 s wall-clock without recording.
+Measured on an RTX 4060 with warm JIT caches and no recording: roughly 100–130 ms per outer step
+(10 substeps × 2 ms dt), or 9–10 FPS. The 8 s default duration (4000 outer steps) takes about
+7 minutes wall-clock.
 
 ## Known limitations
 
