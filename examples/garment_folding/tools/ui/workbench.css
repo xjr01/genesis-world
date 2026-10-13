@@ -1,0 +1,113 @@
+* {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+  background: #101820;
+  color: #e1e9ee;
+  font: 14px system-ui;
+}
+header {
+  padding: 18px 24px;
+  border-bottom: 1px solid #34424d;
+}
+h1 {
+  font-size: 21px;
+  margin: 0 0 7px;
+}
+h2 {
+  font-size: 17px;
+  margin-top: 0;
+}
+p {
+  margin: 8px 0;
+  color: #a9bbc8;
+}
+main {
+  display: grid;
+  grid-template-columns: minmax(480px, 1fr) 440px;
+  gap: 18px;
+  padding: 20px;
+}
+section {
+  background: #182530;
+  padding: 16px;
+  border-radius: 9px;
+}
+canvas {
+  width: 100%;
+  height: 590px;
+  background: #0e1720;
+  border-radius: 6px;
+  cursor: crosshair;
+}
+button,
+select,
+input {
+  background: #263a48;
+  color: #edf4f8;
+  border: 1px solid #496073;
+  padding: 7px;
+  border-radius: 4px;
+  margin: 3px;
+}
+input[type="number"] {
+  width: 95px;
+}
+button {
+  cursor: pointer;
+}
+button:hover {
+  background: #385366;
+}
+button:disabled {
+  opacity: 0.5;
+  cursor: wait;
+}
+textarea {
+  width: 100%;
+  height: 250px;
+  background: #0e1720;
+  color: #d1e6f3;
+  border: 1px solid #496073;
+  padding: 10px;
+  font: 12px monospace;
+}
+#edits,
+#ikOptions {
+  height: 120px;
+}
+#status {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: #99dccc;
+  margin: 10px 0;
+}
+label {
+  display: inline-block;
+}
+details {
+  margin-top: 14px;
+  border-top: 1px solid #34424d;
+  padding-top: 12px;
+}
+summary {
+  cursor: pointer;
+  margin-bottom: 10px;
+}
+pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 11px;
+}
+#layers {
+  max-width: 100%;
+}
+@media (max-width: 1050px) {
+  main {
+    grid-template-columns: 1fr;
+  }
+  canvas {
+    height: 460px;
+  }
+}
