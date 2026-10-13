@@ -1,0 +1,19 @@
+{
+  "note": "Source third-right plan binding. Calibrate world TCP offsets for the selected cloth point and jaw pose before use.",
+  "bindings": [
+    {
+      "hand": "right",
+      "kind": "grasp",
+      "anchor_action": "X_grasp",
+      "tcp_offset_world_mm": [0, 0, 0],
+      "translate_actions": ["X_pregrasp", "X_grasp", "X_close", "X_slow_first5", "X_lift60"]
+    },
+    {
+      "hand": "right",
+      "kind": "placement",
+      "anchor_action": "X_arc_rotate_lower",
+      "tcp_offset_world_mm": [0, 0, 0],
+      "translate_actions": ["X_arc_rotate_lower", "X_release", "X_retreat", "X_settle"]
+    }
+  ]
+}
