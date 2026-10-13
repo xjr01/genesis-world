@@ -55,7 +55,8 @@ VIDEO_PATH = os.path.join(EXPERIMENTS_DIR, "videos", f"phase9_deepbed_full{TAG}.
 
 DT = 1.0 / 60.0
 SC = 0.5
-PARTICLE_RADIUS = 3.125e-3 * SC
+PARTICLE_RADIUS = 3.125e-3  # coarse profile (3.125 mm, matches the run); SC still sizes only the
+                            # walls / shovel geometry, so it stays 0.5
 BOX_LOWER = (-0.35 * SC, -0.30 * SC, 0.0)
 BOX_UPPER = (0.35 * SC, 0.30 * SC, 0.80 * SC)
 WALL_THICK = 0.01 * SC
@@ -281,8 +282,9 @@ def main():
             upper_bound=BOX_UPPER,
         ),
         flip_options=gs.options.FLIPOptions(
-            grid_res=128,
-            viscosity_coeff=0.01,
+            grid_res=64,  # must mirror the run: FLIP seeds ~1 particle per grid sub-cell, so a
+                          # mismatch changes n_water and trips the assert below
+            viscosity_coeff=4.0,
             lower_bound=BOX_LOWER,
             upper_bound=BOX_UPPER,
         ),
@@ -341,18 +343,25 @@ def main():
         dem_ents.append(ghost)
 
     water = scene.add_entity(
-        # droplet radius mirrors phase9_deepbed_full.py DROPLET_RADIUS (0.016 = 0.02 * 0.8,
-        # user decision 2026-09-01); meta.json has no droplet_radius field, so keep this in
-        # sync by hand -- the assert below catches a mismatch against meta["n_water"]
-        morph=gs.morphs.Sphere(pos=(meta.get("droplet_x", -0.01), 0.0, 0.35), radius=0.016),
+        # droplet radius from the run's meta (written since the coarse-profile change); the
+        # assert below catches a mismatch against meta["n_water"]
+        morph=gs.morphs.Sphere(pos=(meta.get("droplet_x", -0.01), 0.0, 0.35),
+                               radius=meta.get("droplet_radius", 0.016)),
         material=gs.materials.FLIP.Liquid(),
         surface=gs.surfaces.Default(color=(0.2, 0.5, 0.9), opacity=0.85),
     )
     cam = scene.add_camera(
         res=(1280, 720),
-        pos=(0.42, -0.48, 0.44),  # z +0.06 vs validated probe framing: keep lifted shovel (z~0.25) in frame
-        lookat=(-0.06, 0.0, 0.12),
-        fov=40,
+        # Full-arm framing (validated by camcheck_armframe.py, 2026-10-11): same azimuth as the
+        # probe close-up, pulled back 45% horizontally + raised 0.24 m and aimed at z=0.30
+        # (3-D back-off factor 1.40 vs the wide20 camera, pitch unchanged ~21 deg, fov 40->45).
+        # A pure pull-back along the sight line cannot fit the arm: the kinematic envelope
+        # (base column + swept elbow locus + padded TCP, top z~0.71) needs the raised aim point;
+        # margins then pass 5% frame edges on arm/scoop/bed/sand/water with zero wall occlusion
+        # of the arm body. See frames/camcheck_armframe{,_report}.log.
+        pos=(0.7752, -0.8352, 0.744),
+        lookat=(-0.06, 0.0, 0.30),
+        fov=45,
     )
 
     scene.build()

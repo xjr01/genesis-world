@@ -2468,11 +2468,26 @@ class SpatialHasher:
 
     def build(self, n_batch):
         self._B = n_batch
+        # smallest scan depth whose 256**d element capacity covers the packed slot count (the exclusive scan
+        # tiles the input 256 elements per block)
+        self._scan_log256 = 1
+        while 256**self._scan_log256 < self._B * self.n_slots:
+            self._scan_log256 += 1
         # number of elements in each slot
         self.slot_size = qd.field(gs.qd_int, shape=(self.n_slots, self._B))
         # element index offset in each slot
         self.slot_start = qd.field(gs.qd_int, shape=(self.n_slots, self._B))
-        self.cur_cnt = qd.field(gs.qd_int, shape=(self._B,))
+        if gs.backend != gs.cpu:
+            # batch-major packing of slot_size staged through the scan of compute_reordered_idx; the scratch
+            # holds the scan's per-tile partials (u32 slots carry any i32 count)
+            self.slot_scan_in = qd.field(gs.qd_int, shape=(self._B * self.n_slots,))
+            self.slot_scan_out = qd.field(gs.qd_int, shape=(self._B * self.n_slots,))
+            self.slot_scan_scratch = qd.field(
+                qd.u32, shape=(qd.algorithms.exclusive_scan_scratch_slots(self._B * self.n_slots, self._scan_log256),)
+            )
+        else:
+            # running slot-count accumulator of the serial CPU fallback path in compute_reordered_idx
+            self.cur_cnt = qd.field(gs.qd_int, shape=(self._B,))
 
     @qd.func
     def compute_reordered_idx(self, n, pos, active, reordered_idx):
@@ -2490,17 +2505,39 @@ class SpatialHasher:
         """
 
         self.slot_size.fill(0)
-        self.slot_start.fill(0)
-        self.cur_cnt.fill(0)
 
         for i_n, i_b in qd.ndrange(n, self._B):
             if active[i_n, i_b]:
                 slot_idx = self.pos_to_slot(pos[i_n, i_b])
                 qd.atomic_add(self.slot_size[slot_idx, i_b], 1)
 
-        for i_n in range(self.n_slots):
-            for i_b in range(self._B):
-                self.slot_start[i_n, i_b] = qd.atomic_add(self.cur_cnt[i_b], self.slot_size[i_n, i_b])
+        if qd.static(gs.backend != gs.cpu):
+            # slot_start gets each batch's exclusive prefix sum of slot_size. The device-wide scan covers one
+            # contiguous range, so the columns are packed batch-major and each batch's packed prefix at its own
+            # base is subtracted off; integer sums are order-independent, so this equals a sequential scan
+            # exactly.
+            for i_s, i_b in qd.ndrange(self.n_slots, self._B):
+                base = i_b * self.n_slots
+                self.slot_scan_in[base + i_s] = self.slot_size[i_s, i_b]
+
+            qd.algorithms.exclusive_scan_add(
+                self.slot_scan_in,
+                self.slot_scan_out,
+                self.slot_scan_scratch,
+                self._B * self.n_slots,
+                gs.qd_int,
+                self._scan_log256,
+            )
+
+            for i_s, i_b in qd.ndrange(self.n_slots, self._B):
+                base = i_b * self.n_slots
+                self.slot_start[i_s, i_b] = self.slot_scan_out[base + i_s] - self.slot_scan_out[base]
+        else:
+            self.slot_start.fill(0)
+            self.cur_cnt.fill(0)
+            for i_n in range(self.n_slots):
+                for i_b in range(self._B):
+                    self.slot_start[i_n, i_b] = qd.atomic_add(self.cur_cnt[i_b], self.slot_size[i_n, i_b])
 
         for i_n, i_b in qd.ndrange(n, self._B):
             if active[i_n, i_b]:
