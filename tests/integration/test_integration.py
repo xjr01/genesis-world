@@ -20,7 +20,7 @@ from ..utils import assert_allclose, assert_equal, get_hf_dataset
 @pytest.mark.slow("gpu")
 @pytest.mark.parametrize("backend", [gs.cuda])
 def test_dual_arm_manipulation(show_viewer):
-    demo = pbstf_coffee_water.build_scene(is_viewer_shown=show_viewer, is_motion_only=True)
+    demo = pbstf_coffee_water.build_scene(is_viewer_shown=show_viewer, is_motion_only=True, is_trajectory_checked=True)
     lower, upper = map(tensor_to_array, demo.robot.get_dofs_limit())
     rim = demo.cup_cavity.bounds[1, 1]
     phases = set()
@@ -29,6 +29,16 @@ def test_dual_arm_manipulation(show_viewer):
     previous_openings = np.array((0.044, 0.0007))
     previous_opening_velocity = np.zeros(2)
     observation = pbstf_coffee_water.observe_scene(demo)
+    ungrasped_observation = replace(observation, is_cup_grasped=False)
+    target = pbstf_coffee_water.motion_target(time=1.0, motion=replace(demo.motion), observation=ungrasped_observation)
+    assert_equal(target.right_phase, pbstf_coffee_water.Phase.POUR)
+    with pytest.raises(RuntimeError, match="lost a finger contact"):
+        pbstf_coffee_water.motion_target(
+            time=1.0,
+            motion=replace(demo.motion),
+            observation=ungrasped_observation,
+            is_trajectory_checked=True,
+        )
     previous_positions = np.stack([hand.pos for hand in observation.hands])
     previous_quaternions = np.stack([hand.quat for hand in observation.hands])
     previous_velocity = np.zeros((2, 3))
@@ -48,6 +58,7 @@ def test_dual_arm_manipulation(show_viewer):
                     time,
                     replace(demo.motion, water_before_reach=10),
                     replace(observation, water_in_cup=water_in_cup),
+                    is_trajectory_checked=True,
                 )
                 assert_equal(recovery_target.right_phase, pbstf_coffee_water.Phase.CATCH)
         target, error = pbstf_coffee_water.update_motion(demo, time, observation)

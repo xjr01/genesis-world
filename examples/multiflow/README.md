@@ -11,9 +11,9 @@
 ## 快速运行
 
 ```powershell
-# 短测：使用刚体海绵检查机器人初始运动。
+# 短测：使用刚体海绵预览机器人初始运动。
 python -m examples.multiflow.pbstf_coffee_water --check-motion --steps 100 --vis
-# 保留软海绵，关闭液体，检查完整操作。
+# 保留软海绵，关闭液体，预览完整操作。
 python -m examples.multiflow.pbstf_coffee_water --no-liquid --vis
 # 完整液体仿真，保存逐帧 checkpoint，回放时使用液体表面。
 python -m examples.multiflow.pbstf_coffee_water --surface --record --output out/coffee-water
@@ -30,7 +30,8 @@ python -m examples.multiflow.pbstf_coffee_water --surface --record --output out/
 | `--vis` | 关闭 | 打开实时窗口 |
 | `--record` | 关闭 | 保存初始状态及每个控制步的视觉回放 checkpoint，增加磁盘占用和写入开销；可与两种运动调试模式组合 |
 | `--surface` | 关闭 | 将粒子显示改为液体表面重建，便于观察液面形状，增加渲染开销 |
-| `--check-motion` | 关闭 | 关闭液体并使用刚体海绵，较快检查抓取和轨迹；软海绵变形与吸水效果需在完整模式验证 |
+| `--check-motion` | 关闭 | 关闭液体并使用刚体海绵，较快预览抓取和轨迹；软海绵变形与吸水效果需在完整模式验证 |
+| `--check-trajectory` | 关闭 | 启用仿真轨迹验收，增加检查开销，失败时停止；默认跳过验收并继续推进仿真，详见“调机器人动作” |
 | `--no-liquid` | 关闭 | 关闭液体，保留软海绵及刚体接触，便于调试形变和动作；吸水效果需在完整模式验证 |
 | `--output PATH` | `out/pbstf_coffee_water` | 指标和 checkpoint 的输出目录 |
 
@@ -51,7 +52,15 @@ python -m examples.multiflow.pbstf_coffee_water --surface --record --output out/
 
 ## 调机器人动作
 
-`water_cup_pose()` 定义倒水阶段的杯子参考轨迹，`motion_target()` 决定双臂动作阶段与目标，`update_motion()` 将目标转换为关节控制。先用 `--check-motion` 检查抓取、倒水和接杯路径，再用 `--no-liquid` 检查软海绵交互，最后运行完整液体场景。
+`water_cup_pose()` 定义倒水阶段的杯子参考轨迹，`motion_target()` 决定双臂动作阶段与目标，`update_motion()` 将目标转换为关节控制。先用 `--check-motion` 预览抓取、倒水和接杯路径，再用 `--no-liquid` 预览软海绵交互，最后运行完整液体场景。
+
+仿真命令 `pbstf_coffee_water` 的轨迹验收默认关闭。追加 `--check-trajectory` 会检查逆运动学误差、抓取、接杯时限、跟踪误差、穿透、液体与夹爪间距和最终动作结果，增加检查开销，失败时停止。它可与 `--check-motion` 或 `--no-liquid` 组合使用，例如：
+
+```powershell
+python -m examples.multiflow.pbstf_coffee_water --no-liquid --check-trajectory
+```
+
+默认运行跳过上述验收并继续记录指标，动作阶段仍按抓取、倾角等反馈条件切换；液体有限值、质量和求解器错误检查始终保留。液体与夹爪间距仅在开启轨迹验收时计算，关闭时 `metrics.csv` 对应列留空。
 
 修改目标位置或阶段时间时，保持相邻阶段的位姿连续，并检查实际手部与目标的误差。右臂应完成接杯、扶正、放杯和擦水，左臂应完成搅拌并放回搅拌棒；完整流程检查搅拌三圈以及海绵吸收到洒出的水。
 
@@ -128,4 +137,4 @@ python -m examples.genesis_origin_example.rendering.replay_checkpoints out/coffe
 
 每次实验使用独立的输出目录：`metrics.csv` 会覆盖同名文件，录制要求 `checkpoints/` 为空。完整录制按控制步保存数据，磁盘占用随粒子数和步数增加。
 
-观察杯子是否稳定随手运动、液体是否从杯口流出、接杯后是否保留部分水、海绵是否接触并吸收洒出的液体，以及搅拌棒是否完成三圈并回到放置点。运行器会对手部跟踪、刚体穿透、液体有限值及质量等进行检查；结合回放和 `metrics.csv` 定位异常出现的阶段。
+观察杯子是否稳定随手运动、液体是否从杯口流出、接杯后是否保留部分水、海绵是否接触并吸收洒出的液体，以及搅拌棒是否完成三圈并回到放置点。结合回放和 `metrics.csv` 定位异常出现的阶段。

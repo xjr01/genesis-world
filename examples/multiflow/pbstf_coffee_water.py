@@ -5,6 +5,7 @@ Run headlessly with ``python -m examples.multiflow.pbstf_coffee_water`` from the
 Replay with ``python -m examples.genesis_origin_example.rendering.replay_checkpoints out/pbstf_coffee_water/checkpoints``.
 ``--no-liquid`` skips liquid creation and simulation for faster trajectory tuning while keeping the soft sponge.
 It supports ``--record``; ``--check-motion`` also replaces the sponge with a rigid preview.
+``--check-trajectory`` enables trajectory acceptance checks and stops on failures, at extra checking cost.
 From the robot's perspective, world X points right, Y points up, and negative Z points forward across the table.
 The default particle scale resolves pouring and the wall film; coarse scales can retain liquid inside the tilted cup.
 """
@@ -73,7 +74,7 @@ ROD_GRIP_QUAT = (
 PARALLEL_START = 6.4
 MOTION_END = 28.0
 CONTROL_DT = 0.002
-CONTACT_SUBSTEPS = 2
+CONTACT_SUBSTEPS = 1
 
 
 class Phase(IntEnum):
@@ -192,6 +193,7 @@ class CoffeeWaterScene:
     qpos: gs.Tensor
     motion: MotionState
     is_motion_only: bool
+    is_trajectory_checked: bool
 
 
 def smooth_progress(time, start, end):
@@ -303,8 +305,8 @@ def measure_motion(time, target, observation):
     )
 
 
-def motion_target(time, motion, observation):
-    """Advance independent arm phases using the measured cup pose for tipping and recovery."""
+def motion_target(time, motion, observation, *, is_trajectory_checked=False):
+    """Advance arm phases from the measured cup pose, optionally rejecting failed grasps and recovery limits."""
     cup_pos, cup_quat = water_cup_pose(time)
     right = grasp_pose(ToolPose(np.array(cup_pos), np.array(cup_quat)), motion.cup_grasp)
     right_opening = 0.044
@@ -321,7 +323,7 @@ def motion_target(time, motion, observation):
     elif time < 6.0:
         motion.right_phase = Phase.POUR
         right_opening = CUP_GRIP_OPENING
-        if not observation.is_cup_grasped:
+        if is_trajectory_checked and not observation.is_cup_grasped:
             raise RuntimeError(f"The water cup lost a finger contact during pouring at {time:.3f}s.")
     elif time < PARALLEL_START:
         motion.right_phase = Phase.RELEASE
@@ -339,9 +341,13 @@ def motion_target(time, motion, observation):
             motion.max_knock_tilt = max(motion.max_knock_tilt, observation.cup_tilt)
             if observation.water_in_cup is not None:
                 motion.spilled_particles = max(0, motion.water_before_reach - observation.water_in_cup)
-            if observation.cup_tilt > 65.0:
+            if is_trajectory_checked and observation.cup_tilt > 65.0:
                 raise RuntimeError(f"The tipped cup exceeded the recovery angle at {time:.3f}s.")
-        if motion.right_phase in (Phase.UPRIGHT, Phase.PLACE_CUP) and not observation.is_cup_grasped:
+        if (
+            is_trajectory_checked
+            and motion.right_phase in (Phase.UPRIGHT, Phase.PLACE_CUP)
+            and not observation.is_cup_grasped
+        ):
             raise RuntimeError(f"The cup lost its opposing wall contacts at {time:.3f}s.")
         if motion.right_phase == Phase.REACH_SPONGE:
             end = ToolPose(
@@ -364,7 +370,7 @@ def motion_target(time, motion, observation):
                 motion.catch_velocity = (right.pos - motion.right_target.pos) / CONTROL_DT
                 motion.catch_acceleration = (motion.catch_velocity - motion.right_velocity) / CONTROL_DT
                 next_phase = Phase.CATCH
-            elif elapsed > 1.3:
+            elif is_trajectory_checked and elapsed > 1.3:
                 raise RuntimeError(f"The cup failed to tip at {time:.3f}s: tilt={observation.cup_tilt:.2f}deg.")
         elif motion.right_phase == Phase.CATCH:
             right = interpolate_tool(
@@ -385,7 +391,7 @@ def motion_target(time, motion, observation):
                 motion.cup_grasp = relative_grasp(right, observation.cup)
                 motion.has_caught_cup = True
                 next_phase = Phase.UPRIGHT
-            elif elapsed > 0.8:
+            elif is_trajectory_checked and elapsed > 0.8:
                 raise RuntimeError(f"Both fingers failed to grip the cup wall at {time:.3f}s.")
         elif motion.right_phase == Phase.UPRIGHT:
             cup = interpolate_tool(
@@ -399,7 +405,7 @@ def motion_target(time, motion, observation):
                 motion.recovery_cup = observation.cup
                 motion.cup_grasp = relative_grasp(right, observation.cup)
                 next_phase = Phase.PLACE_CUP
-            elif elapsed > 1.9:
+            elif is_trajectory_checked and elapsed > 1.9:
                 raise RuntimeError(f"The cup failed to stand upright at {time:.3f}s: {observation.cup_tilt:.3f}deg.")
         elif motion.right_phase == Phase.PLACE_CUP:
             pos = motion.recovery_cup.pos + smooth_progress(elapsed, start=0.0, end=0.6) * (
@@ -537,7 +543,7 @@ def update_motion(demo, time, observation=None):
     """Drive arm joints and fingers while fluid boundaries follow measured rigid poses."""
     if observation is None:
         observation = observe_scene(demo)
-    target = motion_target(time, demo.motion, observation)
+    target = motion_target(time, demo.motion, observation, is_trajectory_checked=demo.is_trajectory_checked)
     qpos = demo.qpos
     errors = []
     for link, dofs, pose in zip(demo.hands_link, demo.arms_dofs_idx, (target.right, target.left)):
@@ -557,7 +563,9 @@ def update_motion(demo, time, observation=None):
         error_array = tensor_to_array(error)
         pos_error = np.linalg.norm(error_array[..., :3], axis=-1).max()
         rot_error = np.linalg.norm(error_array[..., 3:], axis=-1).max()
-        if not np.isfinite(error_array).all() or pos_error > 2e-4 or rot_error > 2e-4:
+        if not np.isfinite(error_array).all() or (
+            demo.is_trajectory_checked and (pos_error > 2e-4 or rot_error > 2e-4)
+        ):
             raise RuntimeError(f"{link.name} IK failed at {time:.3f}s: position={pos_error}, rotation={rot_error}.")
         velocity = (qpos[list(dofs)] - demo.qpos[list(dofs)]) / CONTROL_DT
         if time == 0.0:
@@ -649,11 +657,13 @@ def build_scene(
     is_surface=False,
     is_motion_only=False,
     is_liquid_enabled=True,
+    is_trajectory_checked=False,
 ):
     """Build contact-driven manipulation in meters with a deformable absorbent sponge.
 
     Motion-only mode uses a rigid sponge preview. Disabling liquid skips its particles and solver steps while retaining
-    rigid and sponge dynamics. Liquid boundaries receive their motion through one-way coupling.
+    rigid and sponge dynamics. Liquid boundaries receive their motion through one-way coupling. Trajectory checking
+    rejects inaccurate targets and prepares liquid clearance measurements at extra computation and memory cost.
     """
     if scale <= 0:
         raise ValueError("Particle scale must be positive.")
@@ -749,9 +759,6 @@ def build_scene(
             camera_lookat=camera_lookat,
             camera_up=(0.0, 1.0, 0.0),
             camera_fov=80,
-        ),
-        profiling_options=gs.options.ProfilingOptions(
-            show_FPS=False,
         ),
         show_viewer=is_viewer_shown,
     )
@@ -933,16 +940,17 @@ def build_scene(
             qpos.new_tensor(cavity_sdf["T_mesh_to_sdf"] @ normalization),
             qpos.new_tensor(2.0 / (np.array(cavity_sdf["voxels"].shape) - 1)),
         )
-        gripper_distance_fields = tuple(
-            DistanceField(
-                collision_geom.idx,
-                qpos.new_tensor(collision_geom.sdf_val)[None, None],
-                qpos.new_tensor(collision_geom.T_mesh_to_sdf),
-                2.0 / qpos.new_tensor(collision_geom.sdf_res - 1),
+        if is_trajectory_checked:
+            gripper_distance_fields = tuple(
+                DistanceField(
+                    collision_geom.idx,
+                    qpos.new_tensor(collision_geom.sdf_val)[None, None],
+                    qpos.new_tensor(collision_geom.T_mesh_to_sdf),
+                    2.0 / qpos.new_tensor(collision_geom.sdf_res - 1),
+                )
+                for link in (hands_link[0], *hands_finger_links[0])
+                for collision_geom in link.geoms
             )
-            for link in (hands_link[0], *hands_finger_links[0])
-            for collision_geom in link.geoms
-        )
     cup_grasp = ToolPose(np.array((0.0, CUP_GRIP_HEIGHT, 0.0)), POUR_QUAT)
     right_start = grasp_pose(ToolPose(np.array(WATER_CUP_POS), np.array((1.0, 0.0, 0.0, 0.0))), cup_grasp)
     demo = CoffeeWaterScene(
@@ -965,6 +973,7 @@ def build_scene(
         qpos,
         MotionState(Phase.GRASP_CUP, 0.0, right_start, right_start, cup_grasp),
         is_motion_only,
+        is_trajectory_checked,
     )
     update_motion(demo, time=0.0)
     robot.set_qpos(demo.qpos)
@@ -979,6 +988,12 @@ def main():
     parser.add_argument("--record", dest="is_recording", action="store_true")
     parser.add_argument("--surface", dest="is_surface", action="store_true")
     parser.add_argument("--check-motion", dest="is_motion_only", action="store_true")
+    parser.add_argument(
+        "--check-trajectory",
+        dest="is_trajectory_checked",
+        action="store_true",
+        help="Stop on trajectory acceptance failures; adds per-step checks. Disabled by default for uninterrupted preview.",
+    )
     parser.add_argument(
         "--no-liquid",
         dest="is_liquid_enabled",
@@ -998,6 +1013,7 @@ def main():
         args.is_surface,
         args.is_motion_only,
         args.is_liquid_enabled,
+        args.is_trajectory_checked,
     )
     dt = demo.scene.dt * CONTACT_SUBSTEPS
     steps = args.steps if args.steps is not None else round(MOTION_END / dt)
@@ -1065,11 +1081,6 @@ def main():
             step_scene(demo, is_rendering=(step + 1) % render_stride == 0 or step + 1 == steps)
             observation = observe_scene(demo)
             measurement = measure_motion(time, target, observation)
-            if measurement.hands_position_error[1] > 0.005 or (
-                target.right_phase not in (Phase.REACH_SPONGE, Phase.CATCH)
-                and measurement.hands_position_error[0] > 0.005
-            ):
-                raise RuntimeError(f"Arm tracking failed at {time:.3f}s: {measurement.hands_position_error}m.")
             if target.left_phase == Phase.STIR:
                 rod_offset = observation.rod.pos - COFFEE_CUP_POS
                 angle = math.atan2(rod_offset[2], rod_offset[0])
@@ -1077,32 +1088,42 @@ def main():
                     difference = angle - previous_stir_angle
                     measured_stir_angle += math.atan2(math.sin(difference), math.cos(difference))
                 previous_stir_angle = angle
-            check_contacts(demo, time)
             demo.scene.rigid_solver.check_errno()
-            if demo.water is not None and time <= 6.0:
-                clearance = surface_clearance(
-                    demo.water.get_particles_pos(),
-                    demo.gripper_distance_fields,
-                    demo.scene.rigid_solver.get_geoms_pos(gripper_geoms_idx),
-                    demo.scene.rigid_solver.get_geoms_quat(gripper_geoms_idx),
-                ).item()
-                gripper_clearance = min(gripper_clearance, clearance)
-                if clearance < 1.0 / args.scale:
-                    raise RuntimeError(f"Pouring liquid reached the right gripper at {time:.3f}s: {clearance:.6f}m.")
-            if time <= 6.0 and (measurement.cup_position_error > 0.002 or measurement.cup_rotation_error > 2.0):
-                raise RuntimeError(
-                    f"Pour tracking failed at {time:.3f}s: position={measurement.cup_position_error:.6f}m, "
-                    f"rotation={measurement.cup_rotation_error:.3f}deg."
-                )
-            if target.right_phase >= Phase.CLEAR_CUP and (
-                measurement.cup_position_error > 0.002 or observation.cup_tilt > 2.0
-            ):
-                raise RuntimeError(
-                    f"Cup recovery failed at {time:.3f}s: position={measurement.cup_position_error:.6f}m, "
-                    f"tilt={observation.cup_tilt:.3f}deg."
-                )
-            if target.right_phase in (Phase.WIPE, Phase.REST) and measurement.sponge_position_error > 0.01:
-                raise RuntimeError(f"Sponge tracking failed at {time:.3f}s: {measurement.sponge_position_error:.6f}m.")
+            if args.is_trajectory_checked:
+                if measurement.hands_position_error[1] > 0.005 or (
+                    target.right_phase not in (Phase.REACH_SPONGE, Phase.CATCH)
+                    and measurement.hands_position_error[0] > 0.005
+                ):
+                    raise RuntimeError(f"Arm tracking failed at {time:.3f}s: {measurement.hands_position_error}m.")
+                check_contacts(demo, time)
+                if demo.water is not None and time <= 6.0:
+                    clearance = surface_clearance(
+                        demo.water.get_particles_pos(),
+                        demo.gripper_distance_fields,
+                        demo.scene.rigid_solver.get_geoms_pos(gripper_geoms_idx),
+                        demo.scene.rigid_solver.get_geoms_quat(gripper_geoms_idx),
+                    ).item()
+                    gripper_clearance = min(gripper_clearance, clearance)
+                    if clearance < 1.0 / args.scale:
+                        raise RuntimeError(
+                            f"Pouring liquid reached the right gripper at {time:.3f}s: {clearance:.6f}m."
+                        )
+                if time <= 6.0 and (measurement.cup_position_error > 0.002 or measurement.cup_rotation_error > 2.0):
+                    raise RuntimeError(
+                        f"Pour tracking failed at {time:.3f}s: position={measurement.cup_position_error:.6f}m, "
+                        f"rotation={measurement.cup_rotation_error:.3f}deg."
+                    )
+                if target.right_phase >= Phase.CLEAR_CUP and (
+                    measurement.cup_position_error > 0.002 or observation.cup_tilt > 2.0
+                ):
+                    raise RuntimeError(
+                        f"Cup recovery failed at {time:.3f}s: position={measurement.cup_position_error:.6f}m, "
+                        f"tilt={observation.cup_tilt:.3f}deg."
+                    )
+                if target.right_phase in (Phase.WIPE, Phase.REST) and measurement.sponge_position_error > 0.01:
+                    raise RuntimeError(
+                        f"Sponge tracking failed at {time:.3f}s: {measurement.sponge_position_error:.6f}m."
+                    )
             phases = (target.right_phase, target.left_phase)
             is_milestone = phases != previous_phases or step + 1 == steps or step in milestone_steps
             if is_milestone:
@@ -1128,7 +1149,7 @@ def main():
                     observation.cup_grasp_span,
                     target.right_opening,
                     target.left_opening,
-                    gripper_clearance if demo.water is not None else None,
+                    gripper_clearance if args.is_trajectory_checked and demo.water is not None else None,
                     target.stir_angle / (2.0 * math.pi),
                     measured_stir_angle / (2.0 * math.pi),
                     measurement.sponge_position_error,
@@ -1167,7 +1188,7 @@ def main():
                     )
                 )
                 metrics.flush()
-        if steps * dt >= MOTION_END:
+        if args.is_trajectory_checked and steps * dt >= MOTION_END:
             if target.right_phase != Phase.REST or target.left_phase != Phase.REST or not demo.motion.has_caught_cup:
                 raise RuntimeError("The manipulation sequence did not complete.")
             if abs(measured_stir_angle - 6.0 * math.pi) > 0.05:
