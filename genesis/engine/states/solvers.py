@@ -280,13 +280,6 @@ class _ParticleFluidSolverState:
         return self._active
 
 
-class IPBSTFSolverState(_ParticleFluidSolverState):
-    """Dynamic state queried from an implicit position-based surface-tension fluid (IPBSTF) solver."""
-
-    def __init__(self, scene):
-        super().__init__(scene, scene.sim.ipbstf_solver)
-
-
 class PBSTFSolverState(_ParticleFluidSolverState):
     """Dynamic state queried from a PBSTFSolver."""
 

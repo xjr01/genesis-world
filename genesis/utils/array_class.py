@@ -2,10 +2,11 @@ import dataclasses
 import math
 from enum import IntEnum
 
-import quadrants as qd
-from typing_extensions import dataclass_transform  # Made it into standard lib from Python 3.12
 import numpy as np
-import torch
+
+from typing_extensions import dataclass_transform  # Made it into standard lib from Python 3.12
+
+import quadrants as qd
 
 import genesis as gs
 
@@ -88,7 +89,6 @@ class ErrorCode(IntEnum):
     INVALID_CONTACT_NAN = 0b00000000000000000000000000010000
     INVALID_FORCE_NAN = 0b00000000000000000000000000100000
     INVALID_ACC_NAN = 0b00000000000000000000000001000000
-    INVALID_IPBSTF_STATE_NAN = 0b00000000000000000000000010000000
     INVALID_PBSTF_STATE_NAN = 0b00000000000000000000000100000000
 
 

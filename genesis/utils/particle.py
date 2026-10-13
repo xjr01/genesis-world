@@ -1,22 +1,22 @@
 import ctypes
 import os
+import pickle
 import platform
+import shutil
 import subprocess
 import sys
-import shutil
 import tempfile
-from multiprocessing import Process, Queue
+
+import numpy as np
+from scipy import ndimage
 
 import igl
-import numpy as np
 import trimesh
-from scipy import ndimage
 
 import genesis as gs
 
-from . import geom as gu
-from . import mesh as msu
-from . import misc as miu
+from . import geom as gu, mesh as msu, misc as miu
+from .particle_reconstruction import reconstruct_surface
 
 # Make sure ParticleMesherPy shared libary can be found in search path
 LD_LIBRARY_PATH = os.path.join(miu.get_src_dir(), "ext/ParticleMesher/ParticleMesherPy")
@@ -371,32 +371,6 @@ def shell_to_particles(p_size=0.01, pos=(0, 0, 0), inner_radius=0.5, outer_radiu
     return positions
 
 
-def _splashsurf_worker(positions, radius, args_dict, result_queue):
-    try:
-        import pysplashsurf
-
-        mesh_with_data, _ = pysplashsurf.reconstruction_pipeline(
-            positions,
-            particle_radius=radius * args_dict.get("rscale", 1.0),
-            smoothing_length=2.0,
-            cube_size=0.8,
-            iso_surface_threshold=0.6,
-            mesh_smoothing_weights=True,
-            mesh_smoothing_iters=int(args_dict.get("smooth", 25)),
-            normals_smoothing_iters=10,
-            mesh_cleanup=True,
-            compute_normals=True,
-            multi_threading=True,
-        )
-        normals = mesh_with_data.point_attributes["normals"]
-        vertices = mesh_with_data.mesh.vertices
-        triangles = mesh_with_data.mesh.triangles
-        result_queue.put_nowait((vertices, triangles, normals))
-    except Exception as e:
-        result_queue.put_nowait(e)
-        raise
-
-
 def particles_to_mesh(positions, radius, backend):
     def parse_args(backend):
         args_dict = dict()
@@ -447,20 +421,26 @@ def particles_to_mesh(positions, radius, backend):
 
         return trimesh.Trimesh(vertices, faces, process=False)
     elif "splashsurf" in backend:
-        # FIXME: Running in subprocess or manually reclaiming free-ed head memory is necessary to avoid unbounded growth
-        result_queue = Queue()
+        radius_scale = args_dict.get("rscale", 1.0)
+        smoothing_iterations = int(args_dict.get("smooth", 25))
         if malloc_trim is not None:
-            _splashsurf_worker(positions, radius, args_dict, result_queue)
-            result = result_queue.get()
+            vertices, triangles, normals = reconstruct_surface(positions, radius, radius_scale, smoothing_iterations)
             malloc_trim(0)
         else:
-            proc = Process(target=_splashsurf_worker, args=(positions, radius, args_dict, result_queue))
-            proc.start()
-            result = result_queue.get()
-            proc.join()
-            if proc.exitcode != 0:
-                gs.raise_exception_from(f"splashsurf subprocess failed with exit code {proc.exitcode}", result)
-        vertices, triangles, normals = result
+            # Process isolation releases reconstruction allocations between frames.
+            worker = os.path.join(os.path.dirname(__file__), "particle_reconstruction.py")
+            command = [sys.executable, worker, str(radius), str(radius_scale), str(smoothing_iterations)]
+            try:
+                result = subprocess.run(
+                    command,
+                    input=pickle.dumps(positions, protocol=pickle.HIGHEST_PROTOCOL),
+                    capture_output=True,
+                    check=True,
+                    creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+                )
+            except subprocess.CalledProcessError as error:
+                gs.raise_exception_from(f"Surface reconstruction failed:\n{error.stderr.decode(errors='replace')}", error)
+            vertices, triangles, normals = pickle.loads(result.stdout)
         mesh = trimesh.Trimesh(vertices=vertices, faces=triangles, face_normals=normals, process=False)
         gs.logger.debug(f"[splashsurf]: reconstruct vertices: {mesh.vertices.shape}, {mesh.faces.shape}")
         return mesh

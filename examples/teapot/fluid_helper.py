@@ -10,27 +10,6 @@ import genesis.utils.mesh as mesh_utils
 import genesis.utils.particle as particle_utils
 
 
-class TeapotManipulatorSettings(NamedTuple):
-    kuka_asset: str
-    kuka_entity_name: str
-    kuka_scale: float
-    kuka_base_pos: tuple[float, float, float]
-    kuka_base_quat: tuple[float, float, float, float]
-    kuka_end_effector_link: str
-    kuka_qpos: tuple[float, ...]
-    hand_asset: str
-    hand_entity_name: str
-    hand_scale: float
-    hand_mount_pos: tuple[float, float, float]
-    hand_mount_quat: tuple[float, float, float, float]
-    hand_qpos: tuple[float, ...]
-    grasp_pos: tuple[float, float, float]
-    grasp_quat: tuple[float, float, float, float]
-    tool_center_point: tuple[float, float, float]
-    camera_pos: tuple[float, float, float]
-    camera_lookat: tuple[float, float, float]
-
-
 class TeapotSettings(NamedTuple):
     asset: str
     entity_name: str
@@ -41,7 +20,17 @@ class TeapotSettings(NamedTuple):
     particles_seed: tuple[float, float, float]
     particles_max_height: float
     particles_vel: tuple[float, float, float]
-    manipulator: TeapotManipulatorSettings
+    scale: int
+    dt: float
+    gravity: tuple[float, float, float]
+    lower_bound: tuple[float, float, float]
+    upper_bound: tuple[float, float, float]
+    camera_pos: tuple[float, float, float]
+    camera_lookat: tuple[float, float, float]
+
+    @property
+    def particle_size(self):
+        return 2.0 / self.scale
 
 
 class TeapotPose(NamedTuple):
@@ -51,73 +40,26 @@ class TeapotPose(NamedTuple):
     ang: tuple[float, float, float]
 
 
-def create_teapot_settings():
-    manipulator = TeapotManipulatorSettings(
-        kuka_asset="urdf/kuka_iiwa/model.urdf",
-        kuka_entity_name="teapot_kuka",
-        kuka_scale=12.0,
-        kuka_base_pos=(-3.165, -7.8945, -10.5525),
-        kuka_base_quat=(math.sqrt(0.5), -math.sqrt(0.5), 0.0, 0.0),
-        kuka_end_effector_link="lbr_iiwa_link_7",
-        kuka_qpos=(
-            0.16527023911476135,
-            1.8198974132537842,
-            0.6981679201126099,
-            1.1762551069259644,
-            0.8250933289527893,
-            -1.3872859477996826,
-            0.9264655709266663,
-        ),
-        hand_asset="urdf/shadow_hand/shadow_hand.urdf",
-        hand_entity_name="teapot_shadow_hand",
-        hand_scale=14.0,
-        hand_mount_pos=(0.0, 0.0, 0.54),
-        hand_mount_quat=(1.0, 0.0, 0.0, 0.0),
-        hand_qpos=(
-            0.0000012000000424450263,
-            -0.00003170000127283856,
-            -0.396697998046875,
-            1.2216999530792236,
-            0.026160499081015587,
-            0.31376829743385315,
-            0.635699987411499,
-            -0.06306590139865875,
-            1.4007999897003174,
-            0.44350001215934753,
-            0.6726999878883362,
-            -0.03246590122580528,
-            1.5707963705062866,
-            0.6097999811172485,
-            0.2476000040769577,
-            -0.3490658402442932,
-            1.3489999771118164,
-            0.7651000022888184,
-            0.41029998660087585,
-            0.0,
-            -0.3490658402442932,
-            0.9092000126838684,
-            0.6690000295639038,
-            0.8981000185012817,
-        ),
-        grasp_pos=(-2.6035435064512424, 1.692335, 0.2395262797782305),
-        grasp_quat=(0.5957038027506156, 0.38096847558355235, 0.38096847558355235, 0.5957038027506156),
-        tool_center_point=(0.0, -0.525, 5.5275),
-        camera_pos=(30.0, 13.0, -1.5),
-        camera_lookat=(-1.5, -2.0, -4.0),
-    )
+def create_teapot_settings(scale=None, dt=None):
+    scale = 20 if scale is None else scale
+    dt = 0.01 if dt is None else dt
+    if scale < 20:
+        raise ValueError("The teapot requires scale >= 20.")
+    if dt <= 0.0:
+        raise ValueError("The time step must be positive.")
     mesh_scale = 2.25
     offset = (0.0, -3.79, 0.0)
     quat = (math.sqrt(0.5), 0.0, -math.sqrt(0.5), 0.0)
     turning_axis_pos = tuple(
         geom_utils.transform_by_trans_quat(
-            np.array(manipulator.grasp_pos) * mesh_scale,
+            np.array((-2.6035435064512424, 1.692335, 0.2395262797782305)) * mesh_scale,
             np.array(offset),
             np.array(quat),
         ).tolist()
     )
     return TeapotSettings(
         asset="meshes/utah_teapot_modified.obj",
-        entity_name="teapot_visual",
+        entity_name="teapot",
         mesh_scale=mesh_scale,
         offset=offset,
         quat=quat,
@@ -125,12 +67,18 @@ def create_teapot_settings():
         particles_seed=(0.0, -3.15, 0.0),
         particles_max_height=0.7,
         particles_vel=(0.0, 0.0, 0.0),
-        manipulator=manipulator,
+        scale=scale,
+        dt=dt,
+        gravity=(0.0, -9.8, 0.0),
+        lower_bound=(-20.0, -20.0, -20.0),
+        upper_bound=(20.0, 15.0, 20.0),
+        camera_pos=(26.0, 8.0, 17.0),
+        camera_lookat=(0.0, -5.0, 1.5),
     )
 
 
 def teapot_pose(time, settings):
-    """Return the teapot pose for a rotation about the world-X line through its grasp point."""
+    """Return the teapot pose for a rotation about the world-X line through its handle."""
     turning_rate_initial = math.radians(1.5)
     stop_angle_initial = math.radians(27.0)
     hold_end = stop_angle_initial / turning_rate_initial + 10.0
@@ -215,112 +163,8 @@ def update_rigid_teapot(teapot, time, settings):
     )
 
 
-def update_teapot_manipulator(kuka, pose, settings, init_qpos):
-    """Set the KUKA joints so the attached hand keeps its teapot-local grasp transform."""
-    manipulator = settings.manipulator
-    target_pos, target_quat = geom_utils.transform_pos_quat_by_trans_quat(
-        np.array(manipulator.grasp_pos) * settings.mesh_scale,
-        np.array(manipulator.grasp_quat),
-        np.array(pose.pos),
-        np.array(pose.quat),
-    )
-    qpos = kuka.inverse_kinematics(
-        link=kuka.get_link(manipulator.kuka_end_effector_link),
-        pos=target_pos,
-        quat=target_quat,
-        local_point=manipulator.tool_center_point,
-        init_qpos=init_qpos,
-        pos_tol=1e-4,
-        rot_tol=1e-4,
-    )
-    kuka.set_qpos(qpos)
-    return qpos
-
-
-def add_teapot_entities(scene, settings, particle_size, material):
-    particles = sample_teapot_particles(settings, particle_size)
-    manipulator = settings.manipulator
-
-    scene.add_entity(
-        morph=gs.morphs.Mesh(
-            file=settings.asset,
-            scale=settings.mesh_scale,
-            pos=settings.offset,
-            quat=settings.quat,
-            collision=False,
-        ),
-        material=gs.materials.Kinematic(),
-        surface=gs.surfaces.Default(
-            color=(0.66, 0.66, 0.66),
-            opacity=0.3,
-        ),
-        name=settings.entity_name,
-    )
-    kuka = scene.add_entity(
-        morph=gs.morphs.URDF(
-            file=manipulator.kuka_asset,
-            scale=manipulator.kuka_scale,
-            pos=manipulator.kuka_base_pos,
-            quat=manipulator.kuka_base_quat,
-            collision=False,
-            fixed=True,
-        ),
-        material=gs.materials.Rigid(
-            needs_coup=False,
-            gravity_compensation=1.0,
-        ),
-        name=manipulator.kuka_entity_name,
-    )
-    hand = scene.add_entity(
-        morph=gs.morphs.URDF(
-            file=manipulator.hand_asset,
-            scale=manipulator.hand_scale,
-            collision=False,
-        ),
-        material=gs.materials.Rigid(
-            needs_coup=False,
-            gravity_compensation=1.0,
-        ),
-        name=manipulator.hand_entity_name,
-    )
-    hand.attach(
-        kuka,
-        manipulator.kuka_end_effector_link,
-        pos=manipulator.hand_mount_pos,
-        quat=manipulator.hand_mount_quat,
-    )
-    return scene.add_entity(
-        morph=gs.morphs.Particles(
-            positions=particles,
-        ),
-        material=material,
-    )
-
-
-def initialize_teapot_manipulator(scene, settings):
-    manipulator = settings.manipulator
-    kuka = scene.get_entity(name=manipulator.kuka_entity_name)
-    hand = scene.get_entity(name=manipulator.hand_entity_name)
-    kuka.set_qpos(manipulator.kuka_qpos)
-    hand.set_qpos(manipulator.hand_qpos)
-    qpos = update_teapot_manipulator(kuka, teapot_pose(0.0, settings), settings, manipulator.kuka_qpos)
-    return kuka, qpos
-
-
-def update_teapot_case(solver, teapot, kuka, time, settings, kuka_qpos):
+def update_teapot_case(solver, teapot, time, settings):
     pose = teapot_pose(time, settings)
-    solver.set_static_colliders_pose(
-        pos=pose.pos,
-        quat=pose.quat,
-        colliders_idx=0,
-    )
-    teapot.set_pos(
-        pose.pos,
-        relative=False,
-        skip_forward=True,
-    )
-    teapot.set_quat(
-        pose.quat,
-        relative=False,
-    )
-    return update_teapot_manipulator(kuka, pose, settings, kuka_qpos)
+    solver.set_static_colliders_pose(pos=pose.pos, quat=pose.quat, colliders_idx=0)
+    teapot.set_pos(pose.pos, relative=False, skip_forward=True)
+    teapot.set_quat(pose.quat, relative=False)

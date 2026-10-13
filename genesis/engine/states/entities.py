@@ -140,10 +140,6 @@ class SPHEntityState(RBC):
         return self._vel
 
 
-class IPBSTFEntityState(SPHEntityState):
-    """Dynamic state queried from an implicit position-based surface-tension fluid (IPBSTF) entity."""
-
-
 class PBSTFEntityState(SPHEntityState):
     """Dynamic state queried from a genesis PBSTFEntity."""
 

@@ -3,11 +3,16 @@ import sys
 
 import numpy as np
 import pytest
+
 import trimesh
 
 import genesis as gs
 import genesis.utils.particle as particle_utils
 from genesis.utils.misc import qd_to_numpy, tensor_to_array
+
+from examples.teapot.fluid_helper import create_teapot_settings
+from examples.teapot.teapot_checkpoint import load_teapot_checkpoint, save_teapot_checkpoint
+from examples.teapot.teapot_render import TeapotScene
 
 from ..conftest import IS_INTERACTIVE_VIEWER_AVAILABLE, SKIP_NO_VIEWER
 from ..utils import assert_allclose, assert_equal, get_hf_dataset, rgb_array_to_png_bytes
@@ -16,7 +21,7 @@ from .conftest import RENDERER_TYPE
 
 @pytest.mark.required
 @pytest.mark.parametrize("renderer_type", [RENDERER_TYPE.RASTERIZER])
-def test_pbd_reconstruction_uses_pbd_particle_radius(monkeypatch, renderer):
+def test_pbd_reconstruction_uses_pbd_particle_radius(monkeypatch, renderer, asset_tmp_path):
     particle_size = 0.04
     reconstructed_radii = []
 
@@ -36,15 +41,31 @@ def test_pbd_reconstruction_uses_pbd_particle_radius(monkeypatch, renderer):
             upper_bound=(0.2, 0.2, 0.4),
         ),
         # Keep the MPM radius deliberately different to catch accidental cross-solver use.
-        mpm_options=gs.options.MPMOptions(particle_size=0.01),
+        mpm_options=gs.options.MPMOptions(
+            particle_size=0.01,
+        ),
         renderer=renderer,
         show_viewer=False,
         show_FPS=False,
     )
-    scene.add_entity(
-        material=gs.materials.PBD.Liquid(sampler="regular"),
-        morph=gs.morphs.Box(pos=(0.0, 0.0, 0.12), size=(0.08, 0.08, 0.08)),
-        surface=gs.surfaces.Default(vis_mode="recon"),
+    liquid = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(0.0, 0.0, 0.12),
+            size=(0.08, 0.08, 0.08),
+        ),
+        material=gs.materials.PBD.Liquid(
+            sampler="regular",
+        ),
+        surface=gs.surfaces.Default(
+            vis_mode="recon",
+        ),
+    )
+    teapot = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(-0.1, -0.1, 0.05),
+            size=(0.04, 0.04, 0.04),
+        ),
+        material=gs.materials.Kinematic(),
     )
     camera = scene.add_camera(
         res=(32, 32),
@@ -53,10 +74,44 @@ def test_pbd_reconstruction_uses_pbd_particle_radius(monkeypatch, renderer):
     )
 
     scene.build()
-    camera.render()
+    rgb_reference, *_ = camera.render()
 
     assert reconstructed_radii
     assert all(radius == pytest.approx(particle_size / 2.0) for radius in reconstructed_radii)
+
+    monkeypatch.undo()
+    rgb_reconstructed, *_ = camera.render(force_render=True)
+    is_reference_foreground = np.any(rgb_reference[..., :3] != rgb_reference[0, 0, :3], axis=-1)
+    is_reconstructed_foreground = np.any(rgb_reconstructed[..., :3] != rgb_reconstructed[0, 0, :3], axis=-1)
+    assert is_reconstructed_foreground.sum() > is_reference_foreground.sum()
+
+    liquid.set_particles_vel((0.1, -0.2, 0.3))
+    positions = tensor_to_array(liquid.get_particles_pos())
+    velocities = tensor_to_array(liquid.get_particles_vel())
+    teapot_pos = tensor_to_array(teapot.get_pos())
+    teapot_quat = tensor_to_array(teapot.get_quat())
+    checkpoint_directory = asset_tmp_path / f"teapot_checkpoint_{scene.uid!s}"
+    checkpoint_directory.mkdir()
+    simulation = TeapotScene(scene, teapot, liquid, create_teapot_settings(), camera)
+    save_teapot_checkpoint(simulation, checkpoint_directory, step=0)
+    liquid.set_particles_pos(positions + (0.08, 0.0, 0.0))
+    liquid.set_particles_vel(0.0)
+    teapot.set_pos((0.15, 0.0, 0.2))
+    teapot.set_quat((0.0, 1.0, 0.0, 0.0))
+    rgb_changed, *_ = camera.render(force_render=True)
+    assert np.any(rgb_changed != rgb_reconstructed)
+    liquid.set_particles_active(False)
+
+    restored_step = load_teapot_checkpoint(simulation, checkpoint_directory / "frame_00000000.npz")
+    assert_equal(restored_step, 0)
+    assert_equal(scene.t, 0)
+    assert_equal(tensor_to_array(liquid.get_particles_pos()), positions)
+    assert_equal(tensor_to_array(liquid.get_particles_vel()), velocities)
+    assert tensor_to_array(liquid.get_particles_active()).all()
+    assert_equal(tensor_to_array(teapot.get_pos()), teapot_pos)
+    assert_equal(tensor_to_array(teapot.get_quat()), teapot_quat)
+    rgb_restored, *_ = camera.render(force_render=True)
+    assert_allclose(rgb_restored, rgb_reconstructed, atol=1)
 
 
 @pytest.mark.slow  # ~200s

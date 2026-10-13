@@ -321,15 +321,13 @@ class Raytracer:
                 self.add_particles(str(sph_entity.uid), self.sim.sph_solver.particle_radius, sph_entity.material.rho)
 
         # Position-based fluid particles
-        for solver in (self.sim.pbstf_solver, self.sim.ipbstf_solver):
-            if solver.is_active:
-                for entity in solver.entities:
-                    if entity.surface.vis_mode == "visual" and isinstance(
-                        entity.material, gs.materials.PBSTF.PorousElastic
-                    ):
-                        self.add_deformable(str(entity.uid))
-                    else:
-                        self.add_particles(str(entity.uid), solver.particle_radius, entity.material.rho)
+        solver = self.sim.pbstf_solver
+        if solver.is_active:
+            for entity in solver.entities:
+                if entity.surface.vis_mode == "visual" and isinstance(entity.material, gs.materials.PBSTF.PorousElastic):
+                    self.add_deformable(str(entity.uid))
+                else:
+                    self.add_particles(str(entity.uid), solver.particle_radius, entity.material.rho)
 
         # PBD entities
         if self.sim.pbd_solver.is_active:
@@ -754,14 +752,13 @@ class Raytracer:
                 )
 
         # Position-based fluid particles
-        for solver in (self.sim.pbstf_solver, self.sim.ipbstf_solver):
-            if not solver.is_active:
-                continue
+        solver = self.sim.pbstf_solver
+        if solver.is_active:
             env_idx = self.rendered_envs_idx[0]
             particles_all = miscu.qd_to_numpy(solver.particles_render.pos, transpose=True)[env_idx]
             particles_vel_all = miscu.qd_to_numpy(solver.particles_render.vel, transpose=True)[env_idx]
             active_all = miscu.qd_to_numpy(solver.particles_render.active, transpose=True)[env_idx]
-            if solver is self.sim.pbstf_solver and solver.n_vverts > 0:
+            if solver.n_vverts > 0:
                 vverts_all = miscu.qd_to_numpy(
                     solver.vverts_render.pos, env_idx, keepdim=False, transpose=True
                 )

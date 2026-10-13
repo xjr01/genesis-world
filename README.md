@@ -45,54 +45,56 @@ Genesis World occupies the four layers inside the dashed box. Above sits whateve
 
 ## Catalogue
 
-Three sections, mirroring the Genesis layers that ship runnable demos: **Physics** (solvers and multi-solver coupling), **Rendering** (in-repo camera setups plus the Nyx walkthroughs hosted in [genesis-nyx](https://github.com/Genesis-Embodied-AI/genesis-nyx)), and **Simulation Interface** (sensors, GUI, controllers, parallel/heterogeneous envs, and tutorials). Most scripts run end-to-end after `pip install -e ".[dev]"`; demos that depend on optional backends (e.g. the IPC and Nyx examples) need the extras listed in [Optional extras](#optional-extras).
+This branch contains the shared teapot comparison scene in `examples/teapot/`.
 
-### Physics
+| Method | Entry point |
+|---|---|
+| PBSTF | [pbstf_teapot.py](./examples/teapot/pbstf_teapot.py) |
+| PBD | [pbd_liquid_teapot.py](./examples/teapot/pbd_liquid_teapot.py) |
+| DFSPH / WCSPH | [sph_teapot.py](./examples/teapot/sph_teapot.py) |
 
-| | | |
-|---|---|---|
-| [Rigid: franka cube](./examples/rigid/franka_cube.py) | [Rigid: collision tower](./examples/collision/tower.py) | [Rigid: contype](./examples/collision/contype.py) |
-| <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/rigid_franka_cube.webp" width="240"> | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/collision_tower.webp" width="240"> | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/collision_contype.webp" width="240"> |
-| [FEM: hard & soft constraint](./examples/deformable/fem_hard_and_soft_constraint.py) | [MPM: tutorial](./examples/tutorials/mpm.py) | [MPM: sand wheel](./examples/coupling/sand_wheel.py) |
-| <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/fem_hard_and_soft_constraint.webp" width="240"> | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/tutorials_mpm.webp" width="240"> | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/coupling_sand_wheel.webp" width="240"> |
-| [SPH: rigid](./examples/coupling/sph_rigid.py) | [SPH: + MPM](./examples/coupling/sph_mpm.py) | [PBD: liquid](./examples/deformable/pbd_liquid.py) |
-| <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/coupling_sph_rigid.webp" width="240"> | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/coupling_sph_mpm.webp" width="240"> | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/pbd_liquid.webp" width="240"> |
-| [PBD: cloth](./examples/tutorials/pbd_cloth.py) | [Stable Fluid: smoke](./examples/fluid/smoke.py) | [IPC: robot cloth teleop](./examples/ipc/ipc_robot_cloth_teleop.py) |
-| <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/tutorials_pbd_cloth.webp" width="240"> | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/smoke.webp" width="240"> | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/ipc_cloth_teleop.webp" width="240"> |
-| [Coupler: cloth on rigid](./examples/coupling/cloth_on_rigid.py) | [Coupler: rigid + MPM](./examples/coupling/rigid_mpm_attachment.py) | [Coupler: cut dragon](./examples/coupling/cut_dragon.py) |
-| <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/coupling_cloth_on_rigid.webp" width="240"> | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/coupling_rigid_mpm_attachment.webp" width="240"> | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/coupling_cut_dragon.webp" width="240"> |
-| [Coupler: water wheel](./examples/coupling/water_wheel.py) | [Coupler: flush cubes](./examples/coupling/flush_cubes.py) | [SAP: Franka grasp rigid cube](./examples/sap_coupling/franka_grasp_rigid_cube.py) |
-| <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/coupling_water_wheel.webp" width="240"> | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/coupling_flush_cubes.webp" width="240"> | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/sap_franka_grasp_rigid_cube.webp" width="240"> |
+All methods share the teapot geometry, prescribed motion, initial particle positions and velocities, camera, gravity,
+and floor at Y = -20. Solver-specific material parameters and substeps remain configurable in their entry points.
+The defaults use 188,716 particles, a particle diameter of 0.1, and a simulation time step of 0.01 seconds on CUDA.
 
-### Rendering
+```bash
+python examples/teapot/pbstf_teapot.py --vis --preview particles
+python examples/teapot/pbd_liquid_teapot.py --vis --preview render
+python examples/teapot/sph_teapot.py --pressure-solver WCSPH --vis --preview render
+python examples/teapot/render_teapot_comparison.py --jobs 2
+```
 
-Genesis exposes three rendering paths as camera sensors: built-in (Nyx / Luisa / Pyrender) and detailed Nyx walkthroughs hosted in [genesis-nyx](https://github.com/Genesis-Embodied-AI/genesis-nyx/tree/main/examples).
+The rendered preview uses Genesis RayTracer with reconstructed water surfaces and requires the optional LuisaRender
+backend and `pysplashsurf`. Lighting and surface assets are downloaded into `out/teapot_assets/`, with their CC0 sources
+recorded in `sources.csv`. The comparison runner saves four method videos, initial and final particle states, run
+settings, preview images, and `out/teapot_comparison/teapot_comparison.mp4`. Its defaults cover 32 simulated seconds at
+2x playback, 25 frames per second, and 32 samples per pixel. Use `--jobs 1` to reduce peak GPU memory, or
+`--compose-only` to combine existing recordings after verifying their initial states match exactly.
 
-| | | |
-|---|---|---|
-| [Follow entity](./examples/rendering/follow_entity.py) | [Animated camera](./examples/rendering/moving_camera.py) | [Nyx: hello](https://github.com/Genesis-Embodied-AI/genesis-nyx/blob/main/examples/01_hello_nyx.py) |
-| <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/rendering_follow_entity.webp" width="240"> | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/rendering_moving_camera.webp" width="240"> | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/nyx_01_hello_nyx.png" width="240"> |
-| [Nyx: attached camera](https://github.com/Genesis-Embodied-AI/genesis-nyx/blob/main/examples/02_attached_camera.py) | [Nyx: PBR materials](https://github.com/Genesis-Embodied-AI/genesis-nyx/blob/main/examples/03_materials.py) | [Nyx: light types](https://github.com/Genesis-Embodied-AI/genesis-nyx/blob/main/examples/04_light_types.py) |
-| <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/nyx_02_attached_camera.webp" width="240"> | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/nyx_03_materials.png" width="240"> | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/nyx_04_light_types.png" width="240"> |
-| [Nyx: 3D Gaussian splat](https://github.com/Genesis-Embodied-AI/genesis-nyx/blob/main/examples/05_gaussian_splat.py) | [Nyx: object picking](https://github.com/Genesis-Embodied-AI/genesis-nyx/blob/main/examples/06_object_picking.py) | [Nyx: multi-cam multi-env](https://github.com/Genesis-Embodied-AI/genesis-nyx/blob/main/examples/07_multi_camera_multi_env.py) |
-| <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/nyx_05_gaussian_splat.png" width="240"> | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/nyx_06_object_picking.png" width="240"> | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/nyx_07_multi_camera_multi_env.png" width="240"> |
+Save simulation checkpoints once, then render them with the current camera, lighting, materials, and sample count:
 
-### Simulation Interface
+```bash
+python examples/teapot/pbstf_teapot.py --seconds 32 --playback-speed 2 --save-checkpoints out/teapot_checkpoints
+python examples/teapot/pbstf_teapot.py --replay-checkpoints out/teapot_checkpoints --preview render --spp 64 -o out/teapot_rerender
+python examples/teapot/pbstf_teapot.py --replay-checkpoints out/teapot_checkpoints --replay-time 24 --preview render --spp 64 -o out/teapot_stills
+```
 
-| | | |
-|---|---|---|
-| [Controlling a robot](./examples/tutorials/control_your_robot.py) | [GUI: ImGui joint control](./examples/gui/imgui_joint_control.py) | [Heterogeneous envs](./examples/rigid/heterogeneous_simulation.py) |
-| <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/tutorials_control_your_robot.webp" width="240"> | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/gui_imgui_joint_control.webp" width="240"> | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/het_articulated.webp" width="240"> |
-| [Domain randomization](./examples/rigid/domain_randomization.py) | [Sensor: depth camera](./examples/sensors/depth_camera_custom_vverts.py) | [Sensor: IMU](./examples/sensors/imu_franka.py) |
-| <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/rigid_domain_randomization.webp" width="240"> | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/sensors_depth_camera_custom_vverts.webp" width="240"> | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/sensors_imu_franka.webp" width="240"> |
-| [Sensor: lidar](./examples/sensors/lidar_teleop.py) | [Sensor: tactile sandbox](./examples/sensors/tactile_sandbox.py) | [Sensor: contact force](./examples/sensors/contact_force_go2.py) |
-| <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/sensors_lidar_teleop.webp" width="240"> | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/sensors_tactile_sandbox.webp" width="240"> | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/sensors_contact_force_go2.webp" width="240"> |
-| [Sensor: surface distance](./examples/sensors/surface_distance_shadowhand.py) | [Sensor: temperature grid](./examples/sensors/temperature_grid.py) | [GUI: debug drawing](./examples/tutorials/draw_debug.py) |
-| <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/sensors_surface_distance_shadowhand.webp" width="240"> | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/sensors_temperature_grid.webp" width="240"> | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/tutorials_draw_debug.webp" width="240"> |
-| [GUI: mesh point picker](./examples/viewer_plugin/mesh_point_selector.py) | [GUI: mouse interaction](./examples/viewer_plugin/mouse_interaction.py) | [Diff-IK controller](./examples/rigid/diffik_controller.py) |
-| <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/viewer_mesh_point_selector.webp" width="240"> | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/viewer_mouse_interaction.webp" width="240"> | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/rigid_diffik_controller.webp" width="240"> |
-| [Batched IK](./examples/tutorials/batched_IK.py) | [Drone](./examples/drone/hover_train.py) | [Advanced: worm](./examples/tutorials/advanced_worm.py) |
-| <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/tutorials_batched_IK.webp" width="240"> | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/drone_hover_train.webp" width="240"> | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/tutorials_advanced_worm.webp" width="240"> |
+Each method writes compressed particle positions, velocities, active flags, and teapot poses under `DIR/METHOD`,
+plus JSON metadata. The cache is for rendering replay. Saving uses an empty method directory and defaults to the video
+cadence (every eight steps with 2x playback at 25 fps); `--checkpoint-every 1` preserves finer motion at a higher disk
+cost. Replay skips physics and selects the closest saved frame at or before each requested time. Increasing the
+output frame rate repeats cached states. `--replay-time` saves one PNG. `--timings` writes stage timings to CSV and
+synchronizes GPU work for accurate measurement, reducing execution overlap.
+
+The comparison runner accepts the same save/replay flags and a method selection:
+
+```bash
+python examples/teapot/render_teapot_comparison.py --methods PBSTF PBD WCSPH --simulate-only --save-checkpoints out/teapot_comparison_cache
+python examples/teapot/render_teapot_comparison.py --methods PBSTF PBD WCSPH --replay-checkpoints out/teapot_comparison_cache --spp 64 -o out/teapot_comparison_rerender
+```
+
+`--simulate-only` saves the selected trajectories with rendering disabled. Non-finite particle states raise an error;
+the video encoder finalizes the available frames. A recording marked `unstable` is labeled accordingly during composition.
 
 ## Quick Installation
 
@@ -163,7 +165,7 @@ uv pip install torch
 
 Run an example:
 ```bash
-uv run examples/rigid/single_franka.py
+uv run examples/teapot/pbstf_teapot.py --vis
 ```
 
 ## Docker
@@ -269,24 +271,3 @@ If you use Genesis in your research, please consider citing:
   url = {https://github.com/Genesis-Embodied-AI/genesis-world}
 }
 ```
-<!--
-Catalogue entries pruned from the Physics grid. Kept here as a reference so
-they can be reinstated later. The links and thumbnail paths are all still
-valid in the repo; just paste any pair of rows back into the Physics table.
-
-| [Rigid: grasp bottle](./examples/rigid/grasp_bottle.py) | [Rigid: collision pyramid](./examples/collision/pyramid.py) | [FEM: elastic dragon](./examples/deformable/elastic_dragon.py) |
-| <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/rigid_grasp_bottle.webp" width="240"> | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/collision_pyramid.png" width="240"> | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/elastic_dragon.webp" width="240"> |
-| [FEM: SAP fixed constraint](./examples/sap_coupling/fem_fixed_constraint.py) | [SPH: liquid](./examples/tutorials/sph_liquid.py) | [Coupler: grasp soft cube](./examples/coupling/grasp_soft_cube.py) |
-| <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/sap_fem_fixed_constraint.webp" width="240"> | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/tutorials_sph_liquid.webp" width="240"> | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/coupling_grasp_soft_cube.webp" width="240"> |
-| [Coupler: cloth + rigid](./examples/coupling/cloth_attached_to_rigid.py) | [SAP: Franka grasp FEM sphere](./examples/sap_coupling/franka_grasp_fem_sphere.py) | [SAP: FEM sphere + cube](./examples/sap_coupling/fem_sphere_and_cube.py) |
-| <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/coupling_cloth_attached_to_rigid.webp" width="240"> | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/sap_franka_grasp_fem_sphere.webp" width="240"> | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/sap_fem_sphere_and_cube.webp" width="240"> |
-
-Pruned from Simulation Interface (same logic — labels/paths still valid):
-
-| [Entity name](./examples/tutorials/entity_name.py) | [Select rendered envs](./examples/tutorials/selecting_rendered_envs.py) | [GUI: keyboard teleop](./examples/viewer_plugin/keyboard_teleop.py) |
-| <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/tutorials_entity_name.webp" width="240"> | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/tutorials_selecting_rendered_envs.webp" width="240"> | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/keyboard_teleop.webp" width="240"> |
-| [Control franka](./examples/rigid/control_franka.py) | [Position control comparison](./examples/tutorials/position_control_comparison.py) | [IK + motion planning](./examples/tutorials/IK_motion_planning_grasp.py) |
-| <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/rigid_control_franka.webp" width="240"> | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/tutorials_position_control_comparison.webp" width="240"> | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/tutorials_IK_motion_planning_grasp.webp" width="240"> |
-| [Close kinematic chain](./examples/rigid/closed_loop.py) | [Advanced: muscle](./examples/tutorials/advanced_muscle.py) | [Advanced: hybrid robot](./examples/tutorials/advanced_hybrid_robot.py) |
-| <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/rigid_closed_loop.webp" width="240"> | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/tutorials_advanced_muscle.webp" width="240"> | <img src="https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/tutorials_advanced_hybrid_robot.webp" width="240"> |
--->

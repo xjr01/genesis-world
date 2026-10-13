@@ -1,5 +1,6 @@
 import numpy as np
 import torch
+
 import trimesh
 
 import genesis as gs
@@ -8,7 +9,7 @@ import genesis.utils.mesh as mu
 import genesis.utils.particle as pu
 from genesis.ext import pyrender
 from genesis.ext.pyrender.jit_render import JITRenderer
-from genesis.utils.misc import tensor_to_array, qd_to_numpy
+from genesis.utils.misc import qd_to_numpy, tensor_to_array
 
 
 class SegmentationColorMap:
@@ -251,12 +252,20 @@ class RasterizerContext:
 
         self.external_nodes[obj.name] = self.add_node(obj, **kwargs)
 
-    def clear_dynamic_nodes(self, only_outdated: bool = True):
+    def clear_dynamic_nodes(self, only_outdated: bool = True, is_reconstruction_updated: bool = False):
         for t in tuple(self.dynamic_nodes.keys()):
-            if not only_outdated or t < self.scene._t:
-                for dynamic_node in self.dynamic_nodes.pop(t):
+            nodes = self.dynamic_nodes[t]
+            for dynamic_node in tuple(nodes):
+                if (
+                    not only_outdated
+                    or t < self.scene._t
+                    or (is_reconstruction_updated and not dynamic_node.mesh.is_marker)
+                ):
                     self.remove_node_seg(dynamic_node)
                     self.remove_node(dynamic_node)
+                    nodes.remove(dynamic_node)
+            if not nodes:
+                del self.dynamic_nodes[t]
 
     def clear_external_node(self, node):
         if node.name in self.external_nodes:
@@ -766,9 +775,8 @@ class RasterizerContext:
                         self.jit.update_buffer(node, "model", tfs.transpose((0, 2, 1)))
 
     def on_pbstf(self):
-        for solver in (self.sim.pbstf_solver, self.sim.ipbstf_solver):
-            if not solver.is_active:
-                continue
+        solver = self.sim.pbstf_solver
+        if solver.is_active:
             for entity in solver.entities:
                 if entity.surface.vis_mode == "recon":
                     self.add_dynamic_node(entity, None)
@@ -799,13 +807,12 @@ class RasterizerContext:
                         )
 
     def update_pbstf(self):
-        for solver in (self.sim.pbstf_solver, self.sim.ipbstf_solver):
-            if not solver.is_active:
-                continue
+        solver = self.sim.pbstf_solver
+        if solver.is_active:
             particles_all = qd_to_numpy(solver.particles_render.pos, transpose=True)
             particles_all = particles_all + self.scene.envs_offset[:, None, :]
             active_all = qd_to_numpy(solver.particles_render.active, transpose=True)
-            if solver is self.sim.pbstf_solver and solver.n_vverts > 0:
+            if solver.n_vverts > 0:
                 vverts_all = qd_to_numpy(solver.vverts_render.pos, transpose=True)
                 vverts_all = vverts_all + self.scene.envs_offset[:, None, :]
             else:
@@ -1214,8 +1221,8 @@ class RasterizerContext:
         # Update current time right away
         self._t = self.scene._t
 
-        # Remove up old dynamic nodes
-        self.clear_dynamic_nodes(only_outdated=True)
+        # Reconstructed surfaces are replaced even when setters update a scene at the same simulation time.
+        self.clear_dynamic_nodes(only_outdated=True, is_reconstruction_updated=True)
 
         # Force updating rendering-only quantities that are not updated automatically during simulation
         self.visualizer.update_visual_states(force_render)

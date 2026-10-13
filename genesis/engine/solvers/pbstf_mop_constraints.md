@@ -1,12 +1,12 @@
 # PBSTF Porous Mop Formulations
 
-This document describes the Position-Based Surface-Tension Flow (PBSTF) formulations that are active in `CASE_MOP` in
-`examples/teapot/pbstf_surface_tension.py`. It follows the current implementation in
-`pbstf_solver.py` and `pbstf_porous.py`.
+This document describes the Position-Based Surface-Tension Flow (PBSTF) formulations in `pbstf_solver.py` and
+`pbstf_porous.py`, with a reference configuration for a porous mop. Absorption, transport, and compression are exercised
+by `test_porous_elastic_absorbs_carries_and_squeezes_water` in `tests/particles/test_pbstf.py`.
 
 ## 1. Solver classification
 
-`CASE_MOP` runs the liquid and the porous elastic entity in one position-based solver loop. The loop predicts both
+The reference configuration runs the liquid and the porous elastic entity in one position-based solver loop. It predicts both
 phases, accumulates fluid and porous position corrections, applies all accumulated corrections together, and rebuilds
 velocity from the corrected positions.
 
@@ -31,9 +31,9 @@ dynamics (PBD) with some extended position-based dynamics (XPBD)-style complianc
 The porous state also contains derived fields such as density, porosity, saturation, rotation, and strain. These fields
 drive constraints but are not independent constraints.
 
-## 2. Active `CASE_MOP` configuration
+## 2. Reference configuration
 
-The default case uses:
+The reference configuration uses:
 
 | Quantity | Value |
 | --- | ---: |
@@ -384,7 +384,7 @@ d_{ij}^0 = \frac{s}{2}\left[
 \right].
 $$
 
-Equal-mass `CASE_MOP` particles have `d_ij^0=s`. The unilateral constraint is active for
+Equal-mass particles in the reference configuration have `d_ij^0=s`. The unilateral constraint is active for
 `0 < d_ij < d_ij^0`:
 
 $$
@@ -409,7 +409,7 @@ $$
 \Delta x_j -= \frac{\lambda_{ij}}{m_j}g_i.
 $$
 
-This is an anti-overlap and particle-spacing regularizer. It runs only on iterations `0,2,4,6,8` in `CASE_MOP`.
+This is an anti-overlap and particle-spacing regularizer. It runs on iterations `0,2,4,6,8` in the reference configuration.
 
 ## 9. Porous deviatoric strain constraints
 
@@ -474,7 +474,7 @@ $$
 \Delta x_t += \omega_sw_t\lambda_{s,a}g_{st,a}.
 $$
 
-These five constraints resist shear and shape distortion of the porous skeleton. In `CASE_MOP`, saturation changes the
+These five constraints resist shear and shape distortion of the porous skeleton. In the reference configuration, saturation changes the
 compliance term from `1e-6` when dry to `1.5e-6` when fully wet, making the fully wet constraint response softer.
 
 ## 10. Porous volumetric strain and swelling constraint
@@ -496,7 +496,7 @@ Its gradients, denominator, relaxation, and scatter are the same as the deviator
 `alpha_dev_eff` replaced by `alpha_vol_eff`.
 
 This constraint supplies the ordinary bulk response of the porous skeleton. Its saturation-dependent target also
-produces swelling: in `CASE_MOP`, a fully saturated sample targets `trace(E_s)=0.05`. The wet compliance changes from
+produces swelling: in the reference configuration, a fully saturated sample targets `trace(E_s)=0.05`. The wet compliance changes from
 `1e-6` to `1.5e-6` at full saturation.
 
 ## 11. Pore-collapse constraint
@@ -545,7 +545,7 @@ $$
 J_s\ge 1-\phi_s^0.
 $$
 
-The `CASE_MOP` value `alpha_pore=0` makes this a hard local inequality up to finite-iteration error. The volumetric
+The reference value `alpha_pore=0` makes this a hard local inequality up to finite-iteration error. The volumetric
 strain constraint governs normal bulk deformation; the pore constraint only activates at the physical collapse limit.
 
 ## 12. Fluid-solid capillary constraint
@@ -596,7 +596,7 @@ $$
 \Delta x_s -= p_{is}w_s\lambda_{is}^{cap}n_{is}.
 $$
 
-This constraint attracts nearby water into and toward the porous matrix. With the `CASE_MOP` falloff `beta_s=1`, the
+This constraint attracts nearby water into and toward the porous matrix. With the reference falloff `beta_s=1`, the
 strength factor decreases linearly toward zero as the local pore reaches full saturation. The normalized `p_is` limits
 the aggregate correction when either particle has many cross-phase neighbors.
 
@@ -639,7 +639,7 @@ pair in the kernel support and is not gated by saturation or the inside-porous c
 
 ## 14. Static-collider adhesion constraint
 
-This constraint applies only to liquid particles marked as free surface and only to static colliders. In `CASE_MOP` the
+This constraint applies only to liquid particles marked as free surface and only to static colliders. In this configuration the
 only such collider is the table.
 
 Let `a` be the radius-offset contact anchor returned by the collider query and `n` its outward normal. For a particle in
@@ -735,7 +735,7 @@ $$
 v_i\leftarrow v_i+c_i\Delta v_i^{XSPH}.
 $$
 
-Both surface and interior coefficients are `c_i=0.5` in `CASE_MOP`. This velocity filter smooths liquid velocity and
+Both surface and interior coefficients are `c_i=0.5` in the reference configuration. This velocity filter smooths liquid velocity and
 dissipates relative motion. It is not a position constraint.
 
 ### 17.4 Table friction
@@ -754,7 +754,7 @@ $$
 v\leftarrow v_n+(1-\mu)v_t.
 $$
 
-`CASE_MOP` uses `mu=0.5`. This is tangential velocity damping rather than a Coulomb or PBD friction constraint. Porous
+The reference configuration uses `mu=0.5`. This tangential velocity damping applies to the liquid contact response. Porous
 particles receive hard table contact projection but no analogous table-friction update.
 
 ### 17.5 Porous classification and free-surface suppression

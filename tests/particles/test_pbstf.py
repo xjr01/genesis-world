@@ -3,9 +3,9 @@ import os
 
 import numpy as np
 import pytest
-import trimesh
 
 import igl
+import trimesh
 
 import quadrants as qd
 
@@ -24,24 +24,7 @@ from genesis.engine.boundaries import (
 )
 from genesis.utils.misc import qd_to_numpy, tensor_to_array
 
-from examples.teapot.pbstf_surface_tension import (
-    CASES,
-    CASE_BOUNCE,
-    CASE_CONE,
-    CASE_MERGE,
-    CASE_MOP,
-    CASE_SPONGE_SQUEEZE,
-    CASE_SWEEP,
-    CASE_TAP,
-    CASE_TEAPOT,
-    build_scene,
-    case_settings,
-    porous_top_particle_indices,
-    teapot_pose,
-    update_sponge_squeeze_case,
-    update_sweep_case,
-    update_teapot_manipulator,
-)
+from examples.teapot.fluid_helper import create_teapot_settings, sample_teapot_particles, teapot_pose
 from tests.utils import assert_allclose, assert_equal
 
 
@@ -479,8 +462,8 @@ def test_static_collider_adhesion_and_friction(asset_tmp_path, show_viewer):
 
 @pytest.mark.required
 @pytest.mark.parametrize("backend", [gs.cpu])
-def test_teapot_initial_particles_pose_and_case_time_steps():
-    teapot_settings = case_settings(CASE_TEAPOT).teapot
+def test_teapot_initial_particles_and_pose():
+    teapot_settings = create_teapot_settings()
     particle_size = 0.1
     teapot_mesh = mesh_utils.load_mesh(os.path.join(gs.utils.get_assets_dir(), teapot_settings.asset)).copy()
     teapot_mesh.merge_vertices(merge_tex=True, merge_norm=True)
@@ -508,12 +491,10 @@ def test_teapot_initial_particles_pose_and_case_time_steps():
     expected_max_height = teapot_settings.particles_seed[1] + max_height_steps * particle_size
     assert_allclose(particles[:, 1].max(), expected_max_height, atol=1e-12)
     assert particles[:, 2].max() > 5.0
-    for case in CASES:
-        settings = case_settings(case)
-        expected_scale = 20 if case in (CASE_MOP, CASE_SPONGE_SQUEEZE, CASE_SWEEP, CASE_TAP, CASE_TEAPOT) else 10
-        expected_dt = 0.01 if case in (CASE_MOP, CASE_SPONGE_SQUEEZE, CASE_SWEEP, CASE_TEAPOT) else 1.0 / 30.0
-        assert_equal(settings.scale, expected_scale)
-        assert_equal(settings.dt, expected_dt)
+    assert_equal(teapot_settings.scale, 20)
+    assert_equal(teapot_settings.dt, 0.01)
+    assert_equal(teapot_settings.lower_bound, (-20.0, -20.0, -20.0))
+    assert_equal(sample_teapot_particles(teapot_settings, particle_size), particles)
     for time, angle_degrees in ((0.0, 0.0), (18.0, 27.0), (28.0, 27.0), (29.6, 19.0), (35.0, 19.0)):
         pose = teapot_pose(time, teapot_settings)
         angle = math.radians(angle_degrees)
@@ -539,30 +520,6 @@ def test_teapot_initial_particles_pose_and_case_time_steps():
 
 @pytest.mark.required
 @pytest.mark.parametrize("backend", [gs.cpu])
-def test_tap_case_settings():
-    settings = case_settings(CASE_TAP)
-    assert CASE_TAP in CASES
-    assert settings.scale == 20
-    assert_equal(settings.dt, 1.0 / 30.0)
-    assert_equal(settings.gravity, (0.0, -9.8, 0.0))
-    assert_equal(settings.lower_bound, (-500.0, -50.0, -500.0))
-    assert_equal(settings.upper_bound, (500.0, 500.0, 500.0))
-    assert settings.static_colliders == ()
-    assert settings.max_surface_neighbors == 768
-    assert settings.max_localmesh_neighbors == 64
-    assert settings.enable_pca_normals
-    assert settings.steps == 2000
-    assert settings.emitter is not None
-    assert settings.emitter.max_particles == 200000
-    assert_equal(settings.emitter.pos, (0.0, 5.0, 0.0))
-    assert_equal(settings.emitter.direction, (0.0, -1.0, 0.0))
-    assert_equal(settings.emitter.droplet_size, 2.0)
-    assert_equal(settings.emitter.generation_speed, 3.0)
-    assert_equal(settings.emitter.initial_speed, 0.0)
-
-
-@pytest.mark.required
-@pytest.mark.parametrize("backend", [gs.cpu])
 def test_local_mesh_neighbor_capacity():
     options = gs.options.PBSTFOptions(
         max_surface_neighbors=128,
@@ -579,104 +536,6 @@ def test_local_mesh_neighbor_capacity():
             max_surface_neighbors=32,
             max_localmesh_neighbors=33,
         )
-
-
-@pytest.mark.required
-@pytest.mark.parametrize("backend", [gs.cuda])
-def test_teapot_manipulator_tracks_grasp_pose(show_viewer):
-    teapot_settings = case_settings(CASE_TEAPOT).teapot
-    manipulator = teapot_settings.manipulator
-    scene = gs.Scene(
-        sim_options=gs.options.SimOptions(
-            dt=0.01,
-            gravity=(0.0, 0.0, 0.0),
-        ),
-        rigid_options=gs.options.RigidOptions(
-            enable_collision=False,
-            disable_constraint=True,
-        ),
-        viewer_options=gs.options.ViewerOptions(
-            camera_pos=manipulator.camera_pos,
-            camera_lookat=manipulator.camera_lookat,
-            camera_up=(0.0, 1.0, 0.0),
-        ),
-        show_viewer=show_viewer,
-    )
-    kuka = scene.add_entity(
-        morph=gs.morphs.URDF(
-            file=manipulator.kuka_asset,
-            scale=manipulator.kuka_scale,
-            pos=manipulator.kuka_base_pos,
-            quat=manipulator.kuka_base_quat,
-            collision=False,
-            fixed=True,
-        ),
-        material=gs.materials.Rigid(
-            needs_coup=False,
-            gravity_compensation=1.0,
-        ),
-        name=manipulator.kuka_entity_name,
-    )
-    hand = scene.add_entity(
-        morph=gs.morphs.URDF(
-            file=manipulator.hand_asset,
-            scale=manipulator.hand_scale,
-            collision=False,
-        ),
-        material=gs.materials.Rigid(
-            needs_coup=False,
-            gravity_compensation=1.0,
-        ),
-        name=manipulator.hand_entity_name,
-    )
-    hand.attach(
-        kuka,
-        manipulator.kuka_end_effector_link,
-        pos=manipulator.hand_mount_pos,
-        quat=manipulator.hand_mount_quat,
-    )
-    scene.build()
-    hand.set_qpos(manipulator.hand_qpos)
-
-    assert_equal(kuka.n_dofs, 7)
-    assert_equal(hand.n_dofs, 24)
-    kuka_limit_lower, kuka_limit_upper = map(tensor_to_array, kuka.get_dofs_limit())
-    hand_limit_lower, hand_limit_upper = map(tensor_to_array, hand.get_dofs_limit())
-    assert (np.array(manipulator.hand_qpos) >= hand_limit_lower).all()
-    assert (np.array(manipulator.hand_qpos) <= hand_limit_upper).all()
-
-    end_effector = kuka.get_link(manipulator.kuka_end_effector_link)
-    qpos = kuka.get_qpos()
-    times = tuple(angle_twice / 3.0 for angle_twice in range(55)) + tuple(
-        28.0 + (54 - angle_twice) / 10.0 for angle_twice in range(53, 37, -1)
-    )
-    for time in times:
-        pose = teapot_pose(time, teapot_settings)
-        qpos = update_teapot_manipulator(kuka, pose, teapot_settings, qpos)
-        scene.step()
-
-        target_pos, target_quat = geom_utils.transform_pos_quat_by_trans_quat(
-            np.array(manipulator.grasp_pos) * teapot_settings.mesh_scale,
-            np.array(manipulator.grasp_quat),
-            np.array(pose.pos),
-            np.array(pose.quat),
-        )
-        end_effector_quat = tensor_to_array(end_effector.get_quat())
-        tool_center_pos = tensor_to_array(end_effector.get_pos()) + geom_utils.transform_by_quat(
-            np.array(manipulator.tool_center_point), end_effector_quat
-        )
-        qpos = kuka.get_qpos()
-        qpos_array = tensor_to_array(qpos)
-        hand_qpos = tensor_to_array(hand.get_qpos())
-        orientation_error = 2.0 * np.arccos(np.minimum(np.abs(np.sum(end_effector_quat * target_quat)), 1.0))
-
-        assert np.linalg.norm(tool_center_pos - target_pos) <= 5e-4
-        assert orientation_error <= 5e-3
-        assert (qpos_array >= kuka_limit_lower).all()
-        assert (qpos_array <= kuka_limit_upper).all()
-        assert (hand_qpos >= hand_limit_lower).all()
-        assert (hand_qpos <= hand_limit_upper).all()
-        assert_allclose(hand_qpos, manipulator.hand_qpos, atol=1e-6)
 
 
 @pytest.mark.required
@@ -871,7 +730,55 @@ def test_pbstf_cpp_cube_converges_to_sphere(show_viewer):
 @pytest.mark.required
 @pytest.mark.parametrize("backend", [gs.cuda])
 def test_pbstf_cpp_two_cubes_merge(show_viewer):
-    scene, (left, right) = build_scene(case=CASE_MERGE, scale=10, show_viewer=show_viewer)
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=1.0 / 30.0,
+            gravity=(0.0, 0.0, 0.0),
+        ),
+        pbstf_options=gs.options.PBSTFOptions(
+            particle_size=0.2,
+            lower_bound=(-10.0, -10.0, -10.0),
+            upper_bound=(10.0, 10.0, 10.0),
+            max_solver_iterations=100,
+            topology_rebuild_interval=10,
+            max_surface_neighbors=128,
+            max_localmesh_neighbors=64,
+            enable_pca_normals=False,
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(4.0, 3.0, 4.0),
+            camera_lookat=(0.0, -1.0, 0.0),
+            camera_up=(0.0, 1.0, 0.0),
+        ),
+        show_viewer=show_viewer,
+    )
+    material = gs.materials.PBSTF.Liquid(
+        sampler="staggered",
+        rho=1000.0,
+        density_compliance=500.0,
+        surface_tension_compliance=1.0,
+        surface_distance_compliance=40.0,
+        interior_distance_compliance=180.0,
+        surface_viscosity=0.05,
+        interior_viscosity=0.05,
+    )
+    left = scene.add_entity(
+        morph=gs.morphs.Box(
+            lower=(-1.5, -0.625, -0.5),
+            upper=(-0.5, 0.375, 0.5),
+        ),
+        material=material,
+    )
+    right = scene.add_entity(
+        morph=gs.morphs.Box(
+            lower=(0.5, -0.375, -0.5),
+            upper=(1.5, 0.625, 0.5),
+        ),
+        material=material,
+    )
+    scene.build()
+    left.set_particles_vel((1.0, 0.0, 0.0))
+    right.set_particles_vel((-1.0, 0.0, 0.0))
     solver = scene.pbstf_solver
 
     left_initial = left.get_particles_pos().cpu().numpy()
@@ -901,7 +808,46 @@ def test_pbstf_cpp_two_cubes_merge(show_viewer):
 @pytest.mark.required
 @pytest.mark.parametrize("backend", [gs.cuda])
 def test_pbstf_cpp_drop_hits_floor_and_bounces(show_viewer):
-    scene, (drop,) = build_scene(case=CASE_BOUNCE, scale=10, show_viewer=show_viewer)
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=1.0 / 30.0,
+            gravity=(0.0, 0.0, 0.0),
+        ),
+        pbstf_options=gs.options.PBSTFOptions(
+            particle_size=0.2,
+            lower_bound=(-10.0, -2.0, -10.0),
+            upper_bound=(10.0, 10.0, 10.0),
+            max_solver_iterations=100,
+            topology_rebuild_interval=10,
+            max_surface_neighbors=128,
+            max_localmesh_neighbors=64,
+            enable_pca_normals=False,
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(4.0, 3.0, 4.0),
+            camera_lookat=(0.0, -1.0, 0.0),
+            camera_up=(0.0, 1.0, 0.0),
+        ),
+        show_viewer=show_viewer,
+    )
+    material = gs.materials.PBSTF.Liquid(
+        sampler="staggered",
+        rho=1000.0,
+        density_compliance=500.0,
+        surface_tension_compliance=0.8,
+        surface_distance_compliance=40.0,
+        interior_distance_compliance=180.0,
+        surface_viscosity=0.3,
+        interior_viscosity=0.3,
+    )
+    drop = scene.add_entity(
+        morph=gs.morphs.Sphere(
+            radius=1.0,
+        ),
+        material=material,
+    )
+    scene.build()
+    drop.set_particles_vel((0.0, -3.0, 0.0))
     floor_height = -2.0
     touched_floor = False
     upward_after_contact = False
@@ -930,7 +876,53 @@ def test_pbstf_cpp_drop_hits_floor_and_bounces(show_viewer):
 @pytest.mark.required
 @pytest.mark.parametrize("backend", [gs.cuda])
 def test_pbstf_cpp_drop_hits_cone_tip(show_viewer):
-    scene, (drop,) = build_scene(case=CASE_CONE, scale=10, show_viewer=show_viewer)
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=1.0 / 30.0,
+            gravity=(0.0, 0.0, 0.0),
+        ),
+        pbstf_options=gs.options.PBSTFOptions(
+            particle_size=0.2,
+            lower_bound=(-20.0, -20.0, -20.0),
+            upper_bound=(20.0, 20.0, 20.0),
+            max_solver_iterations=100,
+            topology_rebuild_interval=10,
+            max_surface_neighbors=128,
+            max_localmesh_neighbors=64,
+            enable_pca_normals=False,
+            static_colliders=[
+                gs.options.PBSTFConeStaticColliderOptions(
+                    center=(0.0, -7.0, 0.0),
+                    height=(0.0, 5.0, 0.0),
+                    radius=5.0 * math.sqrt(3.0),
+                ),
+            ],
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(12.0, 2.0, 12.0),
+            camera_lookat=(0.0, -1.0, 0.0),
+            camera_up=(0.0, 1.0, 0.0),
+        ),
+        show_viewer=show_viewer,
+    )
+    material = gs.materials.PBSTF.Liquid(
+        sampler="staggered",
+        rho=1000.0,
+        density_compliance=500.0,
+        surface_tension_compliance=1.0,
+        surface_distance_compliance=40.0,
+        interior_distance_compliance=90.0,
+        surface_viscosity=0.05,
+        interior_viscosity=0.05,
+    )
+    drop = scene.add_entity(
+        morph=gs.morphs.Sphere(
+            radius=1.0,
+        ),
+        material=material,
+    )
+    scene.build()
+    drop.set_particles_vel((0.0, -4.0, 0.0))
     solver = scene.pbstf_solver
     hit_cone = False
     rebounded = False
@@ -964,22 +956,61 @@ def test_pbstf_cpp_drop_hits_cone_tip(show_viewer):
 @pytest.mark.parametrize("backend", [gs.cuda])
 @pytest.mark.parametrize("n_envs", [0, 2])
 def test_sweep_box_pushes_water(n_envs, show_viewer):
-    settings = case_settings(CASE_SWEEP)
-    assert settings.sweep is not None
-    assert settings.mop is None
-    sweep = settings.sweep
-
-    assert CASE_SWEEP in CASES
-    assert sweep.collider_idx == 1
-    assert_equal(sweep.collider_lower, (-0.6, 0.02, -1.2))
-    assert_equal(sweep.collider_upper, (0.6, 0.85, 1.2))
-    assert len(settings.static_colliders) == 2
-    assert all(
-        isinstance(collider_options, gs.options.PBSTFBoxStaticColliderOptions)
-        for collider_options in settings.static_colliders
+    liquid_upper = (-0.5, 0.35, 0.7)
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=0.01,
+            gravity=(0.0, -9.8, 0.0),
+        ),
+        pbstf_options=gs.options.PBSTFOptions(
+            particle_size=0.1,
+            lower_bound=(-6.0, -1.0, -4.0),
+            upper_bound=(6.0, 4.0, 4.0),
+            max_solver_iterations=10,
+            topology_rebuild_interval=10,
+            max_surface_neighbors=128,
+            max_localmesh_neighbors=64,
+            enable_pca_normals=False,
+            static_colliders=[
+                gs.options.PBSTFBoxStaticColliderOptions(
+                    pos=(0.0, -0.25, 0.0),
+                    lower=(-6.0, -0.25, -4.0),
+                    upper=(6.0, 0.25, 4.0),
+                ),
+                gs.options.PBSTFBoxStaticColliderOptions(
+                    pos=(-3.5, 0.0, 0.0),
+                    lower=(-0.6, 0.02, -1.2),
+                    upper=(0.6, 0.85, 1.2),
+                ),
+            ],
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(8.0, 6.0, 9.0),
+            camera_lookat=(0.0, 0.4, 0.0),
+            camera_up=(0.0, 1.0, 0.0),
+        ),
+        show_viewer=show_viewer,
     )
-
-    scene, (liquid,) = build_scene(case=CASE_SWEEP, show_viewer=show_viewer, n_envs=n_envs)
+    liquid = scene.add_entity(
+        morph=gs.morphs.Box(
+            lower=(-2.5, 0.05, -0.7),
+            upper=liquid_upper,
+        ),
+        material=gs.materials.PBSTF.Liquid(
+            sampler="regular",
+            rho=1000.0,
+            density_compliance=150.0,
+            surface_tension_compliance=1.0,
+            surface_distance_compliance=40.0,
+            interior_distance_compliance=180.0,
+            surface_viscosity=0.5,
+            interior_viscosity=0.5,
+            is_collider_adhesion_friction_enabled=True,
+            collider_adhesion_compliance=20.0,
+            collider_friction=0.5,
+        ),
+    )
+    scene.build(n_envs=n_envs)
     positions_initial = tensor_to_array(liquid.get_particles_pos())
 
     assert liquid.material.collider_friction == 0.5
@@ -987,13 +1018,16 @@ def test_sweep_box_pushes_water(n_envs, show_viewer):
     for _ in range(5):
         scene.step()
     for step_idx in range(70):
-        time = sweep.settle_time + sweep.wipe_time * step_idx / 69
-        update_sweep_case(scene.pbstf_solver, time, sweep)
+        scene.pbstf_solver.set_static_colliders_pose(
+            pos=(-3.5 + 7.0 * step_idx / 69, 0.0, 0.0),
+            quat=(1.0, 0.0, 0.0, 0.0),
+            colliders_idx=1,
+        )
         scene.step()
 
     positions = tensor_to_array(liquid.get_particles_pos())
     displacement_x = positions[..., 0] - positions_initial[..., 0]
-    is_ahead_of_initial_water = positions[..., 0] > sweep.liquid_upper[0]
+    is_ahead_of_initial_water = positions[..., 0] > liquid_upper[0]
 
     assert np.isfinite(positions).all()
     assert positions[..., 1].min() >= -1e-5
@@ -1006,30 +1040,79 @@ def test_sweep_box_pushes_water(n_envs, show_viewer):
 @pytest.mark.parametrize("backend", [gs.cuda])
 @pytest.mark.parametrize("n_envs", [0, 2])
 def test_porous_elastic_absorbs_carries_and_squeezes_water(n_envs, show_viewer):
-    mop_settings = case_settings(CASE_MOP)
-    mop = mop_settings.mop
-    sweep = case_settings(CASE_SWEEP).sweep
-    assert mop is not None
-    assert sweep is not None
-    assert mop_settings.sweep is None
-    assert len(mop_settings.static_colliders) == 1
-    assert_equal(mop.collider_lower, sweep.collider_lower)
-    assert_equal(mop.collider_upper, sweep.collider_upper)
-    assert_equal(np.subtract(mop.collider_upper, mop.collider_lower), (1.2, 0.83, 2.4))
-
-    settings = case_settings(CASE_SPONGE_SQUEEZE)
-    assert settings.sponge is not None
-    sponge_settings = settings.sponge
-    assert len(settings.static_colliders) == 1
-    assert isinstance(settings.static_colliders[0], gs.options.PBSTFBoxStaticColliderOptions)
-
-    scene, (liquid, sponge) = build_scene(
-        case=CASE_SPONGE_SQUEEZE,
-        scale=12,
+    sponge_lower = (-0.6, 0.05, -0.6)
+    sponge_upper = (0.6, 0.85, 0.6)
+    compression_distance = 0.45
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=0.01,
+            gravity=(0.0, -9.8, 0.0),
+        ),
+        pbstf_options=gs.options.PBSTFOptions(
+            particle_size=2.0 / 12,
+            lower_bound=(-2.5, -1.0, -2.0),
+            upper_bound=(2.5, 3.0, 2.0),
+            max_solver_iterations=10,
+            topology_rebuild_interval=10,
+            max_surface_neighbors=128,
+            max_localmesh_neighbors=64,
+            enable_pca_normals=False,
+            static_colliders=[
+                gs.options.PBSTFBoxStaticColliderOptions(
+                    pos=(0.0, -0.25, 0.0),
+                    lower=(-2.5, -0.25, -2.0),
+                    upper=(2.5, 0.25, 2.0),
+                ),
+            ],
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(4.0, 3.0, 5.0),
+            camera_lookat=(0.0, 0.4, 0.0),
+            camera_up=(0.0, 1.0, 0.0),
+        ),
         show_viewer=show_viewer,
-        n_envs=n_envs,
     )
-    anchor_indices = porous_top_particle_indices(sponge)
+    liquid = scene.add_entity(
+        morph=gs.morphs.Box(
+            lower=(-1.1, 0.05, -0.6),
+            upper=(-0.55, 0.85, 0.6),
+        ),
+        material=gs.materials.PBSTF.Liquid(
+            sampler="staggered",
+            rho=1000.0,
+            density_compliance=500.0,
+            surface_tension_compliance=0.8,
+            surface_distance_compliance=40.0,
+            interior_distance_compliance=180.0,
+            surface_viscosity=0.3,
+            interior_viscosity=0.3,
+        ),
+    )
+    sponge = scene.add_entity(
+        morph=gs.morphs.Box(
+            lower=sponge_lower,
+            upper=sponge_upper,
+        ),
+        material=gs.materials.PBSTF.PorousElastic(
+            porosity=0.8,
+            deviatoric_compliance=1e-5,
+            volumetric_compliance=1e-5,
+            capillary_compliance=10.0,
+            drag=10.0,
+            wet_deviatoric_compliance_scale=1.5,
+            wet_volumetric_compliance_scale=1.5,
+            bloating_volume_strain=0.05,
+        ),
+        surface=gs.surfaces.Default(
+            color=(0.95, 0.7, 0.15, 1.0),
+        ),
+    )
+    scene.build(n_envs=n_envs)
+    positions_y = tensor_to_array(sponge.get_particles_pos())[..., 1]
+    is_top_by_env = positions_y >= positions_y.max(axis=-1, keepdims=True) - 0.5 * sponge.particle_size
+    is_top = np.all(is_top_by_env, axis=tuple(range(is_top_by_env.ndim - 1)))
+    anchor_indices = np.flatnonzero(is_top)
+    sponge.fix_particles(anchor_indices)
     anchor_positions = tensor_to_array(sponge.get_particles_pos())[..., anchor_indices, :].copy()
     porous_positions_initial = tensor_to_array(sponge.get_particles_pos())
     porous_lower_initial = porous_positions_initial.min(axis=-2)
@@ -1047,12 +1130,12 @@ def test_porous_elastic_absorbs_carries_and_squeezes_water(n_envs, show_viewer):
     assert scene.pbstf_solver.n_vverts >= sponge.n_vverts
     assert anchor_indices.size > 0
     assert (is_fixed.sum(axis=-1) == anchor_indices.size).all()
-    sponge_height = sponge_settings.sponge_upper[1] - sponge_settings.sponge_lower[1]
+    sponge_height = sponge_upper[1] - sponge_lower[1]
     compressed_pore_capacity = (
         sponge.material.porosity
         * sponge.rest_volume
         * sponge.n_particles
-        * (sponge_height - sponge_settings.compression_distance)
+        * (sponge_height - compression_distance)
         / sponge_height
     )
     assert (fluid_mass / liquid.material.rho > compressed_pore_capacity).all()
@@ -1090,7 +1173,7 @@ def test_porous_elastic_absorbs_carries_and_squeezes_water(n_envs, show_viewer):
             particles_idx_local=anchor_indices,
         )
         sponge.set_particles_vel(
-            (carry_distance / (carry_steps * settings.dt), 0.0, 0.0),
+            (carry_distance / (carry_steps * scene.dt), 0.0, 0.0),
             particles_idx_local=anchor_indices,
         )
         scene.step()
@@ -1113,17 +1196,15 @@ def test_porous_elastic_absorbs_carries_and_squeezes_water(n_envs, show_viewer):
 
     carried_anchor_positions = anchor_positions + (carry_distance, 0.0, 0.0)
     squeeze_steps = 10
-    squeeze_control = sponge_settings._replace(absorb_time=0.0, squeeze_time=squeeze_steps * settings.dt)
     absorbed_volume_before_compression = tensor_to_array(sponge.get_absorbed_fluid_volume())
     min_absorbed_volume_after_compression = absorbed_volume_before_compression.copy()
     for step_idx in range(1, squeeze_steps + 1):
-        update_sponge_squeeze_case(
-            sponge,
-            carried_anchor_positions,
-            anchor_indices,
-            step_idx * settings.dt,
-            squeeze_control,
+        sponge.set_particles_pos(
+            carried_anchor_positions + (0.0, -compression_distance * step_idx / squeeze_steps, 0.0),
+            particles_idx_local=anchor_indices,
         )
+        velocity_y = -compression_distance / (squeeze_steps * scene.dt) if step_idx < squeeze_steps else 0.0
+        sponge.set_particles_vel((0.0, velocity_y, 0.0), particles_idx_local=anchor_indices)
         scene.step()
         min_absorbed_volume_after_compression = np.minimum(
             min_absorbed_volume_after_compression,
@@ -1180,10 +1261,10 @@ def test_porous_elastic_absorbs_carries_and_squeezes_water(n_envs, show_viewer):
     assert np.isfinite(porosity).all()
     assert ((saturation >= 0.0) & (saturation <= 1.0)).all()
     assert ((porosity >= 0.0) & (porosity <= 1.0)).all()
-    assert (porous_lower_after_absorption > np.array(settings.lower_bound) + particle_radius).all()
-    assert (porous_upper_after_absorption < np.array(settings.upper_bound) - particle_radius).all()
-    assert (porous_lower_after_compression > np.array(settings.lower_bound) + particle_radius).all()
-    assert (porous_upper_after_compression < np.array(settings.upper_bound) - particle_radius).all()
+    assert (porous_lower_after_absorption > np.array(scene.pbstf_options.lower_bound) + particle_radius).all()
+    assert (porous_upper_after_absorption < np.array(scene.pbstf_options.upper_bound) - particle_radius).all()
+    assert (porous_lower_after_compression > np.array(scene.pbstf_options.lower_bound) + particle_radius).all()
+    assert (porous_upper_after_compression < np.array(scene.pbstf_options.upper_bound) - particle_radius).all()
     assert not is_fluid_inside_initial.any()
     assert (absorbed_particle_count > 0).all()
     assert (max_absorbed_volume_after_absorption > absorbed_volume_initial).all()
@@ -1194,7 +1275,7 @@ def test_porous_elastic_absorbs_carries_and_squeezes_water(n_envs, show_viewer):
     assert_allclose(tensor_to_array(liquid.get_mass()), fluid_mass, atol=1e-6)
     assert_allclose(
         squeezed_anchors[..., 1],
-        carried_anchor_positions[..., 1] - sponge_settings.compression_distance,
+        carried_anchor_positions[..., 1] - compression_distance,
         atol=1e-6,
     )
     assert_allclose(scene_state_pos, state_pos, atol=1e-6)
