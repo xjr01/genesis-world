@@ -7,14 +7,20 @@ Coarse fast profile (2026-10-10): grid_res 64 + 3.125 mm grains (both were res 1
 to well under 1 h at coarser visual fidelity. A4 absorption profile (2026-10-11): MAX_RATIO 0.5 +
 VISCOSITY 1.0 + droplet r 0.020 (probed in experiments/res64_absorb_tuning/TUNING.md): 146 steps
 to dry vs 661 at the old 0.3/4.0/0.016, with the largest spread AND percolation depth. Safety
-gear (2026-10-11): ddt_safety defaults to the fast gear 1.0 (argv[3] selects; see SAFETY_GEARS),
-probed full-run safe on this scene. Young gear (2026-10-11): the sand Young's modulus defaults
-to the soft gear 1e5 (argv[4] selects; see YOUNG_GEARS), probed full-run safe on this scene
-with the wet retention intact (100%). Shake phase (2026-10-12, user request "铲起来之后左右晃一晃
+gear (2026-10-11): ddt_safety is switchable via argv[3] (see SAFETY_GEARS), defaulting to the
+archive gear 0.5 -- the C++-conservative margin and the mandatory pairing for the default ST
+gear below (the fast gear 1.0 was probed full-run safe on this scene at ST 0.02). Young gear
+(2026-10-11): the sand Young's modulus defaults to the soft gear 1e5 (argv[4] selects; see
+YOUNG_GEARS), probed full-run safe on this scene with the wet retention intact (100%). Shake
+phase (2026-10-12, user request "铲起来之后左右晃一晃
 把干沙子抖下去一些看看"): after the lift the scoop shakes along +x to shed loose dry sand over
 the lip while the wet clump rides along, defaulting to gear g2 (argv[5] selects; see
 SHAKE_GEARS), probed over three runs in experiments/shake_probe/ (dry shed 34-44%, wet
-retention 100%, zero false shake-off).
+retention 100%, zero false shake-off). ST gear (2026-10-13): the DEM surface-tension coefficient
+defaults to the high-cohesion gear 0.2 = x10 the 0.02 behind every earlier number (argv[6]
+selects; see ST_GEARS); at safety 0.5 the wet clump holds 100% retention through the whole run
+incl. the 1.73 g shake, and the dry/wet separation stays one-directional (dry shed 37.6%, zero
+false shake-off; experiments/shake_probe/RESULT_SHAKE_ST10.md).
 
 Evolution of experiments/phase9_probe_deepbed.py (2 s probe) into the full demo:
 
@@ -55,15 +61,17 @@ Outputs (do NOT collide with the phase9_franka_shovel_sdf final products):
   (+ metrics_shake.json when a shake gear runs)
 Render: experiments/phase9_deepbed_full_render.py [tag] -> videos/phase9_deepbed_full{tag}.mp4
 
-Usage: python franka_shovel_deepbed.py [mode] [tag] [safety] [young] [shake]
+Usage: python franka_shovel_deepbed.py [mode] [tag] [safety] [young] [shake] [st]
   mode    "smoke": build + 30 settle steps + one full-restart IK solve, then exit
           "full" (default): the whole A-H sequence
-  safety  DEM substep safety gear: "1.0"/"fast" (default) or "0.5"/"archive"
-          (see SAFETY_GEARS below)
+  safety  DEM substep safety gear: "0.5"/"archive" (default) or "1.0"/"fast"
+          (see SAFETY_GEARS below; ST >= 0.2 requires the 0.5 gear)
   young   sand Young's modulus gear: "1e5"/"soft" (default) or "1e6"/"archive"
           (see YOUNG_GEARS below)
   shake   shake gear after the lift: "g2" (default), "g1", or "off"
           (see SHAKE_GEARS below)
+  st      surface-tension (liquid-bridge cohesion) gear: "0.2"/"high" (default) or
+          "0.02"/"base" (see ST_GEARS below)
 """
 import json
 import math
@@ -96,7 +104,21 @@ BOX_UPPER = (0.175, 0.15, 0.40)
 # flip_solver.py; the A5 = 0.6 probe showed zero gain past 0.5). Going 0.3 -> 0.5 alone cut the
 # probe's drying time 661 -> 255 steps (at visc 4.0); the full A4 combo dries in 146.
 MAX_RATIO = 0.5
-SURFACE_TENSION = 0.02
+# DEM surface-tension (liquid-bridge cohesion) gear (argv[6] selects, written to meta.json as
+# "surface_tension"). 0.02 itself is ~3x the library default 0.007 (user-selected, see
+# franka_shovel_sand_sdf.py):
+#   0.2 "high" (default) -- x10 cohesion: the wet clump rides as a stiffer solid through lift
+#       and the 1.73 g shake (lift-phase internal-displacement std 0.020 mm/frame vs 0.034 at
+#       0.02; shake-phase 0.068 vs 0.063), and the dry/wet separation stays one-directional:
+#       shed 37.6% dry, wet retention 298->299 = 100%, zero false shake-off
+#       (experiments/shake_probe/RESULT_SHAKE_ST10.md, 2026-10-13). MUST pair with safety <= 0.5:
+#       at 1.0 the x10 cohesion creeps into a shear fracture (wet retention 29.2%, st10 probe),
+#       while 0.5 holds 100% with creep std 0.014 mm/frame
+#       (experiments/st10_s05_probe/RESULT_ST10S05.md).
+#   0.02 "base" -- the pre-2026-10-13 default: the value behind every earlier archived number,
+#       and the only gear validated with the fast safety gear 1.0.
+ST_GEARS = {"0.2": 0.2, "high": 0.2, "0.02": 0.02, "base": 0.02}
+SURFACE_TENSION = ST_GEARS[sys.argv[6] if len(sys.argv) > 6 else "0.2"]
 VISCOSITY = 1.0  # sand<->water quadratic drag (C++ m_ViscosityCoeff, flip._viscosity_coeff;
                  # ONLY used by _kernel_cal_coupling's cf += dv*|dv|*12*pi*r^2*visc -- not the
                  # water's own viscosity). 4.0 -> 1.0 (2026-10-11, A4 profile): in the res64
@@ -117,18 +139,24 @@ VISCOSITY = 1.0  # sand<->water quadratic drag (C++ m_ViscosityCoeff, flip._visc
                  # our original 0.01 was the outlier.
 RESTITUTION = 0.5
 # DEM substep safety gear (ddt_safety; argv[3] selects, written to meta.json as "ddt_safety"):
-#   1.0 "fast" (default) -- ddt at the C++ formula's stability limit itself (radius*pi*
-#       sqrt(rho/Young)/2): half the DEM substeps of 0.5. Full A-H probe on THIS scene ran zero
-#       NaN / no popcorn across all phases incl. the two historical risk windows (droplet impact,
-#       lift start): 1110 steps / 25.8 min / 1.394 s/step, wet retention 297/297 = 100%
-#       (experiments/safety10_probe/RESULT_SAFETY10.md, 2026-10-11).
-#   0.5 "archive" -- half the limit: the C++-conservative margin and the value behind every
-#       archived A4 number (1105 steps / 54.9 min / 2.98 s/step). The two gears' trajectories
-#       diverge from the settle phase on, so their runs are not comparable frame-by-frame.
-#   1.0 was validated on this scene only; denser high-impact regimes are not covered -- probe a
-#   new scene (smoke / short run, watch for NaN and popcorn) before relying on the fast gear.
-SAFETY_GEARS = {"1.0": 1.0, "fast": 1.0, "0.5": 0.5, "archive": 0.5}
-SAFETY = SAFETY_GEARS[sys.argv[3] if len(sys.argv) > 3 else "1.0"]
+#   0.5 "archive" (default) -- half the limit: the C++-conservative margin, the value behind
+#       every archived A4 number (1105 steps / 54.9 min / 2.98 s/step at ST 0.02 + young 1e6),
+#       and the mandatory pairing for the default ST 0.2 gear (see ST_GEARS: at 1.0 the x10
+#       cohesion shears the wet clump, retention 29.2%; at 0.5 it holds 100%). With the default
+#       gears: 1309 steps / 19.5 min / 0.90 s per step, wet retention 298->299 = 100%, zero
+#       NaN (experiments/shake_probe/RESULT_SHAKE_ST10.md, 2026-10-13).
+#   1.0 "fast" -- ddt at the C++ formula's stability limit itself (radius*pi*sqrt(rho/Young)/2):
+#       half the DEM substeps of 0.5. Full A-H probe on THIS scene ran zero NaN / no popcorn
+#       across all phases incl. the two historical risk windows (droplet impact, lift start):
+#       1110 steps / 25.8 min / 1.394 s/step at young 1e6, wet retention 297/297 = 100%
+#       (experiments/safety10_probe/RESULT_SAFETY10.md, 2026-10-11; 1335 steps / 10.6 min at
+#       young 1e5). Probed with ST 0.02 only -- prohibited with ST >= 0.2 (see ST_GEARS).
+#   Both gears were validated on this scene only; denser high-impact regimes are not covered --
+#   probe a new scene (smoke / short run, watch for NaN and popcorn) before relying on the fast
+#   gear. The two gears' trajectories diverge from the settle phase on, so their runs are not
+#   comparable frame-by-frame.
+SAFETY_GEARS = {"0.5": 0.5, "archive": 0.5, "1.0": 1.0, "fast": 1.0}
+SAFETY = SAFETY_GEARS[sys.argv[3] if len(sys.argv) > 3 else "0.5"]
 # Sand Young's modulus gear (argv[4] selects, written to meta.json as "young_modulus"); passed to
 # the Sand material, so the DEM substep formula follows it automatically (ddt ~ sqrt(1/young)):
 #   1e5 "soft" (default) -- 10x softer grains than the C++ reference value: ddt stretches by
@@ -532,7 +560,7 @@ def main():
     meta = {
         "dt": DT, "particle_radius": PARTICLE_RADIUS, "max_ratio": MAX_RATIO,
         "grid_res": 64, "droplet_radius": DROPLET_RADIUS, "ddt_safety": SAFETY,
-        "young_modulus": YOUNG,
+        "young_modulus": YOUNG, "surface_tension": SURFACE_TENSION,
         "n_sand": int(sand.n_particles), "n_water": int(n_water),
         "sampler": "poisson", "poisson_ratio": 0.3, "bed_fill_z": BED_FILL_Z,
         "droplet_x": DROPLET_X,
