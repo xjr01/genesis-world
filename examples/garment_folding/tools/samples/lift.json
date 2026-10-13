@@ -1,0 +1,11 @@
+{
+  "start_frame": 0,
+  "start": {
+    "left": {"pos": [0.4, 0.2, 0.9], "quat": [1, 0, 0, 0], "opening": 0.02},
+    "right": {"pos": [0.4, -0.2, 0.9], "quat": [1, 0, 0, 0], "opening": 0.02}
+  },
+  "actions": [
+    {"id": "lift", "duration_frames": 60, "left": {"pos": [0.4, 0.2, 0.9]}, "right": {"pos": [0.4, -0.2, 0.95]}}
+  ],
+  "boundaries": ["lift"]
+}

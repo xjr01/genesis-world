@@ -86,18 +86,18 @@ class ButterContact:
         self.half_blade = qd.Vector([value / 2 for value in blade_size])
         self.rho = butter.material.rho
 
-    def apply(self):
-        """Update particle velocities in the current MPM frame without particle transfers."""
-        center = self._blade.get_pos(relative=False)
-        rotation = gu.quat_to_R(self._blade.get_quat(relative=False))
-        velocity = self._blade.get_vel()
-        angular_velocity = self._blade.get_ang()
-        if center.ndim == 1:
-            center = center.unsqueeze(0)
-            rotation = rotation.unsqueeze(0)
-            velocity = velocity.unsqueeze(0)
-            angular_velocity = angular_velocity.unsqueeze(0)
-        _apply_contact(self._solver.sim.cur_substep_local, center, rotation, velocity, angular_velocity, self)
+    def apply(self, *, center=None, velocity=None):
+        """Use actual blade state, or Python xyz tuples prescribing one level-blade motion across environments."""
+        if (center is None) != (velocity is None):
+            raise ValueError("Prescribed blade contact requires both center and velocity.")
+        if center is not None:
+            _apply_prescribed_contact(self._solver.sim.cur_substep_local, *center, *velocity, self)
+            return
+        center = self._blade.get_pos(relative=False).reshape(self.n_envs, 3)
+        quaternion = self._blade.get_quat(relative=False).reshape(self.n_envs, 4)
+        velocity = self._blade.get_vel().reshape(self.n_envs, 3)
+        angular_velocity = self._blade.get_ang().reshape(self.n_envs, 3)
+        _apply_dynamic_contact(self._solver.sim.cur_substep_local, center, quaternion, velocity, angular_velocity, self)
 
     def __call__(self):
         self.apply()
@@ -152,13 +152,42 @@ def _impulse_velocity(
 
 
 @qd.kernel
-def _apply_contact(
+def _apply_dynamic_contact(
     f: qd.i32,
     center: qd.types.ndarray(ndim=2),
-    rotation: qd.types.ndarray(ndim=3),
+    quaternion: qd.types.ndarray(ndim=2),
     velocity: qd.types.ndarray(ndim=2),
     angular_velocity: qd.types.ndarray(ndim=2),
     self: qd.template(),
+):
+    _apply_contact(f, center, quaternion, velocity, angular_velocity, self, is_prescribed=False)
+
+
+@qd.kernel
+def _apply_prescribed_contact(
+    f: qd.i32,
+    center_x: float,
+    center_y: float,
+    center_z: float,
+    velocity_x: float,
+    velocity_y: float,
+    velocity_z: float,
+    self: qd.template(),
+):
+    center = qd.Vector([center_x, center_y, center_z])
+    velocity = qd.Vector([velocity_x, velocity_y, velocity_z])
+    _apply_contact(f, center, 0, velocity, 0, self, is_prescribed=True)
+
+
+@qd.func
+def _apply_contact(
+    f,
+    center: qd.template(),
+    quaternion: qd.template(),
+    velocity: qd.template(),
+    angular_velocity: qd.template(),
+    self: qd.template(),
+    is_prescribed: qd.template(),
 ):
     for node in qd.grouped(self.mass):
         self.mass[node] = 0.0
@@ -218,13 +247,18 @@ def _apply_contact(
 
         # Exact closest point on the oriented rectangular blade; only butter
         # receives this wet-contact law, not the bread or wooden board.
-        blade_rotation = qd.Matrix([[rotation[b, row, col] for col in range(3)] for row in range(3)])
-        blade_center = qd.Vector([center[b, axis] for axis in range(3)])
-        blade_linear_velocity = qd.Vector([velocity[b, axis] for axis in range(3)])
-        blade_angular_velocity = qd.Vector([angular_velocity[b, axis] for axis in range(3)])
-        offset = pos - blade_center
-        local = blade_rotation.transpose() @ offset
-        blade_velocity = blade_linear_velocity + blade_angular_velocity.cross(offset)
+        blade_rotation = qd.Matrix.identity(gs.qd_float, 3)
+        local = qd.Vector.zero(gs.qd_float, 3)
+        blade_velocity = qd.Vector.zero(gs.qd_float, 3)
+        if qd.static(is_prescribed):
+            local = pos - center
+            blade_velocity = velocity
+        else:
+            blade_rotation = gu.qd_quat_to_R(qd.Vector([quaternion[b, axis] for axis in range(4)]), gs.EPS)
+            offset = pos - qd.Vector([center[b, axis] for axis in range(3)])
+            local = blade_rotation.transpose() @ offset
+            blade_velocity = qd.Vector([velocity[b, axis] for axis in range(3)])
+            blade_velocity += qd.Vector([angular_velocity[b, axis] for axis in range(3)]).cross(offset)
         closest = qd.min(qd.max(local, -self.half_blade), self.half_blade)
         delta = local - closest
         distance = delta.norm(1.0e-12)
