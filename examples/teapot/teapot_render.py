@@ -2,7 +2,6 @@ import csv
 import json
 import os
 import urllib.request
-import zipfile
 from pathlib import Path
 from time import perf_counter
 from typing import NamedTuple
@@ -12,6 +11,7 @@ import torch
 from PIL import Image
 
 import filelock
+import trimesh
 
 import genesis as gs
 from genesis.engine.entities import KinematicEntity, PBDFreeParticleEntity, PBSTFEntity, RigidEntity, SPHEntity
@@ -43,27 +43,27 @@ class RenderAsset(NamedTuple):
 
 
 def prepare_render_assets():
-    """Cache the studio lighting and surface maps alongside their sources and licenses."""
+    """Cache the indoor lighting and surface maps alongside their sources and licenses."""
     directory = Path("out/teapot_assets").resolve()
     directory.mkdir(parents=True, exist_ok=True)
     assets = (
         RenderAsset(
-            "Studio Small 09",
-            "studio_small_09_2k.hdr",
-            "https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/2k/studio_small_09_2k.hdr",
-            "https://polyhaven.com/a/studio_small_09",
+            "Brown Photostudio 05",
+            "brown_photostudio_05_2k.hdr",
+            "https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/2k/brown_photostudio_05_2k.hdr",
+            "https://polyhaven.com/a/brown_photostudio_05",
         ),
         RenderAsset(
-            "Metal 032",
-            "Metal032_1K-JPG.zip",
-            "https://ambientcg.com/get?file=Metal032_1K-JPG.zip",
-            "https://ambientcg.com/view?id=Metal032",
+            "Wood Table Diffuse",
+            "wood_table_diff_1k.jpg",
+            "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/wood_table/wood_table_diff_1k.jpg",
+            "https://polyhaven.com/a/wood_table",
         ),
         RenderAsset(
-            "Concrete 034",
-            "Concrete034_1K-JPG.zip",
-            "https://ambientcg.com/get?file=Concrete034_1K-JPG.zip",
-            "https://ambientcg.com/view?id=Concrete034",
+            "Wood Table Roughness",
+            "wood_table_rough_1k.jpg",
+            "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/wood_table/wood_table_rough_1k.jpg",
+            "https://polyhaven.com/a/wood_table",
         ),
     )
     with filelock.FileLock(directory / "assets.lock", timeout=600):
@@ -77,13 +77,6 @@ def prepare_render_assets():
                     while chunk := response.read(1024 * 1024):
                         output.write(chunk)
                 temporary.replace(destination)
-            if destination.suffix == ".zip":
-                with zipfile.ZipFile(destination) as archive:
-                    for member in archive.namelist():
-                        if member.endswith(("_Color.jpg", "_Roughness.jpg", "_NormalGL.jpg")):
-                            texture_path = directory / Path(member).name
-                            if not texture_path.exists():
-                                texture_path.write_bytes(archive.read(member))
         with (directory / "sources.csv").open("w", newline="", encoding="utf-8") as output:
             writer = csv.writer(output)
             writer.writerow(("name", "filename", "download", "source", "license"))
@@ -106,46 +99,52 @@ def build_teapot_scene(
         renderer = gs.renderers.RayTracer(
             env_surface=gs.surfaces.Emission(
                 emissive_texture=gs.textures.ImageTexture(
-                    image_path=str(assets / "studio_small_09_2k.hdr"),
+                    image_path=str(assets / "brown_photostudio_05_2k.hdr"),
+                    image_color=(0.6, 0.5, 0.38),
                     encoding="linear",
                 ),
             ),
-            env_euler=(90.0, 0.0, 0.0),
+            env_euler=(90.0, 120.0, 0.0),
             lights=[
                 gs.renderers.SphereLight(
                     pos=(12.0, 18.0, 0.0),
-                    color=(1.0, 0.96, 0.9),
-                    intensity=8.0,
-                    radius=4.0,
+                    color=(1.0, 0.9, 0.75),
+                    intensity=4.0,
+                    radius=5.0,
+                ),
+                gs.renderers.SphereLight(
+                    pos=(16.0, 3.0, -28.0),
+                    color=(1.0, 0.9, 0.75),
+                    intensity=6.0,
+                    radius=5.0,
                 ),
             ],
         )
-        teapot_surface = gs.surfaces.Metal(
+        teapot_surface = gs.surfaces.Rough(
+            color=(0.19, 0.06, 0.032),
+            roughness=0.8,
+            ior=1.45,
+        )
+        table_surface = gs.surfaces.Rough(
             roughness=None,
-            metal_type="aluminium",
+            ior=1.08,
             diffuse_texture=gs.textures.ImageTexture(
-                image_path=str(assets / "Metal032_1K-JPG_Color.jpg"),
+                image_path=str(assets / "wood_table_diff_1k.jpg"),
+                image_color=(0.4, 0.34, 0.28),
             ),
             roughness_texture=gs.textures.ImageTexture(
-                image_path=str(assets / "Metal032_1K-JPG_Roughness.jpg"),
-                image_color=0.35,
+                image_path=str(assets / "wood_table_rough_1k.jpg"),
                 encoding="linear",
             ),
         )
-        ground_surface = gs.surfaces.Rough(
-            roughness=None,
-            diffuse_texture=gs.textures.ImageTexture(
-                image_path=str(assets / "Concrete034_1K-JPG_Color.jpg"),
-            ),
-            roughness_texture=gs.textures.ImageTexture(
-                image_path=str(assets / "Concrete034_1K-JPG_Roughness.jpg"),
-                encoding="linear",
-            ),
-        )
+        ground_surface = gs.surfaces.Rough(color=(0.14, 0.115, 0.09), roughness=0.9)
         liquid_surface = gs.surfaces.Glass(
-            color=(0.96, 0.985, 1.0),
-            roughness=0.02,
+            color=(1.0, 1.0, 1.0),
+            roughness=0.025,
             ior=1.333,
+            transmission_texture=gs.textures.ColorTexture(
+                color=(0.99, 0.975, 0.94),
+            ),
             vis_mode="recon",
             recon_backend="splashsurf",
         )
@@ -182,13 +181,182 @@ def build_teapot_scene(
         renderer=renderer,
         show_viewer=show_viewer and not is_rendered,
     )
+    if is_rendered:
+        # A vertical emitter outside the camera view gives the falling stream a continuous reflection highlight.
+        scene.add_entity(
+            morph=gs.morphs.Box(
+                pos=(12.0, -5.0, 28.0),
+                size=(0.2, 26.0, 12.0),
+                euler=(0.0, 121.0, 0.0),
+                collision=False,
+            ),
+            material=gs.materials.Kinematic(),
+            surface=gs.surfaces.Emission(
+                color=(18.0, 16.0, 13.5),
+            ),
+            name="water_rim_light",
+        )
+        wall_surface = gs.surfaces.Rough(color=(0.9, 0.9, 0.9), roughness=0.95, ior=1.1)
+        for name, pos, size in (
+            ("back_wall", (-12.0, 10.0, -43.0), (72.0, 60.0, 0.6)),
+            ("side_wall", (-48.0, 10.0, -9.0), (0.6, 60.0, 68.0)),
+        ):
+            scene.add_entity(
+                morph=gs.morphs.Box(
+                    pos=pos,
+                    size=size,
+                    collision=False,
+                ),
+                material=gs.materials.Kinematic(),
+                surface=wall_surface,
+                name=name,
+            )
+        table_offset = np.array((-12.0, 0.0, -8.0))
+        for name, pos, size in (
+            ("tea_table_top", (-17.0, -12.6, -7.0), (30.0, 1.2, 48.0)),
+            ("tea_table_apron_front", (-3.7, -14.0, -7.0), (0.8, 1.6, 44.0)),
+            ("tea_table_apron_back", (-30.3, -14.0, -7.0), (0.8, 1.6, 44.0)),
+            ("tea_table_apron_left", (-17.0, -14.0, 14.3), (26.0, 1.6, 0.8)),
+            ("tea_table_apron_right", (-17.0, -14.0, -28.3), (26.0, 1.6, 0.8)),
+            ("tea_table_leg_front_left", (-4.0, -16.6, 14.0), (1.6, 6.8, 1.6)),
+            ("tea_table_leg_front_right", (-4.0, -16.6, -28.0), (1.6, 6.8, 1.6)),
+            ("tea_table_leg_back_left", (-30.0, -16.6, 14.0), (1.6, 6.8, 1.6)),
+            ("tea_table_leg_back_right", (-30.0, -16.6, -28.0), (1.6, 6.8, 1.6)),
+        ):
+            scene.add_entity(
+                morph=gs.morphs.Box(
+                    pos=table_offset + pos,
+                    size=size,
+                    collision=False,
+                ),
+                material=gs.materials.Kinematic(),
+                surface=table_surface,
+                name=name,
+            )
+        tray_surface = gs.surfaces.Rough(color=(0.055, 0.028, 0.016), roughness=0.7)
+        for name, pos, size in (
+            ("tea_tray", (-18.5, -11.55, 5.5), (23.0, 0.9, 17.0)),
+            ("tea_tray_back", (-30.0, -10.85, 5.5), (0.5, 0.5, 17.0)),
+            ("tea_tray_front", (-7.0, -10.85, 5.5), (0.5, 0.5, 17.0)),
+            ("tea_tray_left", (-18.5, -10.85, 14.0), (23.0, 0.5, 0.5)),
+            ("tea_tray_right", (-18.5, -10.85, -3.0), (23.0, 0.5, 0.5)),
+        ):
+            scene.add_entity(
+                morph=gs.morphs.Box(
+                    pos=table_offset + pos,
+                    size=size,
+                    collision=False,
+                ),
+                material=gs.materials.Kinematic(),
+                surface=tray_surface,
+                name=name,
+            )
+        for index, x in enumerate(np.linspace(-28.5, -8.5, 18)):
+            scene.add_entity(
+                morph=gs.morphs.Box(
+                    pos=table_offset + (x, -11.02, 5.5),
+                    size=(0.95, 0.16, 15.8),
+                    collision=False,
+                ),
+                material=gs.materials.Kinematic(),
+                surface=gs.surfaces.Rough(color=(0.09, 0.045, 0.022), roughness=0.65),
+                name=f"tea_tray_slat_{index}",
+            )
+        cup_profile = np.array(
+            (
+                (0.0, 0.08),
+                (0.8, 0.08),
+                (0.85, 0.3),
+                (1.0, 0.4),
+                (1.2, 0.7),
+                (1.45, 1.25),
+                (1.72, 2.1),
+                (1.78, 2.3),
+                (1.75, 2.36),
+                (1.66, 2.36),
+                (1.62, 2.27),
+                (1.55, 2.05),
+                (1.3, 1.25),
+                (1.05, 0.75),
+                (0.8, 0.5),
+                (0.0, 0.5),
+            )
+        )
+        saucer_profile = np.array(
+            (
+                (0.0, 0.0),
+                (1.1, 0.0),
+                (1.2, 0.1),
+                (2.0, 0.18),
+                (2.65, 0.4),
+                (2.75, 0.48),
+                (2.72, 0.56),
+                (2.6, 0.58),
+                (1.9, 0.34),
+                (1.15, 0.25),
+                (0.0, 0.25),
+            )
+        )
+        jar_profile = np.array(
+            (
+                (0.0, 0.0),
+                (1.8, 0.0),
+                (2.15, 0.25),
+                (2.45, 0.9),
+                (2.5, 3.4),
+                (2.4, 4.15),
+                (2.1, 4.65),
+                (1.8, 4.85),
+                (1.8, 5.05),
+                (0.0, 5.05),
+            )
+        )
+        lid_profile = np.array(
+            (
+                (0.0, 0.0),
+                (1.9, 0.0),
+                (2.05, 0.1),
+                (2.05, 0.25),
+                (1.9, 0.4),
+                (1.3, 0.6),
+                (0.45, 0.7),
+                (0.35, 0.9),
+                (0.45, 1.05),
+                (0.4, 1.2),
+                (0.0, 1.25),
+            )
+        )
+        porcelain_surface = gs.surfaces.Rough(color=(0.5, 0.46, 0.37), roughness=0.5, ior=1.35)
+        celadon_surface = gs.surfaces.Rough(color=(0.21, 0.29, 0.25), roughness=0.5, ior=1.35)
+        for name, profile, positions, surface in (
+            ("tea_cup", cup_profile, ((-19.0, -10.69, 8.5), (-13.0, -10.69, 0.5)), porcelain_surface),
+            ("tea_saucer", saucer_profile, ((-19.0, -10.94, 8.5), (-13.0, -10.94, 0.5)), porcelain_surface),
+            ("tea_jar", jar_profile, ((-26.0, -10.94, 5.0),), teapot_surface),
+            ("tea_jar_lid", lid_profile, ((-26.0, -5.89, 5.0),), teapot_surface),
+            ("gaiwan", cup_profile * (1.35, 1.4), ((-10.0, -11.65, -25.0),), celadon_surface),
+            ("gaiwan_saucer", saucer_profile * 1.4, ((-10.0, -12.0, -25.0),), celadon_surface),
+            ("gaiwan_lid", lid_profile * (1.15, 0.8), ((-10.0, -8.4, -25.0),), celadon_surface),
+        ):
+            mesh = trimesh.creation.revolve(profile, sections=96)
+            for index, pos in enumerate(positions):
+                scene.add_entity(
+                    morph=gs.morphs.MeshSet(
+                        files=(mesh,),
+                        pos=table_offset + pos,
+                        euler=(-90.0, 0.0, 0.0),
+                        collision=False,
+                    ),
+                    material=gs.materials.Kinematic(),
+                    surface=surface,
+                    name=f"{name}_{index}",
+                )
     scene.add_entity(
         morph=gs.morphs.Plane(
-            pos=(0.0, settings.lower_bound[1], 0.0),
+            pos=(-12.0, settings.lower_bound[1], -8.0),
             euler=(-90.0, 0.0, 0.0),
             collision=False,
-            plane_size=(1000.0, 1000.0),
-            tile_size=(8.0, 8.0),
+            plane_size=(72.0, 70.0),
+            tile_size=(16.0, 16.0),
         ),
         material=gs.materials.Kinematic(),
         surface=ground_surface,
@@ -237,6 +405,7 @@ def build_teapot_scene(
         fov=40,
         GUI=show_viewer and is_rendered,
         spp=spp,
+        far=100.0,
     )
     scene.build(n_envs=n_envs)
     liquid.set_particles_vel(settings.particles_vel)

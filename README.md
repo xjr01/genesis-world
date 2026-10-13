@@ -66,10 +66,18 @@ python examples/teapot/render_teapot_comparison.py --jobs 2
 
 The rendered preview uses Genesis RayTracer with reconstructed water surfaces and requires the optional LuisaRender
 backend and `pysplashsurf`. Lighting and surface assets are downloaded into `out/teapot_assets/`, with their CC0 sources
-recorded in `sources.csv`. The comparison runner saves four method videos, initial and final particle states, run
+recorded in `sources.csv`. Warm indoor window lighting, a wooden tea table, and a matte reddish-brown clay teapot frame
+the water. A slatted tea tray, porcelain cups, a clay tea jar, and a celadon gaiwan sit on the table. The table stands
+behind the pouring teapot against two matte white walls, with subdued surface reflections. The tall walls fill the
+camera background, while the indoor environment supplies ambient lighting.
+An off-camera vertical light keeps thin streams visible; the water uses an index of refraction of 1.333 with a
+subtle warm transmission tint.
+The comparison runner saves four method videos, initial and final particle states, run
 settings, preview images, and `out/teapot_comparison/teapot_comparison.mp4`. Its defaults cover 32 simulated seconds at
 2x playback, 25 frames per second, and 32 samples per pixel. Use `--jobs 1` to reduce peak GPU memory, or
 `--compose-only` to combine existing recordings after verifying their initial states match exactly.
+Checkpoint replay uses each method's available frames. In the comparison video, a shorter recording holds its last
+frame with its stopping time labeled until the longest recording ends.
 
 Save simulation checkpoints once, then render them with the current camera, lighting, materials, and sample count:
 
@@ -91,7 +99,11 @@ The comparison runner accepts the same save/replay flags and a method selection:
 ```bash
 python examples/teapot/render_teapot_comparison.py --methods PBSTF PBD WCSPH --simulate-only --save-checkpoints out/teapot_comparison_cache
 python examples/teapot/render_teapot_comparison.py --methods PBSTF PBD WCSPH --replay-checkpoints out/teapot_comparison_cache --spp 64 -o out/teapot_comparison_rerender
+python examples/teapot/render_teapot_comparison.py --replay-checkpoints out/teapot_checkpoints --preview particles -o out/teapot_render
 ```
+
+`--preview particles` uses faster particle rendering with a translucent teapot. It saves method recordings under
+`DIR/particles/` and the grid video as `DIR/teapot_comparison_particles.mp4`, alongside the ray-traced version.
 
 `--simulate-only` saves the selected trajectories with rendering disabled. Non-finite particle states raise an error;
 the video encoder finalizes the available frames. A recording marked `unstable` is labeled accordingly during composition.

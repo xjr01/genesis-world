@@ -3,6 +3,7 @@ import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
+from itertools import zip_longest
 from pathlib import Path
 
 import numpy as np
@@ -17,11 +18,14 @@ else:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Render four synchronized teapot methods with Genesis ray tracing.")
+    parser = argparse.ArgumentParser(description="Render four synchronized teapot methods.")
     parser.add_argument(
         "-t", "--seconds", type=float, help="Simulated duration (default: 32, or the saved replay duration)."
     )
     parser.add_argument("--spp", type=int, default=32, help="Ray-tracing samples per pixel.")
+    parser.add_argument(
+        "--preview", choices=("particles", "render"), default="render", help="Fast particles or ray-traced water."
+    )
     parser.add_argument("--fps", type=int, help="Output frames per second (default: 25, or the saved replay rate).")
     parser.add_argument("--playback-speed", type=float, help="Playback speed (default: 2, or the saved replay speed).")
     parser.add_argument(
@@ -64,6 +68,11 @@ def main():
     if args.seconds <= 0.0 or args.spp < 1 or args.fps < 1 or args.playback_speed <= 0.0 or args.jobs < 1:
         parser.error("Duration, samples, frame rate, playback speed and jobs must be positive.")
     args.output_dir.mkdir(parents=True, exist_ok=True)
+    method_directory = args.output_dir / "particles" if args.preview == "particles" else args.output_dir
+    method_directory.mkdir(parents=True, exist_ok=True)
+    comparison_path = args.output_dir / (
+        "teapot_comparison_particles.mp4" if args.preview == "particles" else "teapot_comparison.mp4"
+    )
     scripts = tuple(
         "pbstf_teapot.py" if method == "PBSTF" else "pbd_liquid_teapot.py" if method == "PBD" else "sph_teapot.py"
         for method in methods
@@ -71,19 +80,27 @@ def main():
     if not args.compose_only:
         with ExitStack() as stack:
             logs = [
-                stack.enter_context((args.output_dir / f"{method}.log").open("w", encoding="utf-8"))
+                stack.enter_context((method_directory / f"{method}.log").open("w", encoding="utf-8"))
                 for method in methods
             ]
             pool = stack.enter_context(ThreadPoolExecutor(max_workers=args.jobs))
             runs = []
             for method, script, log in zip(methods, scripts, logs):
+                duration = args.seconds
+                if args.replay_checkpoints is not None:
+                    checkpoint_paths = sorted((args.replay_checkpoints / method).glob("frame_*.npz"))
+                    if not checkpoint_paths:
+                        raise ValueError(f"Checkpoint frames are missing for {method}.")
+                    method_info = read_checkpoint_info(args.replay_checkpoints, method)
+                    last_step = int(checkpoint_paths[-1].stem.removeprefix("frame_"))
+                    duration = min(duration, last_step * method_info.dt)
                 command = [
                     sys.executable,
                     str(Path(__file__).with_name(script)),
                     "--preview",
-                    "particles" if args.simulate_only else "render",
+                    "particles" if args.simulate_only else args.preview,
                     "--seconds",
-                    str(args.seconds),
+                    str(duration),
                     "--spp",
                     str(args.spp),
                     "--fps",
@@ -91,7 +108,7 @@ def main():
                     "--playback-speed",
                     str(args.playback_speed),
                     "--output-dir",
-                    str(args.output_dir),
+                    str(method_directory),
                 ]
                 if not args.simulate_only:
                     command.append("--record")
@@ -105,14 +122,14 @@ def main():
                     command.append("--timings")
                 if method in ("DFSPH", "WCSPH"):
                     command.extend(("--pressure-solver", method))
-                print(f"Queued {method}; log: {args.output_dir / (method + '.log')}", flush=True)
+                print(f"Queued {method}; log: {method_directory / (method + '.log')}", flush=True)
                 runs.append(pool.submit(subprocess.run, command, stdout=log, stderr=subprocess.STDOUT, check=True))
             for run in runs:
                 run.result()
 
-    with np.load(args.output_dir / f"{methods[0]}_initial.npz") as reference:
+    with np.load(method_directory / f"{methods[0]}_initial.npz") as reference:
         for method in methods[1:]:
-            with np.load(args.output_dir / f"{method}_initial.npz") as initial:
+            with np.load(method_directory / f"{method}_initial.npz") as initial:
                 for key in ("positions", "velocities"):
                     if not np.array_equal(initial[key], reference[key]):
                         raise ValueError(f"{method} initial {key} differs from {methods[0]}.")
@@ -120,22 +137,22 @@ def main():
         print(f"Saved simulation checkpoints to {args.save_checkpoints}.")
         return
     is_unstable = tuple(
-        (args.output_dir / f"{method}_status.txt").is_file()
-        and (args.output_dir / f"{method}_status.txt").read_text(encoding="utf-8").strip() == "unstable"
+        (method_directory / f"{method}_status.txt").is_file()
+        and (method_directory / f"{method}_status.txt").read_text(encoding="utf-8").strip() == "unstable"
         for method in methods
     )
     font = ImageFont.truetype(
         str(Path(__file__).parents[2] / "genesis/ext/pyrender/fonts/OpenSans-Semibold.ttf"), size=22
     )
     with ExitStack() as stack:
-        sources = [stack.enter_context(av.open(str(args.output_dir / f"{method}.mp4"))) for method in methods]
+        sources = [stack.enter_context(av.open(str(method_directory / f"{method}.mp4"))) for method in methods]
         streams = [source.streams.video[0] for source in sources]
         if any(stream.average_rate != streams[0].average_rate for stream in streams[1:]):
             raise ValueError("Method video frame rates differ.")
         width, height = streams[0].width, streams[0].height
         if any((stream.width, stream.height) != (width, height) for stream in streams[1:]):
             raise ValueError("Method video resolutions differ.")
-        destination = stack.enter_context(av.open(str(args.output_dir / "teapot_comparison.mp4"), mode="w"))
+        destination = stack.enter_context(av.open(str(comparison_path), mode="w"))
         stream = destination.add_stream("libx264", rate=streams[0].average_rate)
         columns = min(2, len(methods))
         rows = (len(methods) + columns - 1) // columns
@@ -144,25 +161,36 @@ def main():
         stream.pix_fmt = "yuv420p"
         stream.options = {"crf": "18", "preset": "medium"}
         frame_count = 0
-        for frame_idx, frames in enumerate(zip(*(source.decode(video=0) for source in sources), strict=True)):
+        last_frames: list[av.VideoFrame | None] = [None] * len(methods)
+        last_frame_times = [0.0] * len(methods)
+        for frame_idx, frames in enumerate(zip_longest(*(source.decode(video=0) for source in sources))):
+            simulated_time = (frame_idx + 1) * args.playback_speed / streams[0].average_rate
             canvas = Image.new("RGB", (columns * width, rows * height))
             for method_idx, (method, frame) in enumerate(zip(methods, frames)):
+                if frame is None:
+                    frame = last_frames[method_idx]
+                    if frame is None:
+                        raise ValueError(f"{method} video contains no frames.")
+                else:
+                    last_frames[method_idx] = frame
+                    last_frame_times[method_idx] = simulated_time
                 canvas.paste(frame.to_image(), ((method_idx % columns) * width, (method_idx // columns) * height))
             draw = ImageDraw.Draw(canvas)
-            simulated_time = (frame_idx + 1) * args.playback_speed / streams[0].average_rate
             for method_idx, method in enumerate(methods):
                 x, y = (method_idx % columns) * width, (method_idx // columns) * height
                 draw.rectangle((x, y, x + width, y + 38), fill=(18, 23, 30))
                 label = f"{method} | unstable" if is_unstable[method_idx] else method
+                if frames[method_idx] is None:
+                    label = f"{method} | held at {last_frame_times[method_idx]:.2f}s"
                 draw.text((x + 16, y + 6), label, fill=(240, 245, 250), font=font)
                 draw.text(
                     (x + width - 275, y + 6),
-                    f"t = {float(simulated_time):05.2f}s  |  {args.playback_speed:g}x",
+                    f"t = {simulated_time:05.2f}s  |  {args.playback_speed:g}x",
                     fill=(183, 203, 218),
                     font=font,
                 )
             if frame_idx == 0 or (frame_idx + 1) % (args.fps * 4) == 0:
-                canvas.save(args.output_dir / f"preview_{frame_idx + 1:04d}.jpg", quality=95)
+                canvas.save(method_directory / f"preview_{frame_idx + 1:04d}.jpg", quality=95)
             encoded_frame = av.VideoFrame.from_image(canvas)
             encoded_frame.pts = frame_idx
             for packet in stream.encode(encoded_frame):
@@ -173,7 +201,7 @@ def main():
         expected_frames = round(args.seconds * streams[0].average_rate / args.playback_speed)
         if frame_count != expected_frames:
             raise ValueError(f"Expected {expected_frames} frames, received {frame_count}.")
-    print(f"Saved {args.output_dir / 'teapot_comparison.mp4'} ({frame_count} synchronized frames).")
+    print(f"Saved {comparison_path} ({frame_count} synchronized frames).")
 
 
 if __name__ == "__main__":
