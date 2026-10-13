@@ -10,7 +10,11 @@ to dry vs 661 at the old 0.3/4.0/0.016, with the largest spread AND percolation 
 gear (2026-10-11): ddt_safety defaults to the fast gear 1.0 (argv[3] selects; see SAFETY_GEARS),
 probed full-run safe on this scene. Young gear (2026-10-11): the sand Young's modulus defaults
 to the soft gear 1e5 (argv[4] selects; see YOUNG_GEARS), probed full-run safe on this scene
-with the wet retention intact (100%).
+with the wet retention intact (100%). Shake phase (2026-10-12, user request "铲起来之后左右晃一晃
+把干沙子抖下去一些看看"): after the lift the scoop shakes along +x to shed loose dry sand over
+the lip while the wet clump rides along, defaulting to gear g2 (argv[5] selects; see
+SHAKE_GEARS), probed over three runs in experiments/shake_probe/ (dry shed 34-44%, wet
+retention 100%, zero false shake-off).
 
 Evolution of experiments/phase9_probe_deepbed.py (2 s probe) into the full demo:
 
@@ -34,21 +38,32 @@ Evolution of experiments/phase9_probe_deepbed.py (2 s probe) into the full demo:
            phase9_franka_shovel_sdf.py v5.
   Phase F  rotate 140 steps (omega -50 deg / 2.333 s, ROTATE_VEL trailing-edge pivot), then
   Phase G  lift 200 steps at 0.0375 m/s (same lift distance as the main run), then
+  Phase S  SHAKE 120 steps (2.0 s): holding the lift height, sinusoidal translation along world
+           +x (the camera's screen-horizontal axis; the scoop lip faces +x, the insert
+           direction), x(t) = A * env(t) * sin(2*pi*f*t) with the gear's A/f (default g2: 3.5
+           cm / 3.5 Hz, peak vel 0.77 m/s, peak accel 1.73 g) and env = raised-cosine ramps of
+           15 steps at both ends (C1-smooth hand-off from/to the held pose); driven per step by
+           the finite-difference velocity through the same set_sdf_obstacle_vel interface as
+           every other phase, shaking loose dry sand off the lip while the wet clump rides
+           along. Dry/wet scoop load is censused live (see scoop_census below).
   Phase H  hold 80 steps. Wincombo params ramp back over 30 steps starting 7 steps after the
            insert ends (mirrors the main run's abs 523 -> 530 -> 560 alignment).
 
 Recording: npz every 5 steps in phase A, every step from phase B on; ik_log.csv from phase C on.
 Outputs (do NOT collide with the phase9_franka_shovel_sdf final products):
   experiments/recordings/phase9_deepbed_full{tag}/frame_*.npz + meta.json + ik_log.csv
+  (+ metrics_shake.json when a shake gear runs)
 Render: experiments/phase9_deepbed_full_render.py [tag] -> videos/phase9_deepbed_full{tag}.mp4
 
-Usage: python phase9_deepbed_full.py [mode] [tag] [safety] [young]
+Usage: python franka_shovel_deepbed.py [mode] [tag] [safety] [young] [shake]
   mode    "smoke": build + 30 settle steps + one full-restart IK solve, then exit
           "full" (default): the whole A-H sequence
   safety  DEM substep safety gear: "1.0"/"fast" (default) or "0.5"/"archive"
           (see SAFETY_GEARS below)
   young   sand Young's modulus gear: "1e5"/"soft" (default) or "1e6"/"archive"
           (see YOUNG_GEARS below)
+  shake   shake gear after the lift: "g2" (default), "g1", or "off"
+          (see SHAKE_GEARS below)
 """
 import json
 import math
@@ -172,6 +187,26 @@ LIFT_VEL = (0.0, 0.0, 0.0375)
 N_LIFT_STEPS = 200
 N_HOLD_STEPS = 80
 
+# --- SHAKE phase: shed loose dry sand off the scoop after the lift (user request 2026-10-12) ---
+# Sinusoidal translation along world +x at the held lift height. Axis rationale: the camera
+# looks from +y toward -y, so x is the screen-horizontal axis; the scoop lip faces +x (the
+# blade leads with its +x edge through the +x insert, and the visc4 run's wet clump slid off
+# the lip toward +x during lift), so +x strokes carry loose grains over the lip while -x
+# strokes pile them against the closed back wall next to the handle.
+# Gear g1: peak velocity A*2*pi*f = 0.393 m/s, peak acceleration 6.2 m/s^2 = 0.63 g -- grains
+# stay in contact, shed by sliding over the lip (measured: dry -34%, wet retention 100%).
+# Gear g2 (default): 3.5 cm / 3.5 Hz = 1.73 g -- throws grains clear (dry -44%, wet retention
+# 100%, zero false shake-off; experiments/shake_probe/RESULT_SHAKE.md).
+SHAKE_GEARS = {
+    "g2": (0.035, 3.5, 120),  # 2.0 s, 7 cycles, raised-cosine ramps of 15 steps (default)
+    "g1": (0.025, 2.5, 120),  # 2.0 s, 5 cycles, same ramps
+    "off": None,              # skip the phase: lift flows straight into hold (pre-shake demo)
+}
+SHAKE_KEY = sys.argv[5] if len(sys.argv) > 5 else "g2"
+SHAKE = SHAKE_GEARS[SHAKE_KEY]
+SHAKE_AMPL, SHAKE_FREQ, N_SHAKE_STEPS = SHAKE if SHAKE is not None else (0.0, 0.0, 0)
+SHAKE_RAMP = 15  # steps of raised-cosine ramp at each end (C1-smooth start/stop, no jerk)
+
 WINCOMBO_REST = 0.1
 WINCOMBO_YOUNG_F = 0.25
 WINCOMBO_RAMP = 30  # stiffness ramp-back after the window ends (insert end + 7, as in the main run)
@@ -182,6 +217,13 @@ FINGER_GRIP = 0.0042  # measured rod diameter ~8.4 mm (phase9_handle_geometry.py
                       # was 0.0075 = 15 mm gap -> fingers visibly missed the 8.4 mm rod
 GRASP_DIST = 0.09
 DQ_MAX = 0.02
+# SHAKE-phase increment clamp (2026-10-12): the g1 shake peaks at 0.39 m/s (6.5 mm/step TCP
+# demand) and already saturates DQ_MAX = 0.02, leaving a ~4 cm steady-state grasp lag (round-1
+# ik_log: mean 38 mm over the whole shake window). g2 peaks at 0.77 m/s, so the clamp is relaxed
+# to 0.06 rad/step DURING THE SHAKE PHASE ONLY (measured demand ~13 mm/step TCP ~= 0.026
+# rad/step joint rate worst case); every other phase keeps DQ_MAX. The follower is a
+# collision-free kinematic re-drive, so the relaxation affects tracking fidelity only.
+SHAKE_DQ_MAX = 0.06
 # Grip target on the blue scoop's handle ROD, measured on litter_scoop_aligned.glb with the
 # voxelizer's Y-up->z-up transform (phase9_handle_geometry.py, 2026-09-02): rod centerline
 # runs from the junction (x ~ -0.132) to the tip (x = -0.2144) at 40.39 deg, diameter ~8.4 mm;
@@ -285,7 +327,7 @@ def hand_target_from_handle(handle_pos, handle_quat):
     return hand_pos, R_to_quat(R_hand)
 
 
-def solve_ik(franka, hand_link, pos, quat, q_prev):
+def solve_ik(franka, hand_link, pos, quat, q_prev, dq_max=DQ_MAX):
     """Continuous IK (phase7/phase9): warm start on the same branch, clamped increments."""
     if q_prev is None:
         q = franka.inverse_kinematics(
@@ -304,8 +346,38 @@ def solve_ik(franka, hand_link, pos, quat, q_prev):
             max_samples=1, max_solver_iters=300, damping=0.005, pos_tol=1e-4, rot_tol=1e-3,
         )
     q = to_np(q).astype(np.float64).reshape(-1)
-    dq = np.clip(q - q_prev, -DQ_MAX, DQ_MAX)
+    dq = np.clip(q - q_prev, -dq_max, dq_max)
     return q_prev + dq
+
+
+def shake_offset(j):
+    """Scoop x offset [m] at shake step j (0-based, j = 0..N_SHAKE_STEPS inclusive).
+
+    Raised-cosine ramps of SHAKE_RAMP steps at both ends envelope the sinusoid, so position,
+    velocity, and acceleration all start and end at ~0 (C1-smooth hand-off from/to the held
+    pose, no jerk spike into the DEM contact solve).
+    """
+    s = min(j, N_SHAKE_STEPS - j, SHAKE_RAMP) / SHAKE_RAMP
+    ramp = 0.5 * (1.0 - math.cos(math.pi * min(1.0, s)))
+    return SHAKE_AMPL * ramp * math.sin(2.0 * math.pi * SHAKE_FREQ * (j * DT))
+
+
+def bowl_bounds(sdf):
+    """Local-frame bbox of the scoop bowl (SDF solid cells below the handle stick, lz < 0.04),
+    expanded exactly like experiments/a4_scoop_check/a4_scoop_check.py (+15 mm xy, +25 mm top),
+    so the live census matches the archived scoop-load numbers."""
+    val, origin, cell = sdf["sdf_val"], sdf["origin"], sdf["cell"]
+    idx = np.nonzero(val < 0.0)
+    lx = origin[0] + idx[0] * cell[0]
+    ly = origin[1] + idx[1] * cell[1]
+    lz = origin[2] + idx[2] * cell[2]
+    bowl = lz < 0.04
+    xy_m, top_m = 0.015, 0.025
+    return (
+        (lx[bowl].min() - xy_m, lx[bowl].max() + xy_m),
+        (ly[bowl].min() - xy_m, ly[bowl].max() + xy_m),
+        (lz[bowl].min() - xy_m, lz[bowl].max() + top_m),
+    )
 
 
 def main():
@@ -364,6 +436,7 @@ def main():
     sdf = np.load(SDF_NPZ)
     dem.set_sdf_obstacle(sdf["sdf_val"], sdf["dims"], sdf["origin"], sdf["cell"],
                          BLADE_PARK_POS, quat=BLADE_QUAT0)
+    BOWL_X, BOWL_Y, BOWL_Z = bowl_bounds(sdf)
     print(f"sdf obstacle parked at {BLADE_PARK_POS} (tip z = {BLADE_PARK_POS[2] + TIP_OFF[2]:.4f})",
           flush=True)
 
@@ -418,15 +491,31 @@ def main():
     def tip_z():
         return float(blade_pose()[0][2] + TIP_OFF[2])
 
+    def scoop_census():
+        """Live (dry, wet) counts of grains carried in the scoop bowl (a4_scoop_check method:
+        inside the bowl local bbox AND airborne, z > S2 + 0.02 m; wet = ratio > 0.02)."""
+        pos = sand.get_particles_pos().cpu().numpy()[0].astype(np.float64)
+        ratio = dem.particles.ratio.to_numpy()[:, 0].astype(np.float64)
+        bpos, bquat = blade_pose()
+        loc = (pos - bpos) @ quat_to_R(bquat)
+        in_bowl = (
+            (loc[:, 0] > BOWL_X[0]) & (loc[:, 0] < BOWL_X[1])
+            & (loc[:, 1] > BOWL_Y[0]) & (loc[:, 1] < BOWL_Y[1])
+            & (loc[:, 2] > BOWL_Z[0]) & (loc[:, 2] < BOWL_Z[1])
+        )
+        carried = in_bowl & (pos[:, 2] > s2 + 0.02)
+        wet = carried & (ratio > 0.02)
+        return int((carried & ~wet).sum()), int(wet.sum())
+
     q_prev = None
 
-    def follow_handle(i):
+    def follow_handle(i, dq_max=DQ_MAX):
         """Drive the arm to the current handle pose; returns (grasp_err, dq_max)."""
         nonlocal q_prev
         bpos, bquat = blade_pose()
         handle_pos, handle_quat = blade_to_handle(bpos, bquat)
         target_pos, target_quat = hand_target_from_handle(handle_pos, handle_quat)
-        q = solve_ik(franka, hand_link, target_pos, target_quat, q_prev)
+        q = solve_ik(franka, hand_link, target_pos, target_quat, q_prev, dq_max=dq_max)
         dq_max = 0.0 if q_prev is None else float(np.abs(q - q_prev).max())
         q_prev = q
         q = q.copy()
@@ -449,8 +538,8 @@ def main():
         "droplet_x": DROPLET_X,
         "trajectory": "full v5 wincombo anchored to measured surface S2: approach -0.1 m/s to "
         "S2+8mm, descend to S2-2.8cm, insert 163 steps (90@1/3 + 30 ramp + 43 full), rotate 140, "
-        "lift 200, hold 80; wincombo window restitution 0.1 + young x0.25 from descend start "
-        "until insert end + 7, 30-step stiffness ramp-back",
+        "lift 200, shake (see 'shake'), hold 80; wincombo window restitution 0.1 + young x0.25 "
+        "from descend start until insert end + 7, 30-step stiffness ramp-back",
     }
 
     # ---------------- phase A: settle until the surface is stable ----------------
@@ -594,11 +683,10 @@ def main():
     insert_end = i
     meta["insert_end"] = int(insert_end)
 
-    # ---------------- phases F/G/H: rotate, lift, hold (wincombo ramp-back inside) ----
+    # ---------------- phases F/G: rotate, lift (wincombo ramp-back inside) --------------
     for phase, phase_key, n_steps, vel, omega in [
         ("F rotate", "rotate_end", N_ROTATE_STEPS, ROTATE_VEL, ROTATE_OMEGA),
         ("G lift", "lift_end", N_LIFT_STEPS, LIFT_VEL, None),
-        ("H hold", "hold_end", N_HOLD_STEPS, (0.0, 0.0, 0.0), None),
     ]:
         dem.set_sdf_obstacle_vel(vel, omega=omega) if omega is not None else dem.set_sdf_obstacle_vel(vel)
         print(f"{phase}: starts at step {i + 1}", flush=True)
@@ -625,11 +713,121 @@ def main():
                       f"elapsed = {time.time() - t0:.0f}s", flush=True)
         meta[phase_key] = int(i)
 
+    # ---------------- phase S: SHAKE the scoop side-to-side at the lift height ----------
+    if SHAKE is not None:
+        dry0, wet0 = scoop_census()
+        print(f"S shake: starts at step {i + 1} (A {SHAKE_AMPL} m, f {SHAKE_FREQ} Hz, "
+              f"{N_SHAKE_STEPS} steps); census at lift end: dry {dry0}, wet {wet0}", flush=True)
+        meta["shake_start"] = int(i + 1)
+        shake_grasp_errs = []
+        shake_vmax_peak = 0.0
+        shake_nan = 0
+        vx_peak = 0.0
+        for j in range(N_SHAKE_STEPS):
+            i += 1
+            vx = (shake_offset(j + 1) - shake_offset(j)) / DT
+            vx_peak = max(vx_peak, abs(vx))
+            dem.set_sdf_obstacle_vel((vx, 0.0, 0.0))
+            if i == wincombo_end:
+                dem._restitution = RESTITUTION
+            ge, _ = follow_handle(i, dq_max=SHAKE_DQ_MAX)
+            scene.step()
+            pos = record(i)
+            if np.isnan(pos).any():
+                shake_nan += 1
+            shake_grasp_errs.append(ge)
+            vm = sand_vmax()
+            shake_vmax_peak = max(shake_vmax_peak, vm)
+            if j % 10 == 0 or j == N_SHAKE_STEPS - 1:
+                n_z_hi = int((pos[:, 2] > 0.35).sum())
+                print(f"S shake step {i:4d} ({j + 1}/{N_SHAKE_STEPS}): vx = {vx:+.3f}  "
+                      f"census dry/wet = {scoop_census()}  vmax = {vm:7.3f}  n(z>0.35) = {n_z_hi}  "
+                      f"nan = {shake_nan}  elapsed = {time.time() - t0:.0f}s", flush=True)
+            if shake_nan or vm > 20.0:
+                meta["final_step"] = int(i)
+                with open(os.path.join(OUT_DIR, "meta.json"), "w") as f:
+                    json.dump(meta, f, indent=2)
+                raise RuntimeError(f"SHAKE stability abort at step {i}: nan {shake_nan}, vmax {vm:.2f}")
+        dry1, wet1 = scoop_census()
+        meta["shake_end"] = int(i)
+        shake_ik_max = max(shake_grasp_errs)
+        shake_ik_mean = sum(shake_grasp_errs) / len(shake_grasp_errs)
+        print(f"phase S done at step {i}: census dry {dry0} -> {dry1}, wet {wet0} -> {wet1}; "
+              f"shed dry {max(0, dry0 - dry1)} ({(max(0, dry0 - dry1) / dry0 * 100.0):.1f}%), "
+              f"wet lost {max(0, wet0 - wet1)} ({(max(0, wet0 - wet1) / max(1, wet0) * 100.0):.1f}%), "
+              f"vx_peak {vx_peak:.3f} m/s, vmax_peak {shake_vmax_peak:.3f}, "
+              f"IK max/mean {shake_ik_max:.2e}/{shake_ik_mean:.2e}, nan {shake_nan}", flush=True)
+
+    # ---------------- phase H: hold ------------------------------------------------------
+    for phase, phase_key, n_steps, vel, omega in [
+        ("H hold", "hold_end", N_HOLD_STEPS, (0.0, 0.0, 0.0), None),
+    ]:
+        dem.set_sdf_obstacle_vel(vel, omega=omega) if omega is not None else dem.set_sdf_obstacle_vel(vel)
+        print(f"{phase}: starts at step {i + 1}", flush=True)
+        for j in range(n_steps):
+            i += 1
+            if i >= wincombo_end:
+                g = min(1.0, (i - wincombo_end + 1) / WINCOMBO_RAMP)
+                dem._entities[0].material.young_modulus = young0 * (
+                    WINCOMBO_YOUNG_F + (1.0 - WINCOMBO_YOUNG_F) * g
+                )
+            follow_handle(i)
+            scene.step()
+            record(i)
+            if j % 20 == 0 or j == n_steps - 1:
+                bpos, bquat = blade_pose()
+                theta = math.degrees(2.0 * math.atan2(bquat[2], bquat[0]))
+                print(f"{phase} step {i:4d} ({j + 1}/{n_steps}): blade z = {bpos[2]:.4f}  "
+                      f"theta = {theta:+6.2f}  vmax = {sand_vmax():7.3f}  "
+                      f"elapsed = {time.time() - t0:.0f}s", flush=True)
+        meta[phase_key] = int(i)
+
+    if SHAKE is not None:
+        dry2, wet2 = scoop_census()
+        print(f"final census (hold end, step {i}): dry {dry2}, wet {wet2} "
+              f"(shake end was dry {dry1}, wet {wet1})", flush=True)
+        meta["shake"] = {
+            "gear": SHAKE_KEY,
+            "ampl_m": SHAKE_AMPL, "freq_hz": SHAKE_FREQ, "n_steps": N_SHAKE_STEPS,
+            "ramp_steps": SHAKE_RAMP, "axis": "+x (screen-horizontal, lip direction)",
+            "dq_max_shake": SHAKE_DQ_MAX,
+            "vx_peak_mps": vx_peak, "vmax_peak_mps": shake_vmax_peak, "nan_frames": shake_nan,
+            "ik_grasp_err_max_m": shake_ik_max, "ik_grasp_err_mean_m": shake_ik_mean,
+            "census_lift_end": {"dry": dry0, "wet": wet0},
+            "census_shake_end": {"dry": dry1, "wet": wet1},
+            "census_hold_end": {"dry": dry2, "wet": wet2},
+            "dry_shed": max(0, dry0 - dry1), "wet_lost": max(0, wet0 - wet1),
+        }
+    else:
+        meta["shake"] = {"gear": "off"}
+
     meta["final_step"] = int(i)
     meta["final_tip_z"] = tip_z()
     ik_log.close()
     with open(os.path.join(OUT_DIR, "meta.json"), "w") as f:
         json.dump(meta, f, indent=2)
+    if SHAKE is not None:
+        metrics = {
+            "run": f"deepbed shake A {SHAKE_AMPL} m / {SHAKE_FREQ} Hz / {N_SHAKE_STEPS} steps",
+            "gears": {"young": YOUNG, "safety": SAFETY, "surface_tension": SURFACE_TENSION},
+            "census_lift_end": {"dry": dry0, "wet": wet0, "total": dry0 + wet0},
+            "census_shake_end": {"dry": dry1, "wet": wet1, "total": dry1 + wet1},
+            "census_hold_end": {"dry": dry2, "wet": wet2, "total": dry2 + wet2},
+            "dry_shed": max(0, dry0 - dry1),
+            "dry_shed_ratio": max(0, dry0 - dry1) / max(1, dry0),
+            "wet_lost": max(0, wet0 - wet1),
+            "wet_lost_ratio": max(0, wet0 - wet1) / max(1, wet0),
+            "shake_ik_grasp_err": {
+                "max_m": shake_ik_max, "mean_m": shake_ik_mean,
+                "n_gt_2mm": sum(1 for e in shake_grasp_errs if e > 2e-3),
+                "n_steps": len(shake_grasp_errs),
+            },
+            "stability": {"nan_frames": shake_nan, "vmax_peak_mps": shake_vmax_peak,
+                          "vx_peak_mps": vx_peak},
+            "final_step": int(i), "wall_s": time.time() - t0,
+        }
+        with open(os.path.join(OUT_DIR, "metrics_shake.json"), "w") as f:
+            json.dump(metrics, f, indent=2)
     print(f"deep-bed full run done: {i + 1} steps in {time.time() - t0:.0f}s, "
           f"frames in {OUT_DIR}", flush=True)
 

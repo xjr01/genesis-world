@@ -2,7 +2,7 @@
 
 ## 概述
 
-本目录是沙水耦合（DEM 沙 + FLIP 水 + 吸收耦合）系列示例的入库镜像，来源于仓库外 `experiments/` 的 phase5–phase9 系列脚本：从滴水吸水（phase5）到 Franka 机械臂夹持猫砂铲对深床湿沙完成「沉降 → 滴水 → 下压 → 斜插 → 转起 → 抬升」的完整铲掘（phase9 深床）。主流程现为**粗沙 A4 吸收档**（2026-10-11：grid_res 64、沙粒半径 3.125 mm、max_ratio 0.5 + VISCOSITY 1.0 + droplet r 0.020；DEM 子步 safety 默认快档 1.0，沙杨氏模量默认软档 1e5，全量 9.7 分钟；存档组合 0.5 + 1e6 为 54.9 分钟，见「参数说明」SAFETY / YOUNG 挡位；轨迹与夹持为 2026-09-03 验收的 v2 版）。18 个脚本入库时已全部通过 py_compile；除体素化 / matplotlib 回放 / 采样模块外，全部脚本 headless 运行（`gs.init(backend=gs.gpu)`），需要 NVIDIA GPU。
+本目录是沙水耦合（DEM 沙 + FLIP 水 + 吸收耦合）系列示例的入库镜像，来源于仓库外 `experiments/` 的 phase5–phase9 系列脚本：从滴水吸水（phase5）到 Franka 机械臂夹持猫砂铲对深床湿沙完成「沉降 → 滴水 → 下压 → 斜插 → 转起 → 抬升 → 抖铲」的完整铲掘（phase9 深床）。主流程现为**粗沙 A4 吸收档**（2026-10-11：grid_res 64、沙粒半径 3.125 mm、max_ratio 0.5 + VISCOSITY 1.0 + droplet r 0.020；DEM 子步 safety 默认快档 1.0，沙杨氏模量默认软档 1e5，抬升后默认接 120 步抖铲相位（SHAKE g2 挡，干湿分离，见「参数说明」SHAKE 挡位），全量约 10.6 分钟（1335 步实测）；存档组合 0.5 + 1e6（关抖铲）为 54.9 分钟，见「参数说明」SAFETY / YOUNG / SHAKE 挡位；轨迹与夹持为 2026-09-03 验收的 v2 版 + 2026-10-12/13 验收的抖铲相位）。18 个脚本入库时已全部通过 py_compile；除体素化 / matplotlib 回放 / 采样模块外，全部脚本 headless 运行（`gs.init(backend=gs.gpu)`），需要 NVIDIA GPU。
 
 ## 环境要求
 
@@ -64,13 +64,13 @@ conda run -n genesis-sandwater --no-capture-output python franka_shovel_deepbed.
 
 看控制台末尾的 `SMOKE done` 行（打印 n_sand / n_water / first-IK grasp_err / gpu mem），过程中无 NaN 报错即通过。注意 smoke 产物在 `recordings/phase9_deepbed_full_smoke/` 且**不含 meta.json，不能喂给渲染脚本**（渲染验证只对 full 记录有效）。
 
-**第 2 步：full 全量仿真（默认软档组合 young 1e5 + safety 1.0 约 10 分钟：实测 1159 步 / 9.65 min / 中位 0.460 s/步，零 NaN，湿粒留存 299/299 = 100%；存档组合 1e6 + 0.5 约 55 分钟：1105 步 / 54.9 min，A4 归档数字；1e6 + 1.0 约 26 分钟：1110 步 / 25.8 min）**：
+**第 2 步：full 全量仿真（默认组合 young 1e5 + safety 1.0 + shake g2 约 11 分钟：实测 1335 步 / 10.6 min，零 NaN，抖铲干沙 -44.8%、湿粒留存 300→299；`off` 挡还原无抖铲行为：1159 步 / 9.65 min / 中位 0.460 s/步；存档组合 1e6 + 0.5 约 55 分钟：1105 步 / 54.9 min，A4 归档数字；1e6 + 1.0 约 26 分钟：1110 步 / 25.8 min）**：
 
 ```bash
 conda run -n genesis-sandwater --no-capture-output python franka_shovel_deepbed.py full > deepbed_full.log 2>&1
 ```
 
-存档组合显式写法（空 tag 占位）：`python franka_shovel_deepbed.py full "" 0.5 1e6`（挡位名或数值均可：safety `0.5`/`archive`、young `1e6`/`archive`）；挡位值写入 meta.json 的 `ddt_safety` 与 `young_modulus` 字段供溯源。
+存档组合显式写法（空 tag 占位）：`python franka_shovel_deepbed.py full "" 0.5 1e6 off`（挡位名或数值均可：safety `0.5`/`archive`、young `1e6`/`archive`、shake `g2`/`g1`/`off`）；挡位值写入 meta.json 的 `ddt_safety`、`young_modulus` 与 `shake`（挡位 + 参数 + census 结果）字段供溯源。
 
 建议放独立终端或后台任务跑；日志重定向到 `.log` 文件天然被 .gitignore 忽略（见「仓库卫生」）。
 
@@ -80,7 +80,7 @@ conda run -n genesis-sandwater --no-capture-output python franka_shovel_deepbed.
 conda run -n genesis-sandwater --no-capture-output python franka_shovel_deepbed_render.py > deepbed_render.log 2>&1
 ```
 
-产物：`videos/phase9_deepbed_full.mp4`（1 视频帧 = 1 仿真步 = 1/60s；帧数随挡位组合与判停浮动：软档 1159 帧 = 19.32 s、快档 1110 帧 = 18.50 s、A4 存档档 1105 帧 = 18.42 s）+ `frames/` 关键帧 PNG。
+产物：`videos/phase9_deepbed_full.mp4`（1 视频帧 = 1 仿真步 = 1/60s；帧数随挡位组合与判停浮动：默认档含抖铲 1335 帧 = 22.25 s、`off` 挡软档 1159 帧 = 19.32 s、快档 1110 帧 = 18.50 s、A4 存档档 1105 帧 = 18.42 s）+ `frames/` 关键帧 PNG（默认档 9 张，含抖铲末一帧）。
 
 **tag 规则**：sim 的第 2 位置参数与 render 的第 1 位置参数必须一致（默认都是空 tag）。对照跑示例：`franka_shovel_deepbed.py full _v2` → `franka_shovel_deepbed_render.py _v2`。
 
@@ -88,7 +88,7 @@ conda run -n genesis-sandwater --no-capture-output python franka_shovel_deepbed_
 
 | 脚本 | 功能 | 位置参数 | 依赖资产 | 主要输出 |
 |---|---|---|---|---|
-| `franka_shovel_deepbed.py` | **主流程（phase9 深床，粗沙 A4 吸收档 + safety / young 双挡位）**：1.8× Poisson 深床，沉降判稳后第 4 秒滴水、吸水，Franka 跟随猫砂铲完成完整铲掘 | `[smoke\|full] [tag] [safety] [young]`（默认 full / 空 / 1.0 / 1e5；safety 接受 `1.0`/`fast` 或 `0.5`/`archive`，young 接受 `1e5`/`soft` 或 `1e6`/`archive`） | `litter_scoop_sdf_slots_s0.5.npz`（需再生） | `recordings/phase9_deepbed_full{tag}/`（frame_*.npz、meta.json、ik_log.csv） |
+| `franka_shovel_deepbed.py` | **主流程（phase9 深床，粗沙 A4 吸收档 + safety / young / shake 三挡位）**：1.8× Poisson 深床，沉降判稳后第 4 秒滴水、吸水，Franka 跟随猫砂铲完成完整铲掘，抬升后抖铲干湿分离 | `[smoke\|full] [tag] [safety] [young] [shake]`（默认 full / 空 / 1.0 / 1e5 / g2；safety 接受 `1.0`/`fast` 或 `0.5`/`archive`，young 接受 `1e5`/`soft` 或 `1e6`/`archive`，shake 接受 `g2`/`g1`/`off`） | `litter_scoop_sdf_slots_s0.5.npz`（需再生） | `recordings/phase9_deepbed_full{tag}/`（frame_*.npz、meta.json、ik_log.csv；跑抖铲挡位时另有 metrics_shake.json） |
 | `franka_shovel_deepbed_render.py` | 主流程渲染：湿色 4 桶 + 逐帧重驱 Franka IK + 时间轴对齐 | `[tag] [max_frames]` | `litter_scoop_aligned.glb` + 对应 recordings | `videos/phase9_deepbed_full{tag}.mp4`、`frames/` 关键帧、`recordings/…/ik_render_log{tag}.csv` |
 | `franka_shovel_sand_sdf.py` | phase9 半尺寸 Franka+猫砂铲铲湿沙（v4 轨迹版，浅床） | `[max_steps] [sdf文件名] [tag]` | `litter_scoop_sdf_slots_s0.5.npz`（需再生）、glb | `recordings/phase9_franka_shovel_sdf{tag}/`、`videos/` |
 | `franka_shovel_sdf_render_wet_native.py` | 上者的原生湿色渲染 | `[max_frames] [tag]` | glb + 对应 recordings | `videos/phase9_franka_shovel_sdf{tag}.mp4`、`frames/` |
@@ -115,23 +115,42 @@ conda run -n genesis-sandwater --no-capture-output python franka_shovel_deepbed_
 
 | 常量 | 当前值 | 位置（约） | 作用 |
 |---|---|---|---|
-| `grid_res` | 64 | :331 | FLIP 网格分辨率（dx 5.47 mm）；改它必须连 `PARTICLE_RADIUS` 一起（见下） |
-| `PARTICLE_RADIUS` | 3.125e-3 | :74 | 沙粒半径（直径 6.25 mm ≈ res64 dx）；与 grid_res 同比例缩放，只改一边会破坏粒径:dx 比 |
-| `MAX_RATIO` | 0.5 | :83 | 沙粒吸水上限（A4 档主旋钮：引擎吸收分数下限 1−0.74·(1+max_ratio) 在 ~0.35 以上截断为负、0.5 已到收益终点；0.3→0.5 单独把探针吸干 661→255 步） |
-| `VISCOSITY` | 1.0 | :85 | 沙↔水二次拖曳系数（FLIP `viscosity_coeff`；沿革 0.01→2.0→0.4→0.8→4.0→1.0，A4 档值即 C++ 参考默认 m_ViscosityCoeff=1） |
-| `DROPLET_RADIUS` | 0.020 | :139 | 水滴半径（A4 档回到 0.020：体积 ×1.95、水粒 540→1408，是同时提升铺开与深度的唯一旋钮；写入 meta 供渲染端读取） |
-| `ABSORB_MAX` | 700 | :200 | 吸水段步数上限（软档 154 步、A4 档 111 步即自然判停，cap 仅兜底；visc4 档尾段慢曾顶满 699） |
-| `SAFETY`（即 `ddt_safety` 挡位） | 1.0 | :115 | DEM 子步安全系数挡位表，argv[3] 选 `1.0`/`fast`（默认）或 `0.5`/`archive`。**1.0 = 快档**：子步长顶满 C++ 公式稳定极限（ddt = r·π·√(ρ/E)/2），本场景全相位实测零 NaN 无 popcorn（含水滴落地与抬升两个历史风险窗口）：1110 步 / 25.8 min / 1.394 s/步、湿留存 297/297 = 100%，探针全数据见仓库外 `experiments/safety10_probe/`；**0.5 = 存档档**：C++ 保守裕度，A4 归档数字之档（1105 步 / 54.9 min / 2.98 s/步）。两档轨迹自沉降段即分岔、互相不可比；挡位值写入 meta.json 的 `ddt_safety` 字段供渲染/分析溯源 |
-| `YOUNG`（即 `young_modulus` 挡位） | 1e5 | :133 | 沙杨氏模量挡位表，argv[4] 选 `1e5`/`soft`（默认）或 `1e6`/`archive`，传入 Sand 材质（接触刚度 K_norm = E·r 与子步公式 ddt ∝ √(1/E) 均随之自动适配）。**1e5 = 软档**：比 C++ 参考值软 10 倍，子步/控制步 2148→680（√10 精确），本场景全相位实测零 NaN 无 popcorn、**湿粒留存 299/299 = 100%**：1159 步 / 9.65 min / 中位 0.460 s/步，探针全数据见仓库外 `experiments/e1e5_gear_verify/`；实测软床物理（存档档口径为基准）：床面低 ~13 mm、渗透 0.0242（−23%）、吸干 154 步（+39%）、铲内装载 583（−15%）、铲尖末触底 −4.1 mm（S2 锚定轨迹几何连带）、wincombo 窗口内 E = 2.5e4。**1e6 = 存档档**：C++ 参考值，A4 归档数字之档。两档轨迹自沉降段即分岔、互相不可比；挡位值写入 meta.json 的 `young_modulus` 字段供溯源 |
+| `grid_res` | 64 | :403 | FLIP 网格分辨率（dx 5.47 mm）；改它必须连 `PARTICLE_RADIUS` 一起（见下） |
+| `PARTICLE_RADIUS` | 3.125e-3 | :89 | 沙粒半径（直径 6.25 mm ≈ res64 dx）；与 grid_res 同比例缩放，只改一边会破坏粒径:dx 比 |
+| `MAX_RATIO` | 0.5 | :98 | 沙粒吸水上限（A4 档主旋钮：引擎吸收分数下限 1−0.74·(1+max_ratio) 在 ~0.35 以上截断为负、0.5 已到收益终点；0.3→0.5 单独把探针吸干 661→255 步） |
+| `VISCOSITY` | 1.0 | :100 | 沙↔水二次拖曳系数（FLIP `viscosity_coeff`；沿革 0.01→2.0→0.4→0.8→4.0→1.0，A4 档值即 C++ 参考默认 m_ViscosityCoeff=1） |
+| `DROPLET_RADIUS` | 0.020 | :154 | 水滴半径（A4 档回到 0.020：体积 ×1.95、水粒 540→1408，是同时提升铺开与深度的唯一旋钮；写入 meta 供渲染端读取） |
+| `ABSORB_MAX` | 700 | :242 | 吸水段步数上限（软档 154 步、A4 档 111 步即自然判停，cap 仅兜底；visc4 档尾段慢曾顶满 699） |
+| `SAFETY`（即 `ddt_safety` 挡位） | 1.0 | :130 | DEM 子步安全系数挡位表，argv[3] 选 `1.0`/`fast`（默认）或 `0.5`/`archive`。**1.0 = 快档**：子步长顶满 C++ 公式稳定极限（ddt = r·π·√(ρ/E)/2），本场景全相位实测零 NaN 无 popcorn（含水滴落地与抬升两个历史风险窗口）：1110 步 / 25.8 min / 1.394 s/步、湿留存 297/297 = 100%，探针全数据见仓库外 `experiments/safety10_probe/`；**0.5 = 存档档**：C++ 保守裕度，A4 归档数字之档（1105 步 / 54.9 min / 2.98 s/步）。两档轨迹自沉降段即分岔、互相不可比；挡位值写入 meta.json 的 `ddt_safety` 字段供渲染/分析溯源 |
+| `YOUNG`（即 `young_modulus` 挡位） | 1e5 | :148 | 沙杨氏模量挡位表，argv[4] 选 `1e5`/`soft`（默认）或 `1e6`/`archive`，传入 Sand 材质（接触刚度 K_norm = E·r 与子步公式 ddt ∝ √(1/E) 均随之自动适配）。**1e5 = 软档**：比 C++ 参考值软 10 倍，子步/控制步 2148→680（√10 精确），本场景全相位实测零 NaN 无 popcorn、**湿粒留存 299/299 = 100%**：1159 步 / 9.65 min / 中位 0.460 s/步，探针全数据见仓库外 `experiments/e1e5_gear_verify/`；实测软床物理（存档档口径为基准）：床面低 ~13 mm、渗透 0.0242（−23%）、吸干 154 步（+39%）、铲内装载 583（−15%）、铲尖末触底 −4.1 mm（S2 锚定轨迹几何连带）、wincombo 窗口内 E = 2.5e4。**1e6 = 存档档**：C++ 参考值，A4 归档数字之档。两档轨迹自沉降段即分岔、互相不可比；挡位值写入 meta.json 的 `young_modulus` 字段供溯源 |
+| `SHAKE`（即 `SHAKE_GEARS` 挡位） | g2 | :200 | 抖铲相位挡位表，argv[5] 选 `g2`（默认）/`g1`/`off`。**g2 = 3.5 cm / 3.5 Hz / 120 步**（1.73 g 抛掷式）：干沙抖掉 43.8%（主线复跑 44.8%）、湿粒 100% 留存 0 误抖；**g1 = 2.5 cm / 2.5 Hz / 120 步**（0.63 g 滑落式）：干沙 -34.2%、湿粒 100%；**off**：跳过相位（抬升直接接停驻，即 2026-10-12 前的无抖铲行为）。挡位 + 参数 + census 结果写入 meta.json 的 `shake` 字段。详见下方「SHAKE 抖铲相位」小节 |
 
-当前默认即 **A4 吸收档**（MAX_RATIO 0.5 / VISCOSITY 1.0 / DROPLET_RADIUS 0.020）+ **safety 快档 1.0** + **young 软档 1e5**，出自 res64 吸收调参矩阵（探针依据见仓库外 `experiments/res64_absorb_tuning/TUNING.md`）与 safety10 / e1e5 两探针。**改任何常量前先跑 smoke**；每个参数的完整沿革与每轮实测数字见仓库外 `experiments/record.md`。
+当前默认即 **A4 吸收档**（MAX_RATIO 0.5 / VISCOSITY 1.0 / DROPLET_RADIUS 0.020）+ **safety 快档 1.0** + **young 软档 1e5** + **shake g2 挡**，出自 res64 吸收调参矩阵（探针依据见仓库外 `experiments/res64_absorb_tuning/TUNING.md`）、safety10 / e1e5 两探针与 shake_probe 三轮抖铲实验。**改任何常量前先跑 smoke**；每个参数的完整沿革与每轮实测数字见仓库外 `experiments/record.md`。
 
 **换挡提示**：safety 1.0 与 young 1e5 均仅在本深床场景全相位验证（1e5 探针在 safety 1.0 下跑出）——高冲击稠密工况（当年 342 m/s popcorn 属远更烈的工况，未覆盖）不在保证范围内；**换场景先用 smoke / 短探针确认无 NaN、无爆粒（popcorn）再上快/软档**，交付与归档数字可比性要求高时用 0.5 + 1e6。**软档（1e5）额外注意**：床面比存档档低 ~1 cm（S2 锚定的铲取轨迹因此铲尖末贴底/微没入地面 ~4 mm，视觉连带）；湿团 100% 留存在本场景实测保持，但更软的沙在其他铲形/速度下兜载能力未验证。
 
+**挡位组合守则（ST × safety）**：`SURFACE_TENSION`（:99，默认 0.02 = 已授权 ×3）**调到 ≥ 0.2（×10 液桥）时必须搭配 safety ≤ 0.5**——s1.0 大子步下 ×10 粘力触发数值蠕变-剪切断裂（湿团留存跌至 29.2%），s0.5 下同粘力全程稳定（留存 100%、蠕变 std 0.014 mm/帧）；st10 / st10_s05 实验确立，全数据见仓库外 `experiments/st10_s05_probe/RESULT_ST10S05.md`。
+
+### SHAKE 抖铲相位（干湿分离，`SHAKE_GEARS`，argv[5]，默认 `g2`）
+
+G 抬升完成后、H 停驻前，铲子保持抬升高度沿世界 **+x**（相机屏幕左右向；铲唇朝 +x，即插入方向前缘，−x 侧是封闭铲背 + 铲柄）正弦平移 **120 步 = 2.0 s**，首尾各 **15 步 raised-cosine ramp**（C¹ 平滑起停、无冲击），每步以差分速度经 `set_sdf_obstacle_vel` 驱动（与其余相位同一接口）——往复晃动把铲内松散干沙抖出铲唇，湿团（液桥粘聚、刚体骑行）整体留存，实现干湿分离（用户需求 2026-10-12「铲起来之后左右晃一晃 把干沙子抖下去一些看看」）。挡位表：
+
+| 挡位 | 幅度 / 频率 / 步数 | 峰值速度 / 加速度 | 分离方式 | 实测（默认 ST0.02 档） |
+|---|---|---|---|---|
+| `g2`（默认） | 3.5 cm / 3.5 Hz / 120 步 | 0.77 m/s / 1.73 g | 抛掷式（干沙被抛离铲唇） | 干沙 **272→153（抖掉 43.8%）**、湿粒 296/296 = **100% 留存 0 误抖**；主线复跑 279→154（44.8%）、湿粒 300→299 |
+| `g1` | 2.5 cm / 2.5 Hz / 120 步 | 0.39 m/s / 0.63 g | 滑落式（干沙滑动越唇） | 干沙 263→175（34.2%）、湿粒 307/307 = 100% |
+| `off` | 跳过相位（抬升直接接停驻，即 2026-10-12 前的无抖铲行为） | | | 全量 1159 步 / 9.65 min |
+
+- 计数口径：a4 scoop 分析（铲斗局部框内且 z > S2+2 cm；湿 = ratio > 0.02）。抖掉物全部落回床面、0 粒空中乱飞；0 NaN / 0 popcorn（vmax 峰 ≤2.0 m/s，远低于 20 熔断线）。
+- **×10 粘力组合实测**（young 1e5 + **ST 0.2** + safety 0.5 + g2，授权偏差，2026-10-13）：干沙 468→294（**37.6%**）、湿粒 298→299（**100%**）——×10 液桥未把更多干沙咬在湿团上（铲载差主要是 s0.5 床几何、贴团比例两版同 67%），高粘力档下依旧单向分离。
+- **饱和特性**：前 30 步（含 ramp）完成 **~90%**（84-92%）的分离后饱和——剩余干沙为与湿团底座咬合的压实层，纯平移晃动撼不动；要进一步分离需侧倾倒出或高频点抖，继续加大平移幅度会把湿团连同干壳一起送出铲唇。
+- **IK 说明**：run 侧 SHAKE 段 grasp_err max ~45 mm / mean ~38-39 mm——warm-start 连续 IK 的每步收敛进度瓶颈（SHAKE 段 DQ_MAX 已放宽到 0.06 rad/步也不变，非限幅问题），follower 是无碰撞运动学重放、**物理零影响**（铲为 SDF 权威运动）；**渲染侧 re-drive 自带漂移恢复**（超 2 mm 放宽重试 + 全重启），视频里手臂跟踪恢复到 max ~19 mm / mean ~1.7 mm。
+- 探针全数据见仓库外 `experiments/shake_probe/`（RESULT_SHAKE.md 两轮对照 + RESULT_SHAKE_ST10.md ×10 粘力复测）。
+
 两个易漏点：
 
-- `DROPLET_RADIUS` 由渲染脚本从 meta.json 的 `droplet_radius` 字段读取（粗沙档起 sim 写入；旧记录无该字段时回退 0.016）；`grid_res`（渲染端 :285）与 `PARTICLE_RADIUS`（:58）仍是**硬编码镜像**，与 sim 侧同步改。渲染脚本另有 `n_particles == meta n_water` 断言兜底，不一致会在渲染启动时被拦下。
-- 夹爪常量 `FINGER_GRIP` / `HANDLE_OFFSET_LOCAL` / `HANDLE_ANGLE`（约 :180–192）：改动后必须先过 `experiments/phase9_gripcheck.py`（仓库外，import 同一份常量对 6 个记录位姿做 IK + 特写渲染，抽帧确认两指捏在铲柄杆上）再上 full——历史上正是 blade→handle 偏移错导致两指捏空。
+- `DROPLET_RADIUS` 由渲染脚本从 meta.json 的 `droplet_radius` 字段读取（粗沙档起 sim 写入；旧记录无该字段时回退 0.016）；`grid_res`（渲染端 :286）与 `PARTICLE_RADIUS`（:58）仍是**硬编码镜像**，与 sim 侧同步改。渲染脚本另有 `n_particles == meta n_water` 断言兜底，不一致会在渲染启动时被拦下。
+- 夹爪常量 `FINGER_GRIP` / `HANDLE_OFFSET_LOCAL` / `HANDLE_ANGLE`（约 :216–234）：改动后必须先过 `experiments/phase9_gripcheck.py`（仓库外，import 同一份常量对 6 个记录位姿做 IK + 特写渲染，抽帧确认两指捏在铲柄杆上）再上 full——历史上正是 blade→handle 偏移错导致两指捏空。
 
 ### C++ 对齐锁定项（勿动）
 
@@ -139,7 +158,7 @@ conda run -n genesis-sandwater --no-capture-output python franka_shovel_deepbed_
 
 - DEM 子步长公式 `ddt = radius·π·√(DEMDensity/max_Young)/2`，及其速度自适应子循环 `ddt = min(2r/(maxVel+√(9.8·r·2)), ddt)`；`SAFETY`（`ddt_safety`）只整体缩放该 ddt——1.0 即公式原值，0.5 为 Genesis 侧额外保守裕度（公式本身两档一致）；
 - 接触力模型：线性弹性法向力 `min(K_norm)·penetration·n`、速度相关切向力 `-min(K_tang)·v_tangential`、库仑摩擦限幅 `|shear| ≤ |normal|·tan(FricAngle)`，其中 `K_norm = Young·radius`、`K_tang = K_norm·Poisson`；
-- `poisson_ratio` 保持库默认 0.3（`franka_shovel_deepbed.py` :135 注释明确 never touched）；
+- `poisson_ratio` 保持库默认 0.3（`franka_shovel_deepbed.py` :150 注释明确 never touched）；
 - **`YOUNG`（`young_modulus`）挡位与 C++ 对齐口径**：存档档 1e6 = C++ 参考值（对齐锚点）；软档 1e5 为授权偏差（10 倍软化，探针留档 `experiments/e1e5_gear_verify/`）。接触力与子步公式本身两档逐字一致，只是 E 取值不同——软档下所有含 E 的量（K_norm、ddt、wincombo 窗口刚度）同比例缩放；
 - 初始采样间距 ~2.001×radius（防初始重叠爆炸）。
 
@@ -151,21 +170,22 @@ conda run -n genesis-sandwater --no-capture-output python franka_shovel_deepbed_
 
 ## 常见坑
 
-1. **改参数先 smoke**——full 默认软档组合（young 1e5 + safety 1.0）约 10 分钟（存档组合 1e6 + 0.5 约 55 分钟）；smoke 约 4 分钟即可暴露资产缺失、建床、IK 大部分问题。
+1. **改参数先 smoke**——full 默认组合（young 1e5 + safety 1.0 + shake g2）约 11 分钟（存档组合 1e6 + 0.5 约 55 分钟）；smoke 约 4 分钟即可暴露资产缺失、建床、IK 大部分问题。
 2. **smoke 不能渲染**：smoke 提前退出、不写 meta.json，渲染脚本启动即读 meta.json 会直接报错。渲染验证只对 full 记录有效。
-3. **DROPLET_RADIUS 两文件硬编码须同步**（sim :139 与 render 约 :344，见上）。
+3. **DROPLET_RADIUS 两文件硬编码须同步**（sim :154 与 render 约 :350，见上）。
 4. **夹爪常量改动必须过 `experiments/phase9_gripcheck.py`** 再上 full。
 5. **同一块 GPU 不要并行跑两个本目录脚本**（含渲染）——双进程抢 GPU 会导致 CUDA 崩溃。
-6. **不带 tag 重跑 full 会清掉旧记录**：sim 在记录开始前自动删除输出目录下全部旧 `frame_*.npz`（:383–388）；要留档先给旧目录换 tag 或备份。
+6. **不带 tag 重跑 full 会清掉旧记录**：sim 在记录开始前自动删除输出目录下全部旧 `frame_*.npz`（:455 附近）；要留档先给旧目录换 tag 或备份。
 7. **sim 与 render 的 tag 必须一致**（默认都为空 tag），否则渲染找不到记录目录。
 
 ## 性能与资源
 
-**A4 吸收档 + safety / young 双挡位（2026-10-11 实测）**：吸收三旋钮与挡位无关——grid_res 64 + 3.125 mm 沙粒 + max_ratio 0.5 / viscosity 1.0 / droplet r 0.020 → n_sand 47 543（res128 的 1/8）、n_water 1408；B 吸收段自然判停（1e6+0.5 档 111 步、1e6+1.0 档 107 步、1e5+1.0 档 154 步）。**三组合并列**（E 指 young 档）：
+**A4 吸收档 + safety / young / shake 三挡位（2026-10-11/13 实测）**：吸收三旋钮与挡位无关——grid_res 64 + 3.125 mm 沙粒 + max_ratio 0.5 / viscosity 1.0 / droplet r 0.020 → n_sand 47 543（res128 的 1/8）、n_water 1408；B 吸收段自然判停（1e6+0.5 档 111 步、1e6+1.0 档 107 步、1e5+1.0 档 154 步）。抖铲相位（g2）在抬升与停驻之间加 120 步（每步与全流程同速），且带每 10 步一次的铲内 census 插桩（开销可忽略）。**组合并列**（E 指 young 档；全量总步数含 120 步抖铲，off 挡见括号）：
 
-- **默认软档组合 1e5 + 1.0**：全量 **1159 步 / 9.65 min / 中位 0.460 s/步**（子步/控制步 680 = 2148/√10 精确），零 NaN 无 popcorn；**湿粒留存 299/299 = 100%**；其余物理（1e6+0.5 存档口径为基准）：S1 −13.8 mm（软 10 倍 + 大子步双压实）、渗透 0.0242 m（−23%）、湿斑直径 0.0649 m、铲内总装载 583 粒、铲尖末 −4.1 mm 贴底（S2 锚定几何连带）。
-- **1e6 + 1.0（快档 safety、存档 young）**：全量 **1110 步 / 25.8 min / 1.394 s/步**（中位 1.361），零 NaN 无 popcorn；湿粒留存 297/297 = **100%**；S1 −8.6 mm、渗透 0.0285 m（−9.5%）、湿斑直径 0.0623 m、铲内总装载 629 粒。
-- **存档组合 1e6 + 0.5**：全量 **1105 步 / 54.9 min / 2.98 s/步**，零 NaN；渗透 0.0315 m、湿斑直径 0.063 m、湿粒 297；铲载 686 粒、湿粒留存 297/297 = **100%**。A4 归档数字即此组合。
+- **默认组合 1e5 + 1.0 + shake g2**：全量 **1335 步 / 10.6 min**（633 s；off 挡 1159 步 / 9.65 min / 中位 0.460 s/步，子步/控制步 680 = 2148/√10 精确），零 NaN 无 popcorn；**抖铲干沙 -44.8%（279→154）、湿粒留存 300→299（hold 末稳定 299/299）**；其余物理（1e6+0.5 存档口径为基准）：S1 −13.8 mm（软 10 倍 + 大子步双压实）、渗透 0.0242 m（−23%）、湿斑直径 0.0649 m、铲尖末 −4.1 mm 贴底（S2 锚定几何连带）。
+- **1e6 + 1.0（快档 safety、存档 young）**：全量 **1110 步 / 25.8 min / 1.394 s/步**（中位 1.361；未跑抖铲），零 NaN 无 popcorn；湿粒留存 297/297 = **100%**；S1 −8.6 mm、渗透 0.0285 m（−9.5%）、湿斑直径 0.0623 m、铲内总装载 629 粒。
+- **存档组合 1e6 + 0.5**：全量 **1105 步 / 54.9 min / 2.98 s/步**（未跑抖铲），零 NaN；渗透 0.0315 m、湿斑直径 0.063 m、湿粒 297；铲载 686 粒、湿粒留存 297/297 = **100%**。A4 归档数字即此组合。
+- **×10 粘力组合 1e5 + 0.5 + ST0.2 + shake g2**（授权偏差，2026-10-13）：全量 1309 步 / 19.5 min（0.90 s/步），抖铲干沙 -37.6%、湿粒 100% 留存；全数据见仓库外 `experiments/shake_probe/RESULT_SHAKE_ST10.md`。
 
 **不同挡位组合的轨迹自沉降段即分岔（颗粒级不可比、不可逐帧混剪）**：safety 切换只改数值积分精度，young 切换改接触刚度（物理常数）；探针全数据见仓库外 `experiments/e1e5_gear_verify/RESULT_E1E5.md` 与 `experiments/safety10_probe/RESULT_SAFETY10.md`。
 
@@ -174,10 +194,10 @@ conda run -n genesis-sandwater --no-capture-output python franka_shovel_deepbed_
 | 项目 | 数值 |
 |---|---|
 | smoke | 约 3-4 分钟（build ~100 s 热缓存 + 30 步沉降 ~0.5 s/步 + 1 次 IK） |
-| full（默认软档 young 1e5 + safety 1.0） | 约 10 分钟（1159 步 579 s = 0.500 s/步均值、中位 0.460，零 NaN） |
+| full（默认 young 1e5 + safety 1.0 + shake g2） | 约 11 分钟（1335 步 633 s = 10.6 min，零 NaN；off 挡 1159 步 579 s = 9.65 min） |
 | full（young 1e6 + safety 1.0） | 约 26 分钟（1110 步 1548 s = 1.394 s/步，零 NaN） |
 | full（存档组合 1e6 + 0.5） | 约 55 分钟（1105 步 3291 s = 2.98 s/步，零 NaN；A4 归档数字） |
-| 渲染 | 约 5-10 分钟（全量帧回放 + 补帧 + ffmpeg：软档成片 1159 帧 = 19.32 s 按 1 帧=1 步推算、快档 1110 帧 = 18.50 s、A4 档 1105 帧 = 18.42 s；软档渲染墙钟未实测，同量级 e10x 软沙渲染 753 帧 3.4 min） |
+| 渲染 | 约 5-10 分钟（全量帧回放 + 补帧 + ffmpeg：默认档含抖铲成片 1335 帧 = 22.25 s 按 1 帧=1 步推算、off 挡软档 1159 帧 = 19.32 s、快档 1110 帧 = 18.50 s、A4 档 1105 帧 = 18.42 s；软档渲染墙钟未实测，同量级 e10x 软沙渲染 753 帧 3.4 min） |
 | 显存 | 约 3.1-3.9 GB（RTX 4060 8GB 实测：软档 3146 MB、A4 档 ~3.9 GB） |
 
 visc4 对照档（旧，2026-10-10）：VISCOSITY 4.0 + droplet r 0.016 → n_water 540、2.66 s/步、全量 1696 步 75.1 min（吸水 699 步顶满 700 cap）；旧版视频见 `videos/phase9_deepbed_full_visc4.mp4`。

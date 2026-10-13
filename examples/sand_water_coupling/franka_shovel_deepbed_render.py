@@ -6,7 +6,7 @@ Franka re-driven every frame with the same continuous-IK follower as the run (fr
 blade pose, warm start + joint increment clamp) as in phase9_render_wet_native.py. Camera is the
 fixed close-up framing validated on phase9_probe_deepbed. Keyframes at the phase boundaries
 from meta.json: start / settle end / absorb end / insert start / insert end / rotate end /
-lift end / hold end.
+lift end / shake end (when the run has a shake phase) / hold end.
 
 Usage: python phase9_deepbed_full_render.py [tag] [max_frames]
 Output: experiments/videos/phase9_deepbed_full{tag}.mp4
@@ -252,10 +252,11 @@ def main():
     if MAX_FRAMES is not None:
         frame_files = frame_files[:MAX_FRAMES]
     n_frames = len(frame_files)
-    # keyframes: start / settle end / absorb end / insert start / insert end / rotate / lift / hold
+    # keyframes: start / settle end / absorb end / insert start / insert end / rotate / lift /
+    # shake end / hold ("shake_end" only present when the run has a shake phase)
     boundary_steps = [0]
     for key in ("settle_end", "absorb_end", "descend_end", "insert_end",
-                "rotate_end", "lift_end", "hold_end"):
+                "rotate_end", "lift_end", "shake_end", "hold_end"):
         if key in meta:
             s = meta[key]
             boundary_steps.append(s + 1 if key == "descend_end" else s)  # insert starts after descend
