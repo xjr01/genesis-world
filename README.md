@@ -1,285 +1,121 @@
-![Genesis World teaser](https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/HeroShot_Final.png)
+# Teapot Comparison
 
-# Genesis World
+Compare PBSTF, PBD, DFSPH, and WCSPH using the same teapot motion and initial particle state.
+Run the commands below from the repository root in an environment using this checkout of Genesis and a CUDA GPU.
+Ray-traced rendering additionally requires the LuisaRender backend and `pysplashsurf`.
 
-[![PyPI - Version](https://img.shields.io/pypi/v/genesis-world)](https://pypi.org/project/genesis-world/)
-[![PyPI Downloads](https://static.pepy.tech/badge/genesis-world)](https://pepy.tech/projects/genesis-world)
-[![Documentation](https://app.readthedocs.org/projects/genesis-world/badge/?version=latest)](https://genesis-world.readthedocs.io/en/latest/)
-[![GitHub Issues](https://img.shields.io/github/issues/Genesis-Embodied-AI/genesis-world)](https://github.com/Genesis-Embodied-AI/genesis-world/issues)
-[![GitHub Discussions](https://img.shields.io/github/discussions/Genesis-Embodied-AI/genesis-world)](https://github.com/Genesis-Embodied-AI/genesis-world/discussions)
+| Method | Script | Method selection |
+| --- | --- | --- |
+| PBSTF | `examples/teapot/pbstf_teapot.py` | - |
+| PBD | `examples/teapot/pbd_liquid_teapot.py` | - |
+| DFSPH | `examples/teapot/sph_teapot.py` | `--pressure-solver DFSPH` |
+| WCSPH | `examples/teapot/sph_teapot.py` | `--pressure-solver WCSPH` |
 
+`examples/teapot/render_teapot_comparison.py` runs the selected methods and assembles their comparison video.
+The workflow is to save simulation checkpoints once, then reuse them while adjusting rendering.
 
+## Simulation
 
-**Genesis World** is a simulation platform for physical AI developments. It combines a unified multi-physics engine, a photo-realistic renderer ([Nyx](https://github.com/Genesis-Embodied-AI/genesis-nyx)), and a cross-platform compiler ([Quadrants](https://github.com/Genesis-Embodied-AI/quadrants)) behind a Pythonic simulation interface. Genesis World is designed to scale from a single laptop kernel to datacenter-grade GPUs, while remaining easy to read, extend, and embed in research code.
+Run a single method with an interactive particle preview:
 
-It was previously named **Genesis** and started as an academic project since Dec 2024, and its development is now officially supported by [Genesis AI](https://www.genesis.ai/).
-
-For more technical details, refer to our [blog post](https://genesis.ai/blog/the-role-of-simulation-in-scalable-robotics-genesis-world-10-and-the-path-forward).
-
-## Table of Contents
-
-1. [What is Genesis World?](#what-is-genesis-world)
-2. [Catalogue](#catalogue)
-3. [Quick Installation](#quick-installation)
-4. [Docker](#docker)
-5. [Contribution](#contributing-to-genesis)
-6. [Support](#support)
-7. [License and Acknowledgments](#license-and-acknowledgments)
-8. [Citation](#citation)
-
-## What is Genesis World?
-
-![Genesis World stack](https://raw.githubusercontent.com/YilingQiao/Genesis/readme-assets/videos/diagram_white_lum.png)
-
-Genesis World occupies the four layers inside the dashed box. Above sits whatever you build (robotics environments, ML pipelines, data generation, agentic simulation); below sits whatever compute backend you have.
-
-- **Simulation Interface** — the user-facing API: asset parsing (URDF, MJCF, OBJ, GLB, USD, …), entity accessors, controllers, sensors, parallel and heterogeneous environments, and a built-in GUI.
-- **Physics** — a unified multi-physics engine integrating Rigid, FEM, MPM, Particle (PBD / SPH), [uipc](https://github.com/spiriMirror/libuipc), an explicit coupler, and SAP, all sharing one scene and one state.
-- **Render** — three rendering paths plug in as camera sensors: **[Nyx](https://github.com/Genesis-Embodied-AI/genesis-nyx)** (our in-house renderer designed for robotics), Luisa (DSL ray tracer), and Pyrender (rasterizer).
-- **Compiler** — **[Quadrants](https://github.com/Genesis-Embodied-AI/quadrants)** lowers Python kernel code to CUDA, AMD ROCm, Apple Metal, Vulkan, x86, and ARM64. It carries Genesis's autodiff, GPU graphs, and fastcache machinery.
-
-### Documentation
-- [Genesis World](https://genesis-world.readthedocs.io/en/latest/)
-- [Quadrants](https://genesis-embodied-ai.github.io/quadrants/index.html)
-- [Nyx](https://genesis-embodied-ai.github.io/genesis-nyx/latest/)
-
-## Catalogue
-
-This branch contains the shared teapot comparison scene in `examples/teapot/`.
-
-| Method | Entry point |
-|---|---|
-| PBSTF | [pbstf_teapot.py](./examples/teapot/pbstf_teapot.py) |
-| PBD | [pbd_liquid_teapot.py](./examples/teapot/pbd_liquid_teapot.py) |
-| DFSPH / WCSPH | [sph_teapot.py](./examples/teapot/sph_teapot.py) |
-
-All methods share the teapot geometry, prescribed motion, initial particle positions and velocities, camera, gravity,
-and floor at Y = -20. Solver-specific material parameters and substeps remain configurable in their entry points.
-The defaults use 188,716 particles, a particle diameter of 0.1, and a simulation time step of 0.01 seconds on CUDA.
-
-```bash
-python examples/teapot/pbstf_teapot.py --vis --preview particles
-python examples/teapot/pbd_liquid_teapot.py --vis --preview render
-python examples/teapot/sph_teapot.py --pressure-solver WCSPH --vis --preview render
-python examples/teapot/render_teapot_comparison.py --jobs 2
+```powershell
+python examples/teapot/pbstf_teapot.py --seconds 50 --vis
+python examples/teapot/pbd_liquid_teapot.py --seconds 50 --vis
+python examples/teapot/sph_teapot.py --pressure-solver DFSPH --seconds 50 --vis
+python examples/teapot/sph_teapot.py --pressure-solver WCSPH --seconds 50 --vis
 ```
 
-The rendered preview uses Genesis RayTracer with reconstructed water surfaces and requires the optional LuisaRender
-backend and `pysplashsurf`. Lighting and surface assets are downloaded into `out/teapot_assets/`, with their CC0 sources
-recorded in `sources.csv`. Warm indoor window lighting, a wooden tea table, and a matte reddish-brown clay teapot frame
-the water. A slatted tea tray, porcelain cups, a clay tea jar, and a celadon gaiwan sit on the table. The table stands
-behind the pouring teapot against two matte white walls, with subdued surface reflections. The tall walls fill the
-camera background, while the indoor environment supplies ambient lighting.
-An off-camera vertical light keeps thin streams visible; the water uses an index of refraction of 1.333 with a
-subtle warm transmission tint.
-The comparison runner saves four method videos, initial and final particle states, run
-settings, preview images, and `out/teapot_comparison/teapot_comparison.mp4`. Its defaults cover 32 simulated seconds at
-2x playback, 25 frames per second, and 32 samples per pixel. Use `--jobs 1` to reduce peak GPU memory, or
-`--compose-only` to combine existing recordings after verifying their initial states match exactly.
-Checkpoint replay uses each method's available frames. In the comparison video, a shorter recording holds its last
-frame with its stopping time labeled until the longest recording ends.
+Omit `--vis` to run headlessly. Add `--record -o out/teapot_render/particles` to save a particle video.
 
-Save simulation checkpoints once, then render them with the current camera, lighting, materials, and sample count:
+To simulate all four methods and save checkpoints without rendering:
 
-```bash
-python examples/teapot/pbstf_teapot.py --seconds 32 --playback-speed 2 --save-checkpoints out/teapot_checkpoints
-python examples/teapot/pbstf_teapot.py --replay-checkpoints out/teapot_checkpoints --preview render --spp 64 -o out/teapot_rerender
-python examples/teapot/pbstf_teapot.py --replay-checkpoints out/teapot_checkpoints --replay-time 24 --preview render --spp 64 -o out/teapot_stills
+```powershell
+python examples/teapot/render_teapot_comparison.py --simulate-only --seconds 50 --fps 25 --playback-speed 1 --save-checkpoints out/teapot_checkpoints -o out/teapot_render
 ```
 
-Each method writes compressed particle positions, velocities, active flags, and teapot poses under `DIR/METHOD`,
-plus JSON metadata. The cache is for rendering replay. Saving uses an empty method directory and defaults to the video
-cadence (every eight steps with 2x playback at 25 fps); `--checkpoint-every 1` preserves finer motion at a higher disk
-cost. Replay skips physics and selects the closest saved frame at or before each requested time. Increasing the
-output frame rate repeats cached states. `--replay-time` saves one PNG. `--timings` writes stage timings to CSV and
-synchronizes GPU work for accurate measurement, reducing execution overlap.
+Each method writes `metadata.json` and `frame_XXXXXXXX.npz` under `out/teapot_checkpoints/METHOD/`.
+The frame number is the simulation step. With the default `dt = 0.01`, this command saves every four steps.
+Each method's checkpoint directory must be empty when saving; choose a new directory for a new simulation.
+If checkpoints already exist, proceed directly to rendering.
 
-The comparison runner accepts the same save/replay flags and a method selection:
+To save just one method, select it with `--methods PBSTF`, or use its script directly:
 
-```bash
-python examples/teapot/render_teapot_comparison.py --methods PBSTF PBD WCSPH --simulate-only --save-checkpoints out/teapot_comparison_cache
-python examples/teapot/render_teapot_comparison.py --methods PBSTF PBD WCSPH --replay-checkpoints out/teapot_comparison_cache --spp 64 -o out/teapot_comparison_rerender
+```powershell
+python examples/teapot/pbstf_teapot.py --seconds 50 --fps 25 --playback-speed 1 --save-checkpoints out/teapot_checkpoints -o out/teapot_render
+```
+
+DFSPH can become unstable and end early with an error. Previously saved frames remain available for rendering.
+
+## Rendering from checkpoints
+
+Replay restores saved particle states and teapot poses without advancing the simulation.
+Duration, frame rate, and playback speed come from the checkpoints unless overridden.
+The current camera, materials, and lights are applied during rendering.
+
+Render water surfaces with Genesis RayTracer and assemble the four-panel comparison:
+
+```powershell
+python examples/teapot/render_teapot_comparison.py --replay-checkpoints out/teapot_checkpoints --preview render --spp 128 -o out/teapot_render
+```
+
+Render the faster particle version:
+
+```powershell
 python examples/teapot/render_teapot_comparison.py --replay-checkpoints out/teapot_checkpoints --preview particles -o out/teapot_render
 ```
 
-`--preview particles` uses faster particle rendering with a translucent teapot. It saves method recordings under
-`DIR/particles/` and the grid video as `DIR/teapot_comparison_particles.mp4`, alongside the ray-traced version.
+| Output | Ray-traced water | Particles |
+| --- | --- | --- |
+| Comparison video | `out/teapot_render/teapot_comparison.mp4` | `out/teapot_render/teapot_comparison_particles.mp4` |
+| Method videos | `out/teapot_render/METHOD.mp4` | `out/teapot_render/particles/METHOD.mp4` |
+| Logs and run metadata | `out/teapot_render/` | `out/teapot_render/particles/` |
 
-`--simulate-only` saves the selected trajectories with rendering disabled. Non-finite particle states raise an error;
-the video encoder finalizes the available frames. A recording marked `unstable` is labeled accordingly during composition.
+Existing outputs with the same names are overwritten. The two rendering modes use separate output paths.
+The default panel order is PBSTF, PBD, DFSPH, WCSPH, read left to right and top to bottom.
+A shorter method recording holds its last frame, with its stopping time labeled, until the comparison ends.
 
-## Quick Installation
+Ray-traced rendering uses the clay teapot, tea table, white walls, and water materials in
+`examples/teapot/teapot_render.py`. Environment and texture assets are downloaded on first use into `out/teapot_assets/`.
 
-### Using pip
+To render only PBSTF as a video:
 
-Install **PyTorch** first following the [official instructions](https://pytorch.org/get-started/locally/).
-
-Then, install Genesis via PyPI:
-```bash
-pip install genesis-world  # Requires Python>=3.10,<3.14;
+```powershell
+python examples/teapot/pbstf_teapot.py --replay-checkpoints out/teapot_checkpoints --preview render --spp 128 -o out/teapot_render
 ```
 
-For the latest version to date, make sure that `pip` is up-to-date via `pip install --upgrade pip`, then run command:
-```bash
-pip install git+https://github.com/Genesis-Embodied-AI/genesis-world.git
-```
-Note that the package must still be updated manually to sync with main branch.
+To inspect one saved state while tuning materials and lighting:
 
-Users seeking to contribute are encouraged to install Genesis in editable mode. First, make sure that `genesis-world` has been uninstalled, then clone the repository and install locally:
-```bash
-git clone https://github.com/Genesis-Embodied-AI/genesis-world.git
-cd genesis-world
-pip install -e ".[dev]"
-```
-It is recommended to systematically execute `pip install -e ".[dev]"` after moving HEAD to make sure that all dependencies and entrypoints are up-to-date.
-
-### Optional extras
-
-| | |
-|---|---|
-| IPC solver (uipc backend) | `pip install pyuipc` *(Linux / Windows x86, NVIDIA GPU)* |
-| Nyx renderer | `pip install gs-nyx` — see [genesis-nyx](https://github.com/Genesis-Embodied-AI/genesis-nyx) |
-
-Quadrants is bundled with Genesis automatically; no extra install. The standalone wheel (`pip install quadrants`) is documented at [Quadrants](https://github.com/Genesis-Embodied-AI/quadrants) for users who want the compiler outside Genesis.
-
-### Using uv
-
-[uv](https://docs.astral.sh/uv/) is a fast Python package and project manager.
-
-**Install uv:**
-```bash
-# On macOS and Linux
-curl -LsSf https://astral.sh/uv/install.sh | sh
-
-# On Windows
-powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+```powershell
+python examples/teapot/pbstf_teapot.py --replay-checkpoints out/teapot_checkpoints --replay-time 3 --preview render --spp 32 -o out/teapot_stills
 ```
 
-**Quick start with uv:**
-```bash
-git clone https://github.com/Genesis-Embodied-AI/genesis-world.git
-cd genesis-world
-uv sync
+`--replay-time` is measured in simulation seconds. This example renders step 300 at the default time step and saves
+`out/teapot_stills/PBSTF_step_00000300.png`. If the requested time falls between checkpoints, the earlier frame is used.
+Use the PBD or SPH entry point from the table to render another method.
+
+## Compose existing videos
+
+To rebuild the comparison from existing method videos and their initial-state files:
+
+```powershell
+python examples/teapot/render_teapot_comparison.py --compose-only --seconds 50 --fps 25 --playback-speed 1 -o out/teapot_render
+python examples/teapot/render_teapot_comparison.py --compose-only --preview particles --seconds 50 --fps 25 --playback-speed 1 -o out/teapot_render
 ```
 
-Then install PyTorch for your platform:
+Match duration, frame rate, and playback speed to the recordings. These commands only assemble the video.
 
-```bash
-# NVIDIA GPU (CUDA 12.6 as an example)
-uv pip install torch --index-url https://download.pytorch.org/whl/cu126
+## Useful options
 
-# CPU only (Linux/Windows)
-uv pip install torch --index-url https://download.pytorch.org/whl/cpu
+| Option | Usage |
+| --- | --- |
+| `--seconds N` | Simulation time, or the replay interval from zero to N seconds. Single-method scripts also accept `--steps N`. |
+| `--fps N --playback-speed S` | Output frame rate and simulated seconds per video second. `--playback-speed 1` gives real-time playback. |
+| `--checkpoint-every N` | Save every N simulation steps. Smaller values preserve finer motion and use more disk space. |
+| `--spp N` | Ray-tracing samples per pixel. Higher values reduce noise and take longer; use 32 for drafts and 128 for final rendering. |
+| `--methods PBSTF PBD WCSPH` | Select methods and panel order in the comparison runner. The default includes all four. |
+| `--jobs N` | Concurrent methods in the comparison runner. Defaults to 1; higher values require more GPU memory. |
+| `--timings` | Write per-stage timing CSV files; GPU synchronization reduces execution overlap. |
 
-# Apple Silicon (Metal/MPS)
-uv pip install torch
-```
-
-Run an example:
-```bash
-uv run examples/teapot/pbstf_teapot.py --vis
-```
-
-## Docker
-
-If you want to use Genesis from Docker, you can first build the Docker image as:
-
-```bash
-docker build -t genesis -f docker/Dockerfile docker
-```
-
-Then you can run the examples inside the docker image (mounted to `/workspace/examples`):
-
-```bash
-xhost +local:root # Allow the container to access the display
-
-docker run --gpus all --rm -it \
--e DISPLAY=$DISPLAY \
--e LOCAL_USER_ID="$(id -u)" \
--v /dev/dri:/dev/dri \
--v /tmp/.X11-unix/:/tmp/.X11-unix \
--v $(pwd):/workspace \
---name genesis genesis:latest
-```
-
-### AMD users
-AMD users can use Genesis using the `docker/Dockerfile.amdgpu` file, which is built by running:
-```
-docker build -t genesis-amd -f docker/Dockerfile.amdgpu docker
-```
-
-and can then be used by running:
-
-```xhost +local:docker \
-docker run -it --network=host \
- --device=/dev/kfd \
- --device=/dev/dri \
- --group-add=video \
- --ipc=host \
- --cap-add=SYS_PTRACE \
- --security-opt seccomp=unconfined \
- --shm-size 8G \
- -v $PWD:/workspace \
- -e DISPLAY=$DISPLAY \
- genesis-amd
- ```
-
-The examples will be accessible from `/workspace/examples`. Note: AMD users should use the ROCm (HIP) backend. This means you will need to call `gs.init(backend=gs.amdgpu)` to initialise Genesis.
-
-## Contributing to Genesis
-
-The Genesis project is an open and collaborative effort. We welcome all forms of contributions from the community, including:
-
-- **Pull requests** for new features or bug fixes.
-- **Bug reports** through GitHub Issues.
-- **Suggestions** to improve Genesis's usability.
-
-Refer to our [contribution guide](https://github.com/Genesis-Embodied-AI/genesis-world/blob/main/.github/contributing/PULL_REQUESTS.md) for more details.
-
-## Support
-
-- Report bugs or request features via GitHub [Issues](https://github.com/Genesis-Embodied-AI/genesis-world/issues).
-- Join discussions or ask questions on GitHub [Discussions](https://github.com/Genesis-Embodied-AI/genesis-world/discussions).
-
-## License and Acknowledgments
-
-The Genesis source code is licensed under Apache 2.0.
-
-Genesis's development has been made possible thanks to these open-source projects:
-
-- [Taichi](https://github.com/taichi-dev/taichi): the original compiler that [Quadrants](https://github.com/Genesis-Embodied-AI/quadrants) forked from in June 2025. Kudos to the Taichi team for their technical support over the years.
-- [libuipc](https://github.com/spiriMirror/libuipc): IPC solver backend.
-- [FluidLab](https://github.com/zhouxian/FluidLab): Reference MPM solver implementation.
-- [SPH_Taichi](https://github.com/erizmr/SPH_Taichi): Reference SPH solver implementation.
-- [Ten Minute Physics](https://matthias-research.github.io/pages/tenMinutePhysics/index.html) and [PBF3D](https://github.com/WASD4959/PBF3D): Reference PBD solver implementations.
-- [MuJoCo](https://github.com/google-deepmind/mujoco): Reference for rigid body dynamics.
-- [libccd](https://github.com/danfis/libccd): Reference for collision detection.
-- [PyRender](https://github.com/mmatl/pyrender): Rasterization-based renderer.
-- [LuisaCompute](https://github.com/LuisaGroup/LuisaCompute) and [LuisaRender](https://github.com/LuisaGroup/LuisaRender): Ray-tracing DSL.
-- [Madrona](https://github.com/shacklettbp/madrona) and [Madrona-mjx](https://github.com/shacklettbp/madrona_mjx): Batch renderer backend
-
-## Citation
-
-If you use Genesis in your research, please consider citing:
-
-```bibtex
-@article{
-   genesis2026genesisworld,
-   author = {Genesis AI Team},
-   title = {The Role of Simulation in Scalable Robotics, Genesis World 1.0, and the Path Forward},
-   journal = {Genesis AI Blog},
-   month = {May},
-   year = {2026},
-   url = {https://www.genesis.ai/blog/the-role-of-simulation-in-scalable-robotics-genesis-world-10-and-the-path-forward},
-}
-```
-```bibtex
-@misc{
-  Genesis,
-  author = {Genesis Authors},
-  title = {Genesis: A Generative and Universal Physics Engine for Robotics and Beyond},
-  month = {December},
-  year = {2024},
-  url = {https://github.com/Genesis-Embodied-AI/genesis-world}
-}
-```
+Replay uses the saved states; increasing the output frame rate beyond the checkpoint cadence repeats states.
+For fresh runs, single-method scripts default to 100 simulated seconds at 1x playback; the comparison runner defaults
+to 32 seconds at 2x playback. Both default to 25 fps. The commands above set 50 seconds at 1x explicitly when saving.
