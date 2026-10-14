@@ -10,8 +10,13 @@ from genesis.utils.geom import SpatialHasher, qd_transform_by_quat_fast
 
 from .base_solver import Solver
 
-# capacity of the mesh-SDF obstacle's grid (allocated at build; ~33.5M cells = 134 MB f32)
+# capacity of the mesh-SDF obstacle's grid pool (allocated at build; ~33.5M cells = 134 MB f32),
+# shared by all slots via per-slot pool offsets
 SDFO_MAX_CELLS = 2**25
+# number of mesh-SDF obstacle slots (e.g. slot 0 = a static boundary mesh, slot 1 = a moving
+# tool mesh): every slot keeps its own pose/velocity/grid placement, and the contact kernel
+# resolves them sequentially like independent colliders
+SDFO_SLOTS = 2
 
 
 @qd.data_oriented
@@ -174,26 +179,35 @@ class DEMSolver(Solver):
         self.tilt_handle = qd.field(gs.qd_vec3, shape=(self._B,))
         self.tilt_enabled = qd.field(gs.qd_int, shape=(self._B,))
 
-        # optional moving mesh-SDF obstacle (a voxelized real asset, e.g. a litter scoop); see
-        # set_sdf_obstacle. Same kinematics as the tilt box; the SDF grid is shared across envs and
-        # expressed in the obstacle local frame (origin = grid min corner, numpy C-order (nx, ny, nz) flattening).
-        # sdfo_val is allocated at build with a fixed capacity: fields created after build are NOT
-        # visible to already-materialized kernels (a lazy replacement read garbage -> explosions).
-        self.sdfo_pos = qd.field(gs.qd_vec3, shape=(self._B,))
-        self.sdfo_vel = qd.field(gs.qd_vec3, shape=(self._B,))
-        self.sdfo_omega = qd.field(gs.qd_vec3, shape=(self._B,))
-        self.sdfo_quat = qd.field(gs.qd_vec4, shape=(self._B,))  # (w, x, y, z)
-        self.sdfo_enabled = qd.field(gs.qd_int, shape=(self._B,))
+        # optional moving mesh-SDF obstacles (voxelized real assets, e.g. a litter scoop; a
+        # static boundary mesh and a moving tool can be live together, one per slot); see
+        # set_sdf_obstacle. Same kinematics as the tilt box; each slot's SDF grid lives in the
+        # shared sdfo_val/sdfo_grad pool at its sdfo_offset and is expressed in the obstacle
+        # local frame (origin = grid min corner, numpy C-order (nx, ny, nz) flattening).
+        # sdfo_val is allocated at build with a fixed capacity: fields created after build are
+        # NOT visible to already-materialized kernels (a lazy replacement read garbage ->
+        # explosions).
+        self.sdfo_pos = qd.field(gs.qd_vec3, shape=(SDFO_SLOTS, self._B))
+        self.sdfo_vel = qd.field(gs.qd_vec3, shape=(SDFO_SLOTS, self._B))
+        self.sdfo_omega = qd.field(gs.qd_vec3, shape=(SDFO_SLOTS, self._B))
+        self.sdfo_quat = qd.field(gs.qd_vec4, shape=(SDFO_SLOTS, self._B))  # (w, x, y, z)
+        self.sdfo_enabled = qd.field(gs.qd_int, shape=(SDFO_SLOTS, self._B))
         self.sdfo_val = qd.field(gs.qd_float, shape=(SDFO_MAX_CELLS,))
         # per-node SDF gradient (numpy np.gradient), trilinearly interpolated for obstacle normals:
         # FD-differencing the trilinear value field is noisy at cell-boundary creases, which heats
         # the granular bed; the interpolated node gradient is smooth by construction
         self.sdfo_grad = qd.field(gs.qd_vec3, shape=(SDFO_MAX_CELLS,))
-        self.sdfo_dims = qd.field(gs.qd_int, shape=(3,))  # (nx, ny, nz)
-        self.sdfo_origin = qd.field(gs.qd_vec3, shape=(self._B,))  # grid min corner (local frame)
-        self.sdfo_cell = qd.field(gs.qd_vec3, shape=(self._B,))  # cell size (local frame)
-        self.sdfo_inv_cell = qd.field(gs.qd_vec3, shape=(self._B,))
-        self.sdfo_extent = qd.field(gs.qd_vec3, shape=(self._B,))  # dims * cell (local AABB size)
+        self.sdfo_dims = qd.field(gs.qd_int, shape=(SDFO_SLOTS, 3))  # (nx, ny, nz)
+        self.sdfo_origin = qd.field(gs.qd_vec3, shape=(SDFO_SLOTS, self._B))  # grid min corner (local frame)
+        self.sdfo_cell = qd.field(gs.qd_vec3, shape=(SDFO_SLOTS, self._B))  # cell size (local frame)
+        self.sdfo_inv_cell = qd.field(gs.qd_vec3, shape=(SDFO_SLOTS, self._B))
+        self.sdfo_extent = qd.field(gs.qd_vec3, shape=(SDFO_SLOTS, self._B))  # dims * cell (local AABB size)
+        # pool start index of each slot's grid inside sdfo_val/sdfo_grad
+        self.sdfo_offset = qd.field(gs.qd_int, shape=(SDFO_SLOTS,))
+        # python-side pool allocator: reserved cell count and pool start index per slot (a
+        # slot's replacement grid must fit its reservation)
+        self._sdfo_reserved = [0] * SDFO_SLOTS
+        self._sdfo_offset = [0] * SDFO_SLOTS
 
     @property
     def is_active(self):
@@ -387,10 +401,20 @@ class DEMSolver(Solver):
 
     @gs.assert_built
     def set_sdf_obstacle(
-        self, sdf_val, dims, origin, cell_size, pos, quat=(1.0, 0.0, 0.0, 0.0), vel=(0.0, 0.0, 0.0), sdf_grad=None
+        self,
+        sdf_val,
+        dims,
+        origin,
+        cell_size,
+        pos,
+        quat=(1.0, 0.0, 0.0, 0.0),
+        vel=(0.0, 0.0, 0.0),
+        sdf_grad=None,
+        slot=0,
     ):
         """
-        Place (or replace) a mesh-SDF obstacle (a voxelized real asset) and enable it.
+        Place (or replace) a mesh-SDF obstacle (a voxelized real asset) in the given slot and
+        enable that slot.
 
         Same motion model as the tilt box obstacle: the position/orientation are advanced internally from
         the velocity setpoints at every DEM sub-substep (see set_sdf_obstacle_vel). Grains overlapping the
@@ -417,11 +441,26 @@ class DEMSolver(Solver):
             kernel. Smooth across cell boundaries, unlike finite-differencing the value field in the
             kernel (the trilinear value field has creases at cell faces, and FD normals there inject
             tangential noise that heats the grain bed). If None, computed here with np.gradient.
+        slot : int, optional
+            Obstacle slot in [0, SDFO_SLOTS). A slot's first placement reserves its pool region for
+            the slot's lifetime and later replacements must fit it; distinct slots can be live
+            simultaneously (e.g. a static boundary mesh and a moving tool mesh).
         """
+        assert 0 <= slot < SDFO_SLOTS, f"slot {slot} outside [0, {SDFO_SLOTS})"
         val = np.asarray(sdf_val, dtype=gs.np_float).reshape(-1)
         dims_np = np.asarray(dims, dtype=gs.np_int)
         assert val.size == int(np.prod(dims_np)), f"sdf_val size {val.size} != dims {dims_np}"
-        assert val.size <= SDFO_MAX_CELLS, f"sdf_val size {val.size} exceeds capacity {SDFO_MAX_CELLS}"
+        if self._sdfo_reserved[slot] == 0:
+            self._sdfo_reserved[slot] = val.size
+            assert sum(self._sdfo_reserved) <= SDFO_MAX_CELLS, (
+                f"sdfo pool overrun: reserved {self._sdfo_reserved} > capacity {SDFO_MAX_CELLS}"
+            )
+            self._sdfo_offset[slot] = sum(self._sdfo_reserved[:slot])
+        else:
+            assert val.size <= self._sdfo_reserved[slot], (
+                f"slot {slot} replacement size {val.size} exceeds its reserved {self._sdfo_reserved[slot]}"
+            )
+        offset = self._sdfo_offset[slot]
         cell_np = np.asarray(cell_size, dtype=gs.np_float)
         if sdf_grad is None:
             gx, gy, gz = np.gradient(sdf_val.reshape(tuple(dims_np)), cell_np[0], cell_np[1], cell_np[2])
@@ -429,132 +468,176 @@ class DEMSolver(Solver):
         else:
             grad = np.asarray(sdf_grad, dtype=gs.np_float)
         assert grad.shape == tuple(dims_np) + (3,), f"sdf_grad shape {grad.shape} != {tuple(dims_np) + (3,)}"
-        # write into the prefix of the build-time-allocated field (post-build field replacement is
-        # NOT visible to already-materialized kernels)
-        buf = np.zeros((SDFO_MAX_CELLS,), dtype=gs.np_float)
-        buf[: val.size] = val
+        # write into this slot's region of the build-time-allocated pool (post-build field
+        # replacement is NOT visible to already-materialized kernels); read-modify-write keeps
+        # the other slots' pool regions intact
+        buf = self.sdfo_val.to_numpy()
+        buf[offset:offset + val.size] = val
         self.sdfo_val.from_numpy(buf)
-        gbuf = np.zeros((SDFO_MAX_CELLS, 3), dtype=gs.np_float)
-        gbuf[: val.size] = grad.reshape(-1, 3)
+        gbuf = self.sdfo_grad.to_numpy()
+        gbuf[offset:offset + val.size] = grad.reshape(-1, 3)
         self.sdfo_grad.from_numpy(gbuf)
-        self.sdfo_dims.from_numpy(dims_np)
+        # per-slot metadata/pose writes touch this slot's slice only, so the other slots keep
+        # their grids and poses live
+        dims_all = self.sdfo_dims.to_numpy()
+        dims_all[slot] = dims_np
+        self.sdfo_dims.from_numpy(dims_all)
+        offset_all = self.sdfo_offset.to_numpy()
+        offset_all[slot] = offset
+        self.sdfo_offset.from_numpy(offset_all)
         origin_np = np.asarray(origin, dtype=gs.np_float)
-        self.sdfo_cell.from_numpy(np.tile(cell_np, (self._B, 1)))
-        self.sdfo_inv_cell.from_numpy(np.tile(1.0 / cell_np, (self._B, 1)))
-        self.sdfo_origin.from_numpy(np.tile(origin_np, (self._B, 1)))
-        self.sdfo_extent.from_numpy(np.tile(cell_np * dims_np.astype(gs.np_float), (self._B, 1)))
         quat_np = np.asarray(quat, dtype=gs.np_float)
         quat_np = quat_np / np.linalg.norm(quat_np)
-        self.sdfo_quat.from_numpy(np.tile(quat_np, (self._B, 1)))
-        self.sdfo_pos.from_numpy(np.tile(np.asarray(pos, dtype=gs.np_float), (self._B, 1)))
-        self.sdfo_vel.from_numpy(np.tile(np.asarray(vel, dtype=gs.np_float), (self._B, 1)))
-        self.sdfo_omega.from_numpy(np.zeros((self._B, 3), dtype=gs.np_float))
-        self.sdfo_enabled.from_numpy(np.ones((self._B,), dtype=gs.np_int))
+        pos_np = np.asarray(pos, dtype=gs.np_float)
+        vel_np = np.asarray(vel, dtype=gs.np_float)
+        cell_all = self.sdfo_cell.to_numpy()
+        cell_all[slot] = cell_np
+        self.sdfo_cell.from_numpy(cell_all)
+        inv_all = self.sdfo_inv_cell.to_numpy()
+        inv_all[slot] = 1.0 / cell_np
+        self.sdfo_inv_cell.from_numpy(inv_all)
+        origin_all = self.sdfo_origin.to_numpy()
+        origin_all[slot] = origin_np
+        self.sdfo_origin.from_numpy(origin_all)
+        extent_all = self.sdfo_extent.to_numpy()
+        extent_all[slot] = cell_np * dims_np.astype(gs.np_float)
+        self.sdfo_extent.from_numpy(extent_all)
+        quat_all = self.sdfo_quat.to_numpy()
+        quat_all[slot] = quat_np
+        self.sdfo_quat.from_numpy(quat_all)
+        pos_all = self.sdfo_pos.to_numpy()
+        pos_all[slot] = pos_np
+        self.sdfo_pos.from_numpy(pos_all)
+        vel_all = self.sdfo_vel.to_numpy()
+        vel_all[slot] = vel_np
+        self.sdfo_vel.from_numpy(vel_all)
+        omega_all = self.sdfo_omega.to_numpy()
+        omega_all[slot] = 0.0
+        self.sdfo_omega.from_numpy(omega_all)
+        enabled_all = self.sdfo_enabled.to_numpy()
+        enabled_all[slot] = 1
+        self.sdfo_enabled.from_numpy(enabled_all)
         self._kernel_init_delete_sdfo()
 
     @qd.kernel
     def _kernel_init_delete_sdfo(self):
-        # C++ Collider::InitDelete, same as _kernel_init_delete_tilt_box
+        # C++ Collider::InitDelete, same as _kernel_init_delete_tilt_box; a grain inside ANY
+        # live slot's solid is removed
         for i_p, i_b in qd.ndrange(self._n_particles, self._B):
             if self.particles[i_p, i_b].active:
-                if self._func_sdfo_sdf(self.particles[i_p, i_b].pos, i_b) < 0.0:
-                    self.particles[i_p, i_b].active = False
+                for i_s in qd.static(range(SDFO_SLOTS)):
+                    if self.sdfo_enabled[i_s, i_b] == 1:
+                        if self._func_sdfo_sdf(self.particles[i_p, i_b].pos, i_b, i_s) < 0.0:
+                            self.particles[i_p, i_b].active = False
 
     @gs.assert_built
-    def set_sdf_obstacle_vel(self, vel, omega=(0.0, 0.0, 0.0)):
+    def set_sdf_obstacle_vel(self, vel, omega=(0.0, 0.0, 0.0), slot=0):
         """
-        Set the velocity of the mesh-SDF obstacle. Its position and orientation are advanced internally
-        every DEM sub-substep. `omega` is in the world frame (rotation about the obstacle center).
+        Set the velocity of the given slot's mesh-SDF obstacle. Its position and orientation are
+        advanced internally every DEM sub-substep. `omega` is in the world frame (rotation about
+        the obstacle center).
         """
-        self.sdfo_vel.from_numpy(np.tile(np.asarray(vel, dtype=gs.np_float), (self._B, 1)))
-        self.sdfo_omega.from_numpy(np.tile(np.asarray(omega, dtype=gs.np_float), (self._B, 1)))
+        vel_all = self.sdfo_vel.to_numpy()
+        vel_all[slot] = np.asarray(vel, dtype=gs.np_float)
+        self.sdfo_vel.from_numpy(vel_all)
+        omega_all = self.sdfo_omega.to_numpy()
+        omega_all[slot] = np.asarray(omega, dtype=gs.np_float)
+        self.sdfo_omega.from_numpy(omega_all)
 
     @gs.assert_built
-    def get_sdf_obstacle_pos(self):
+    def get_sdf_obstacle_pos(self, slot=0):
         """
-        Current world position of the mesh-SDF obstacle's local-frame origin (per env, shape (n_envs, 3)).
+        Current world position of the given slot's mesh-SDF obstacle local-frame origin (per env,
+        shape (n_envs, 3)).
         """
-        return self.sdfo_pos.to_numpy()
+        return self.sdfo_pos.to_numpy()[slot]
 
     @gs.assert_built
-    def get_sdf_obstacle_quat(self):
+    def get_sdf_obstacle_quat(self, slot=0):
         """
-        Current orientation of the mesh-SDF obstacle as a quaternion (w, x, y, z) (per env, shape (n_envs, 4)).
+        Current orientation of the given slot's mesh-SDF obstacle as a quaternion (w, x, y, z)
+        (per env, shape (n_envs, 4)).
         """
-        return self.sdfo_quat.to_numpy()
+        return self.sdfo_quat.to_numpy()[slot]
 
     @gs.assert_built
-    def query_sdf_obstacle(self, points):
+    def query_sdf_obstacle(self, points, slot=0):
         """
-        Debug/verification helper: evaluate the mesh-SDF obstacle's signed distance at the given world
-        points. Returns an array of shape (n_points,) with NaN where the obstacle is disabled.
+        Debug/verification helper: evaluate the given slot's mesh-SDF obstacle signed distance at
+        the given world points. Returns an array of shape (n_points,) with NaN where the obstacle
+        is disabled.
         """
         pts = np.asarray(points, dtype=gs.np_float).reshape(-1, 3)
         out = np.full(len(pts), np.nan, dtype=gs.np_float)
-        self._kernel_query_sdfo(pts, out)
+        self._kernel_query_sdfo(pts, out, slot)
         return out
 
-    def query_sdf_obstacle_normal(self, points):
+    def query_sdf_obstacle_normal(self, points, slot=0):
         """
-        Debug/verification helper: evaluate the mesh-SDF obstacle's outward normal (trilinear
-        interpolation of the per-node SDF gradient) at the given world points. Returns an array
-        of shape (n_points, 3) with NaN where the obstacle is disabled.
+        Debug/verification helper: evaluate the given slot's mesh-SDF obstacle outward normal
+        (trilinear interpolation of the per-node SDF gradient) at the given world points. Returns
+        an array of shape (n_points, 3) with NaN where the obstacle is disabled.
         """
         pts = np.asarray(points, dtype=gs.np_float).reshape(-1, 3)
         out = np.full((len(pts), 3), np.nan, dtype=gs.np_float)
-        self._kernel_query_sdfo_normal(pts, out)
+        self._kernel_query_sdfo_normal(pts, out, slot)
         return out
 
     @qd.kernel
-    def _kernel_query_sdfo_normal(self, pts: qd.types.ndarray(), out: qd.types.ndarray()):
+    def _kernel_query_sdfo_normal(self, pts: qd.types.ndarray(), out: qd.types.ndarray(), slot: qd.i32):
         for i in range(pts.shape[0]):
             p = qd.Vector([pts[i, 0], pts[i, 1], pts[i, 2]])
-            if self.sdfo_enabled[0] == 1:
-                n = self._func_sdfo_normal(p, 0)
+            if self.sdfo_enabled[slot, 0] == 1:
+                n = self._func_sdfo_normal(p, 0, slot)
                 for a in qd.static(range(3)):
                     out[i, a] = n[a]
 
     @qd.kernel
-    def _kernel_query_sdfo(self, pts: qd.types.ndarray(), out: qd.types.ndarray()):
+    def _kernel_query_sdfo(self, pts: qd.types.ndarray(), out: qd.types.ndarray(), slot: qd.i32):
         for i in range(pts.shape[0]):
             p = qd.Vector([pts[i, 0], pts[i, 1], pts[i, 2]])
-            if self.sdfo_enabled[0] == 1:
-                out[i] = self._func_sdfo_sdf(p, 0)
+            if self.sdfo_enabled[slot, 0] == 1:
+                out[i] = self._func_sdfo_sdf(p, 0, slot)
 
     @qd.kernel
-    def _kernel_query_sdfo_debug(self, pts: qd.types.ndarray(), out: qd.types.ndarray()):
+    def _kernel_query_sdfo_debug(self, pts: qd.types.ndarray(), out: qd.types.ndarray(), slot: qd.i32):
         # debug: per point, dump [phi, gx, gy, gz, x0, y0, z0, corner000]
         for i in range(pts.shape[0]):
             p = qd.Vector([pts[i, 0], pts[i, 1], pts[i, 2]])
-            rel = p - self.sdfo_pos[0]
-            q = self.sdfo_quat[0]
+            rel = p - self.sdfo_pos[slot, 0]
+            q = self.sdfo_quat[slot, 0]
             q_conj = qd.Vector([q[0], -q[1], -q[2], -q[3]])
             pl = qd_transform_by_quat_fast(rel, q_conj)
             g = qd.Vector.zero(gs.qd_float, 3)
             for a in qd.static(range(3)):
-                ga = (pl[a] - self.sdfo_origin[0][a]) * self.sdfo_inv_cell[0][a] - 0.5
-                gmax = gs.qd_float(self.sdfo_dims[a] - 1) - 1e-4
+                ga = (pl[a] - self.sdfo_origin[slot, 0][a]) * self.sdfo_inv_cell[slot, 0][a] - 0.5
+                gmax = gs.qd_float(self.sdfo_dims[slot, a] - 1) - 1e-4
                 g[a] = min(max(ga, 0.0), gmax)
             x0 = int(qd.floor(g[0]))
             y0 = int(qd.floor(g[1]))
             z0 = int(qd.floor(g[2]))
-            out[i, 0] = self._func_sdfo_sdf(p, 0)
+            out[i, 0] = self._func_sdfo_sdf(p, 0, slot)
             out[i, 1] = g[0]
             out[i, 2] = g[1]
             out[i, 3] = g[2]
             out[i, 4] = gs.qd_float(x0)
             out[i, 5] = gs.qd_float(y0)
             out[i, 6] = gs.qd_float(z0)
-            out[i, 7] = self.sdfo_val[x0 * (self.sdfo_dims[1] * self.sdfo_dims[2]) + y0 * self.sdfo_dims[2] + z0]
-            out[i, 8] = self.sdfo_val[0]
-            out[i, 9] = gs.qd_float(self.sdfo_dims[0])
-            out[i, 10] = self.sdfo_origin[0][0]
-            out[i, 11] = self.sdfo_inv_cell[0][0]
+            out[i, 7] = self.sdfo_val[
+                self.sdfo_offset[slot]
+                + x0 * (self.sdfo_dims[slot, 1] * self.sdfo_dims[slot, 2])
+                + y0 * self.sdfo_dims[slot, 2]
+                + z0
+            ]
+            out[i, 8] = self.sdfo_val[self.sdfo_offset[slot]]
+            out[i, 9] = gs.qd_float(self.sdfo_dims[slot, 0])
+            out[i, 10] = self.sdfo_origin[slot, 0][0]
+            out[i, 11] = self.sdfo_inv_cell[slot, 0][0]
 
-    def query_sdf_obstacle_debug(self, points):
+    def query_sdf_obstacle_debug(self, points, slot=0):
         pts = np.asarray(points, dtype=gs.np_float).reshape(-1, 3)
         out = np.zeros((len(pts), 12), dtype=gs.np_float)
-        self._kernel_query_sdfo_debug(pts, out)
+        self._kernel_query_sdfo_debug(pts, out, slot)
         return out
 
     # ------------------------------------------------------------------------------------
@@ -831,19 +914,19 @@ class DEMSolver(Solver):
         return n
 
     @qd.func
-    def _func_sdfo_sdf(self, pos, i_b: qd.i32):
-        # signed distance to the mesh-SDF obstacle (negative inside): transform the query point into the
+    def _func_sdfo_sdf(self, pos, i_b: qd.i32, i_s: qd.i32):
+        # signed distance to the slot's mesh-SDF obstacle (negative inside): transform the query point into the
         # obstacle local frame with the conjugate quaternion, then trilinearly interpolate the voxelized
         # SDF grid; outside the grid the clamped boundary value plus the out-of-grid distance is returned
-        rel = pos - self.sdfo_pos[i_b]
-        q = self.sdfo_quat[i_b]
+        rel = pos - self.sdfo_pos[i_s, i_b]
+        q = self.sdfo_quat[i_s, i_b]
         q_conj = qd.Vector([q[0], -q[1], -q[2], -q[3]])
         p = qd_transform_by_quat_fast(rel, q_conj)
         g = qd.Vector.zero(gs.qd_float, 3)
         for a in qd.static(range(3)):
             # grid nodes sit at origin + (i + 0.5) * cell (cell-center sampling), hence the -0.5
-            ga = (p[a] - self.sdfo_origin[i_b][a]) * self.sdfo_inv_cell[i_b][a] - 0.5
-            gmax = gs.qd_float(self.sdfo_dims[a] - 1) - 1e-4
+            ga = (p[a] - self.sdfo_origin[i_s, i_b][a]) * self.sdfo_inv_cell[i_s, i_b][a] - 0.5
+            gmax = gs.qd_float(self.sdfo_dims[i_s, a] - 1) - 1e-4
             g[a] = min(max(ga, 0.0), gmax)
         x0 = int(qd.floor(g[0]))
         y0 = int(qd.floor(g[1]))
@@ -851,34 +934,36 @@ class DEMSolver(Solver):
         fx = g[0] - x0
         fy = g[1] - y0
         fz = g[2] - z0
-        nx = self.sdfo_dims[0]
-        ny = self.sdfo_dims[1]
-        nz = self.sdfo_dims[2]
+        nx = self.sdfo_dims[i_s, 0]
+        ny = self.sdfo_dims[i_s, 1]
+        nz = self.sdfo_dims[i_s, 2]
+        base = self.sdfo_offset[i_s]
         phi = gs.qd_float(0.0)
         for i, j, k in qd.static(qd.ndrange(2, 2, 2)):
             w = (fx if i == 1 else 1.0 - fx) * (fy if j == 1 else 1.0 - fy) * (fz if k == 1 else 1.0 - fz)
-            # numpy C-order (nx, ny, nz): x slowest, z fastest
-            idx = (x0 + i) * (ny * nz) + (y0 + j) * nz + (z0 + k)
+            # numpy C-order (nx, ny, nz): x slowest, z fastest; the slot's grid lives in the
+            # shared pool at its offset
+            idx = base + (x0 + i) * (ny * nz) + (y0 + j) * nz + (z0 + k)
             phi = phi + w * self.sdfo_val[idx]
         # out-of-grid extension (physical units); zero inside the grid
         d_phys = qd.Vector.zero(gs.qd_float, 3)
         for a in qd.static(range(3)):
-            ga = (p[a] - self.sdfo_origin[i_b][a]) * self.sdfo_inv_cell[i_b][a] - 0.5
-            d_phys[a] = (ga - g[a]) * self.sdfo_cell[i_b][a]
+            ga = (p[a] - self.sdfo_origin[i_s, i_b][a]) * self.sdfo_inv_cell[i_s, i_b][a] - 0.5
+            d_phys[a] = (ga - g[a]) * self.sdfo_cell[i_s, i_b][a]
         return phi + d_phys.norm()
 
     @qd.func
-    def _func_sdfo_normal(self, pos, i_b: qd.i32):
-        # outward normal of the mesh-SDF obstacle: trilinear interpolation of the per-node SDF
-        # gradient (smooth across cell boundaries, unlike FD of the value field)
-        rel = pos - self.sdfo_pos[i_b]
-        q = self.sdfo_quat[i_b]
+    def _func_sdfo_normal(self, pos, i_b: qd.i32, i_s: qd.i32):
+        # outward normal of the slot's mesh-SDF obstacle: trilinear interpolation of the per-node
+        # SDF gradient (smooth across cell boundaries, unlike FD of the value field)
+        rel = pos - self.sdfo_pos[i_s, i_b]
+        q = self.sdfo_quat[i_s, i_b]
         q_conj = qd.Vector([q[0], -q[1], -q[2], -q[3]])
         p = qd_transform_by_quat_fast(rel, q_conj)
         g = qd.Vector.zero(gs.qd_float, 3)
         for a in qd.static(range(3)):
-            ga = (p[a] - self.sdfo_origin[i_b][a]) * self.sdfo_inv_cell[i_b][a] - 0.5
-            gmax = gs.qd_float(self.sdfo_dims[a] - 1) - 1e-4
+            ga = (p[a] - self.sdfo_origin[i_s, i_b][a]) * self.sdfo_inv_cell[i_s, i_b][a] - 0.5
+            gmax = gs.qd_float(self.sdfo_dims[i_s, a] - 1) - 1e-4
             g[a] = min(max(ga, 0.0), gmax)
         x0 = int(qd.floor(g[0]))
         y0 = int(qd.floor(g[1]))
@@ -886,12 +971,13 @@ class DEMSolver(Solver):
         fx = g[0] - x0
         fy = g[1] - y0
         fz = g[2] - z0
-        ny = self.sdfo_dims[1]
-        nz = self.sdfo_dims[2]
+        ny = self.sdfo_dims[i_s, 1]
+        nz = self.sdfo_dims[i_s, 2]
+        base = self.sdfo_offset[i_s]
         n = qd.Vector.zero(gs.qd_float, 3)
         for i, j, k in qd.static(qd.ndrange(2, 2, 2)):
             w = (fx if i == 1 else 1.0 - fx) * (fy if j == 1 else 1.0 - fy) * (fz if k == 1 else 1.0 - fz)
-            idx = (x0 + i) * (ny * nz) + (y0 + j) * nz + (z0 + k)
+            idx = base + (x0 + i) * (ny * nz) + (y0 + j) * nz + (z0 + k)
             n = n + w * self.sdfo_grad[idx]
         norm = n.norm()
         if norm > gs.EPS:
@@ -1019,37 +1105,41 @@ class DEMSolver(Solver):
                             if vt_norm > gs.EPS:
                                 acc = acc + acc_n * tan_fric * dv_tangential / vt_norm
 
-                # moving mesh-SDF obstacle (same enforcement semantics as the tilt box; the obstacle
+                # moving mesh-SDF obstacles (same enforcement semantics as the tilt box; the obstacle
                 # velocity is evaluated at the contact point: v_col = v_center + omega x (pos - center)).
-                # A cheap local-frame AABB test gates the trilinear SDF query.
-                if self.sdfo_enabled[i_b] == 1:
-                    rel_m = pos - self.sdfo_pos[i_b]
-                    q_m = self.sdfo_quat[i_b]
-                    qc_m = qd.Vector([q_m[0], -q_m[1], -q_m[2], -q_m[3]])
-                    p_m = qd_transform_by_quat_fast(rel_m, qc_m)
-                    bmin = self.sdfo_origin[i_b]
-                    bmax = self.sdfo_origin[i_b] + self.sdfo_extent[i_b]
-                    qx = max(bmin[0] - p_m[0], p_m[0] - bmax[0])
-                    qy = max(bmin[1] - p_m[1], p_m[1] - bmax[1])
-                    qz = max(bmin[2] - p_m[2], p_m[2] - bmax[2])
-                    phi_bb = qd.Vector([max(qx, 0.0), max(qy, 0.0), max(qz, 0.0)]).norm()
-                    if phi_bb < 0.5 * particle_radius:
-                        phi_m = self._func_sdfo_sdf(pos, i_b)
-                        if phi_m < 0.5 * particle_radius:
-                            n_m = self._func_sdfo_normal(pos, i_b)
-                            v_col = self.sdfo_vel[i_b] + self.sdfo_omega[i_b].cross(pos - self.sdfo_pos[i_b])
-                            delta_vel = vel - v_col
-                            if phi_m < 0.0:
-                                pos = pos - n_m * phi_m
-                                dv_n = delta_vel.dot(n_m)
-                                if dv_n < 0.0:
-                                    vel = vel - 1.5 * dv_n * n_m
-                            acc_n = acc.dot(n_m)
-                            if acc_n < 0.0:
-                                dv_tangential = delta_vel - delta_vel.dot(n_m) * n_m
-                                vt_norm = dv_tangential.norm()
-                                if vt_norm > gs.EPS:
-                                    acc = acc + acc_n * tan_fric * dv_tangential / vt_norm
+                # A cheap local-frame AABB test gates the trilinear SDF query. Slots are resolved
+                # sequentially on the running pos/vel/acc, like independent colliders.
+                for i_s in qd.static(range(SDFO_SLOTS)):
+                    if self.sdfo_enabled[i_s, i_b] == 1:
+                        rel_m = pos - self.sdfo_pos[i_s, i_b]
+                        q_m = self.sdfo_quat[i_s, i_b]
+                        qc_m = qd.Vector([q_m[0], -q_m[1], -q_m[2], -q_m[3]])
+                        p_m = qd_transform_by_quat_fast(rel_m, qc_m)
+                        bmin = self.sdfo_origin[i_s, i_b]
+                        bmax = self.sdfo_origin[i_s, i_b] + self.sdfo_extent[i_s, i_b]
+                        qx = max(bmin[0] - p_m[0], p_m[0] - bmax[0])
+                        qy = max(bmin[1] - p_m[1], p_m[1] - bmax[1])
+                        qz = max(bmin[2] - p_m[2], p_m[2] - bmax[2])
+                        phi_bb = qd.Vector([max(qx, 0.0), max(qy, 0.0), max(qz, 0.0)]).norm()
+                        if phi_bb < 0.5 * particle_radius:
+                            phi_m = self._func_sdfo_sdf(pos, i_b, i_s)
+                            if phi_m < 0.5 * particle_radius:
+                                n_m = self._func_sdfo_normal(pos, i_b, i_s)
+                                v_col = self.sdfo_vel[i_s, i_b] + self.sdfo_omega[i_s, i_b].cross(
+                                    pos - self.sdfo_pos[i_s, i_b]
+                                )
+                                delta_vel = vel - v_col
+                                if phi_m < 0.0:
+                                    pos = pos - n_m * phi_m
+                                    dv_n = delta_vel.dot(n_m)
+                                    if dv_n < 0.0:
+                                        vel = vel - 1.5 * dv_n * n_m
+                                acc_n = acc.dot(n_m)
+                                if acc_n < 0.0:
+                                    dv_tangential = delta_vel - delta_vel.dot(n_m) * n_m
+                                    vt_norm = dv_tangential.norm()
+                                    if vt_norm > gs.EPS:
+                                        acc = acc + acc_n * tan_fric * dv_tangential / vt_norm
 
                 self.particles[i_p, i_b].pos = pos
                 self.particles[i_p, i_b].vel = vel
@@ -1079,22 +1169,23 @@ class DEMSolver(Solver):
                     )
                     q_new = q + 0.5 * dq * ddt
                     self.tilt_quat[i_b] = q_new / q_new.norm()
-            if self.sdfo_enabled[i_b] == 1:
-                # same kinematic integration as the tilt box
-                self.sdfo_pos[i_b] = self.sdfo_pos[i_b] + self.sdfo_vel[i_b] * ddt
-                om = self.sdfo_omega[i_b]
-                if om.norm_sqr() > 0.0:
-                    q = self.sdfo_quat[i_b]
-                    dq = qd.Vector(
-                        [
-                            -om[0] * q[1] - om[1] * q[2] - om[2] * q[3],
-                            om[0] * q[0] + om[1] * q[3] - om[2] * q[2],
-                            -om[0] * q[3] + om[1] * q[0] + om[2] * q[1],
-                            om[0] * q[2] - om[1] * q[1] + om[2] * q[0],
-                        ]
-                    )
-                    q_new = q + 0.5 * dq * ddt
-                    self.sdfo_quat[i_b] = q_new / q_new.norm()
+            for i_s in qd.static(range(SDFO_SLOTS)):
+                if self.sdfo_enabled[i_s, i_b] == 1:
+                    # same kinematic integration as the tilt box
+                    self.sdfo_pos[i_s, i_b] = self.sdfo_pos[i_s, i_b] + self.sdfo_vel[i_s, i_b] * ddt
+                    om = self.sdfo_omega[i_s, i_b]
+                    if om.norm_sqr() > 0.0:
+                        q = self.sdfo_quat[i_s, i_b]
+                        dq = qd.Vector(
+                            [
+                                -om[0] * q[1] - om[1] * q[2] - om[2] * q[3],
+                                om[0] * q[0] + om[1] * q[3] - om[2] * q[2],
+                                -om[0] * q[3] + om[1] * q[0] + om[2] * q[1],
+                                om[0] * q[2] - om[1] * q[1] + om[2] * q[0],
+                            ]
+                        )
+                        q_new = q + 0.5 * dq * ddt
+                        self.sdfo_quat[i_s, i_b] = q_new / q_new.norm()
 
     @qd.kernel
     def _kernel_integrate(self, f: qd.i32, ddt: qd.f32):
