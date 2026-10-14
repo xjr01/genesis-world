@@ -708,12 +708,12 @@ def build_scene(
             ),
             gs.options.PBSTFAbsorbentBoxStaticColliderOptions(
                 pos=SPONGE_START,
-                is_collider_adhesion_friction_enabled=True,
-                collider_adhesion_compliance=50.0,
-                collider_friction=0.5,
+                is_collider_adhesion_friction_enabled=False,
+                # collider_adhesion_compliance=50.0,
+                # collider_friction=0.5,
                 lower=(-0.5 * SPONGE_SIZE[0], 0.0, -0.5 * SPONGE_SIZE[2]),
                 upper=(0.5 * SPONGE_SIZE[0], SPONGE_SIZE[1], 0.5 * SPONGE_SIZE[2]),
-                absorption_rate=4000.0,
+                absorption_rate=400.0,
                 absorption_capacity_fraction=1.0,
                 pbd_entity_name="sponge",
             ),
@@ -742,7 +742,7 @@ def build_scene(
         pbstf_options=gs.options.PBSTFOptions(
             diffusion_coeff=0.001,
             particle_size=particle_size,
-            max_solver_iterations=20,
+            max_solver_iterations=10,
             topology_rebuild_interval=10,
             max_surface_neighbors=128,
             max_localmesh_neighbors=64,
@@ -811,7 +811,7 @@ def build_scene(
                 material=gs.materials.PBSTF.Liquid(
                     sampler="regular",
                     rho=1000.0,
-                    density_compliance=843750.0,
+                    density_compliance=375000.0,
                     surface_tension_compliance=1.0 / 225.0,
                     surface_distance_compliance=40.0,
                     interior_distance_compliance=180.0,
@@ -982,7 +982,7 @@ def build_scene(
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--scale", type=int, default=1500)
+    parser.add_argument("--scale", type=int, default=1000)
     parser.add_argument("--steps", type=int)
     parser.add_argument("--vis", dest="is_viewer_shown", action="store_true")
     parser.add_argument("--record", dest="is_recording", action="store_true")
