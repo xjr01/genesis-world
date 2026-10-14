@@ -967,7 +967,6 @@ def _kernel_assemble_surface_local_systems(
     spatial_hasher: qd.template(),
     static_colliders: _StaticColliderConfig,
 ):
-    surface_energy_scale = alpha * surface_tension
     for particle_idx, env_idx in qd.ndrange(n_particles, particles.shape[1]):
         if particles_status[particle_idx, env_idx].active and not particles_info[particle_idx, env_idx].is_fixed:
             force, hessian = _assemble_density_local_system(
@@ -1001,10 +1000,8 @@ def _kernel_assemble_surface_local_systems(
                     )
                     area_gradient += triangle_gradient
                     area_hessian += triangle_hessian
-                force -= surface_energy_scale * area_gradient
-                area_hessian_diag = _hessian_column_norms(area_hessian)
-                for axis in qd.static(range(3)):
-                    hessian[axis, axis] += surface_energy_scale * area_hessian_diag[axis]
+                force -= surface_tension * area_gradient
+                hessian += surface_tension * area_hessian
             particles[particle_idx, env_idx].local_force = force
             particles[particle_idx, env_idx].local_hessian = hessian
 

@@ -253,11 +253,11 @@ def build_scene(
 
 def main():
     parser = argparse.ArgumentParser(description="Implicit Position-Based Fluid examples")
-    parser.add_argument("--case", choices=CASES, default=CASE_DAM_BREAK)
-    parser.add_argument("--scale", type=int, default=None, help="Particle scale (radius = 1 / scale)")
-    parser.add_argument("--dt", type=float, default=None, help="Override the case's default time step")
-    parser.add_argument("--steps", type=int, default=None, help="Override the case's default simulation horizon")
-    parser.add_argument("--alpha", type=float, default=0.0, help="Shared inertia and surface-energy weight")
+    parser.add_argument("--case", choices=CASES, default=CASE_DOUBLE_DAM_BREAK)
+    parser.add_argument("--scale", type=int, default=48, help="Particle scale (radius = 1 / scale)")
+    parser.add_argument("--dt", type=float, default=1.0 / 240.0, help="Simulation time step")
+    parser.add_argument("--steps", type=int, default=360, help="Number of simulation steps")
+    parser.add_argument("--alpha", type=float, default=0.0, help="Inertia-energy weight")
     parser.add_argument(
         "--damping",
         dest="is_artificial_damping_enabled",
@@ -275,7 +275,7 @@ def main():
         "--surface-tension",
         type=float,
         default=0.0,
-        help="Surface-tension coefficient; effective area-energy weight is --alpha times this value",
+        help="Surface-tension coefficient used directly as the area-energy weight",
     )
     parser.add_argument("--iterations", type=int, default=10, help="Local Newton iterations per step")
     parser.add_argument("-v", "--vis", dest="show_viewer", action="store_true", default=False)
@@ -293,11 +293,11 @@ def main():
         help="Semi-transparently display the solid boundary particles; the box colliders are never shown",
     )
     args = parser.parse_args()
-    if args.scale is not None and args.scale <= 0:
+    if args.scale <= 0:
         parser.error("--scale must be positive")
-    if args.dt is not None and args.dt <= 0.0:
+    if args.dt <= 0.0:
         parser.error("--dt must be positive")
-    if args.steps is not None and args.steps < 0:
+    if args.steps < 0:
         parser.error("--steps must be non-negative")
     if args.alpha < 0.0:
         parser.error("--alpha must be non-negative")
@@ -323,12 +323,9 @@ def main():
     )
     if args.case in (CASE_DAM_BREAK, CASE_DOUBLE_DAM_BREAK):
         settings = None
-        steps = (360 if args.case == CASE_DOUBLE_DAM_BREAK else 240) if args.steps is None else args.steps
     else:
         settings = case_settings(args.case)
-        steps = settings.steps if args.steps is None else args.steps
-    if "PYTEST_VERSION" in os.environ:
-        steps = min(steps, 2)
+    steps = min(args.steps, 2) if "PYTEST_VERSION" in os.environ else args.steps
 
     emitter_settings = settings.emitter if settings is not None else None
     teapot_settings = settings.teapot if settings is not None else None

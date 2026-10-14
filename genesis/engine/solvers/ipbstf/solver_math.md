@@ -50,8 +50,8 @@ A_i(\boldsymbol x)=\frac12\sum_{k=0}^{K_i-1}
 $$
 
 这组以 $i$ 为中心的三角形近似自由表面在粒子 $i$ 附近的几何。求解器不维护全局 surface mesh，而是把全局
-表面能 $\alpha\gamma A(\boldsymbol x)$ 在每个局部系统中近似为
-$\alpha\gamma A_i(\boldsymbol x)$。
+表面能 $\gamma A(\boldsymbol x)$ 在每个局部系统中近似为
+$\gamma A_i(\boldsymbol x)$。
 
 对单个三角形，记
 
@@ -91,7 +91,7 @@ $$
 $$
 \boldsymbol x^{n+1}=\arg\min_{\boldsymbol x}
 \alpha\frac m{2h^2}\Vert\boldsymbol x-\boldsymbol y\Vert^2
-+\frac12\sum_{j=1}^N(C_j^\rho(\boldsymbol x))^2+\alpha\gamma A(\boldsymbol x),
++\frac12\sum_{j=1}^N(C_j^\rho(\boldsymbol x))^2+\gamma A(\boldsymbol x),
 $$
 
 其中
@@ -102,10 +102,10 @@ $\mathcal C_i$ 为所有依赖 $\boldsymbol x_i$ 的密度约束中心，则实�
 $$
 E_i(\boldsymbol x)=\alpha\frac m{2h^2}\Vert\boldsymbol x_i-\boldsymbol y_i\Vert^2
 +\frac12\sum_{j\in\mathcal C_i}(C_j^\rho(\boldsymbol x))^2
-+\alpha\gamma A_i(\boldsymbol x).
++\gamma A_i(\boldsymbol x).
 $$
 
-$\alpha$ 同时缩放惯性能量和表面积能量，因此 $\gamma$ 控制表面项相对于惯性项的强度，而密度能量保持原权重。
+$\alpha$ scales inertia, and $\gamma$ directly weights surface area. The density energy retains unit weight.
 
 表面项只包含当前粒子 $i$ 自己构建的 $A_i$。即使 $i$ 是邻居粒子 $j$ 的 local mesh 顶点，$A_j$ 也不进入
 粒子 $i$ 的局部目标。这个取舍避免了为每个粒子反向收集所有包含它的邻居 local mesh，并保持局部系统的构建
@@ -123,7 +123,7 @@ $$
 \boldsymbol f_i=-\alpha\frac m{h^2}(\boldsymbol x_i-\boldsymbol y_i)
 -\sum_{j\in\mathcal C_i}C_j^\rho(\boldsymbol x)
 \frac{\partial C_j^\rho(\boldsymbol x)}{\partial\boldsymbol x_i}
--\alpha\gamma\nabla_iA_i(\boldsymbol x).
+-\gamma\nabla_iA_i(\boldsymbol x).
 $$
 
 Newton 矩阵为
@@ -136,11 +136,11 @@ $$
 \left(\frac{\partial C_j^\rho}{\partial\boldsymbol x_i}\right)^\mathsf T
 +C_j^\rho\,\mathcal D\left(\frac{\partial^2C_j^\rho}{\partial\boldsymbol x_i^2}\right)
 \right]
-+\alpha\gamma\mathcal D\left(\nabla_i^2A_i\right),
++\gamma\nabla_i^2A_i,
 \end{aligned}
 $$
 
-其中 $\mathcal D$ 将矩阵每一列的二范数放到对应对角元素：
+其中 $\mathcal D$ 对密度约束的二阶项进行正定对角近似，将矩阵每一列的二范数放到对应对角元素：
 
 $$
 \mathcal D(\boldsymbol Q)=\operatorname{diag}
@@ -149,8 +149,8 @@ $$
 \Vert\boldsymbol Q_{:,2}\Vert_2\right).
 $$
 
-面积项先累加当前 one-ring 的精确三角形 Hessian，再进行一次 $\mathcal D$ 对角近似。面积梯度和 Hessian 都只对
-中心位置 $\boldsymbol x_i$ 求导，环上顶点在该局部系统中保持不变。
+面积项直接累加当前 one-ring 的精确三角形 Hessian 完整矩阵。面积梯度和 Hessian 都只对中心位置
+$\boldsymbol x_i$ 求导，环上顶点在该局部系统中保持不变。
 
 当 $\boldsymbol H_i$ 接近奇异时，直接求逆会放大浮点舍入误差。用
 `IPBSTFOptions.hessian_determinant_epsilon` 配置的阈值 $\varepsilon$ 保护局部求解：

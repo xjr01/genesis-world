@@ -848,9 +848,9 @@ class IPBSTFOptions(Options):
     at the cost of more neighbors and heavier local-system assembly than a smaller ratio. The hash-grid cell defaults
     to the support radius, the minimum that keeps every kernel neighbor inside the 3x3x3 cell stencil.
 
-    ``alpha`` scales inertia and surface energy together against the density energy. Larger values keep particles
-    closer to their unconstrained predictions and produce a softer density response while preserving surface tension
-    relative to inertia; smaller values enforce incompressibility more strongly at the cost of larger Newton updates.
+    ``alpha`` scales inertia against density and surface energy. Larger values keep particles closer to their
+    unconstrained predictions at the cost of a softer density response and weaker surface contraction; smaller values
+    strengthen both responses at the cost of larger Newton updates.
     ``is_artificial_damping_enabled`` removes excess kinetic energy from under-converged stiff solves so the fluid can
     settle, at the cost of higher per-step compute and less persistent small-scale motion.
     ``hessian_determinant_epsilon`` skips local updates with smaller Hessian determinants. Larger values reject more

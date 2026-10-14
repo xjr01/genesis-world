@@ -142,7 +142,7 @@ def test_surface_tension_minimizes_local_mesh_area(n_envs, show_viewer):
         show_viewer=show_viewer,
     )
     liquid_material = gs.materials.IPBSTF.Liquid(
-        surface_tension=1000.0,
+        surface_tension=10.0,
     )
     grid_coordinates = (-0.15, -0.05, 0.05, 0.15)
     droplet = scene.add_entity(
