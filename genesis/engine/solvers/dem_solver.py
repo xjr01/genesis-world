@@ -982,6 +982,9 @@ class DEMSolver(Solver):
         norm = n.norm()
         if norm > gs.EPS:
             n = n / norm
+        # the grid gradient lives in the obstacle local frame; rotate it back to world so the
+        # caller's position projection and relative-velocity decomposition act on one frame
+        n = qd_transform_by_quat_fast(n, q)
         return n
 
     @qd.kernel
