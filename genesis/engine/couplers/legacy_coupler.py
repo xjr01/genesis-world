@@ -99,6 +99,24 @@ class LegacyCoupler(RBC):
                     dtype=gs.qd_float,
                     shape=(self.fem_solver._B, self.fem_solver.n_vertices),
                 ),
+                reactions=qd.Vector.field(
+                    3,
+                    dtype=gs.qd_float,
+                    shape=(self.fem_solver._B, self.fem_solver.n_vertices),
+                ),
+                rigid_vel=qd.Vector.field(
+                    3,
+                    dtype=gs.qd_float,
+                    shape=(self.fem_solver._B, self.fem_solver.n_vertices),
+                ),
+                friction=qd.field(
+                    dtype=gs.qd_float,
+                    shape=(self.fem_solver._B, self.fem_solver.n_vertices),
+                ),
+                is_sticking=qd.field(
+                    dtype=gs.qd_bool,
+                    shape=(self.fem_solver._B, self.fem_solver.n_vertices),
+                ),
                 is_active=qd.field(
                     dtype=gs.qd_bool,
                     shape=(self.fem_solver._B, self.fem_solver.n_vertices),

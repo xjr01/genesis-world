@@ -356,7 +356,7 @@ def case_settings(case):
                 upper=wipe.collider_upper,
                 absorption_rate=4000.0,
                 absorption_capacity_fraction=1.0,
-                pbd_entity_name=wipe.collider_entity_name,
+                deformable_entity_name=wipe.collider_entity_name,
             )
         else:
             wipe_collider = gs.options.PBSTFBoxStaticColliderOptions(

@@ -163,11 +163,11 @@ wipe_collider = gs.options.PBSTFAbsorbentBoxStaticColliderOptions(
     upper=wipe.collider_upper,
     absorption_rate=4000.0,
     absorption_capacity_fraction=1.0,
-    pbd_entity_name=wipe.collider_entity_name,
+    deformable_entity_name=wipe.collider_entity_name,
 )
 ```
 
-`lower/upper` 定义局部静止材料网格，`pos/quat` 将其放到世界；`pbd_entity_name` 绑定使用 `PBDUnifiedOptions` 的体积 PBD 实体。`sdf_res` 不设置时，对持续变形的形状保留精确三角形查询。
+`lower/upper` 定义局部静止材料网格，`pos/quat` 将其放到世界；`deformable_entity_name` 绑定使用 `PBDUnifiedOptions` 的体积 PBD 实体。`sdf_res` 不设置时，对持续变形的形状保留精确三角形查询。
 
 ### 吸收速率 `absorption_rate`
 

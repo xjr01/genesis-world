@@ -136,7 +136,7 @@ class AbsorbentBoxStaticCollider(BoxStaticCollider, AbsorbentStaticCollider):
         upper,
         absorption_rate,
         absorption_capacity_fraction,
-        pbd_entity_name=None,
+        deformable_entity_name=None,
         sdf_res=None,
         pos=(0.0, 0.0, 0.0),
         quat=(1.0, 0.0, 0.0, 0.0),
@@ -159,11 +159,11 @@ class AbsorbentBoxStaticCollider(BoxStaticCollider, AbsorbentStaticCollider):
             absorption_rate=absorption_rate,
             absorption_capacity_fraction=absorption_capacity_fraction,
         )
-        self.pbd_entity_name = pbd_entity_name
+        self.deformable_entity_name = deformable_entity_name
         self.sdf_res = sdf_res
-        self.is_deformable = pbd_entity_name is not None
+        self.is_deformable = deformable_entity_name is not None
         self.has_sdf = sdf_res is not None
-        self.pbd_entity = None
+        self.deformable_entity = None
         self.embedding_elements_idx = None
         self.embedding_barycentric = None
         self.n_surface_vertices = 0
@@ -192,7 +192,7 @@ class AbsorbentBoxStaticCollider(BoxStaticCollider, AbsorbentStaticCollider):
             upper=options.upper,
             absorption_rate=options.absorption_rate,
             absorption_capacity_fraction=options.absorption_capacity_fraction,
-            pbd_entity_name=options.pbd_entity_name,
+            deformable_entity_name=options.deformable_entity_name,
             sdf_res=options.sdf_res,
             pos=options.pos,
             quat=options.quat,

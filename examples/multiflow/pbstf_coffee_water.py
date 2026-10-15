@@ -7,21 +7,25 @@ Replay with ``python -m examples.genesis_origin_example.rendering.replay_checkpo
 It supports ``--record``; ``--check-motion`` also replaces the sponge with a rigid preview.
 ``--check-trajectory`` enables trajectory acceptance checks and stops on failures, at extra checking cost.
 From the robot's perspective, world X points right, Y points up, and negative Z points forward across the table.
+Use ``--sponge-solver fem`` (default) for implicit corotated finite element method (FEM) elasticity on a coarse mesh.
+``--sponge-solver pbd-unified`` uses unified position-based dynamics (PBD) on a finer mesh with relaxed constraints.
 The default particle scale resolves pouring and the wall film; coarse scales can retain liquid inside the tilted cup.
 """
 
 import argparse
 import csv
+import math
+import xml.etree.ElementTree as ET
+from copy import deepcopy
 from dataclasses import dataclass
 from enum import IntEnum
-import math
 from pathlib import Path
 
 import numpy as np
 import torch
 
-from scipy.spatial.transform import Rotation
 import trimesh
+from scipy.spatial.transform import Rotation
 
 import genesis as gs
 from genesis.engine.entities.rigid_entity.rigid_link import RigidLink
@@ -42,6 +46,9 @@ WATER_FILL_FRACTION = 1.0
 CUP_GRIP_HEIGHT = 0.09
 CUP_GRIP_OPENING = 0.034
 RECOVERY_GRIP_OPENING = 0.032
+RECOVERY_CUP_TILT = 40.0
+RECOVERY_TRIGGER_TILT = 30.0
+RECOVERY_REACH_TIME = 0.25
 ROBOT_ASSET = "urdf/sim1_acone/acone_collision.urdf"
 ROD_ASSET = "meshes/glass_stirring_rod/glass_rod.obj"
 ROBOT_POS = (-0.06, -0.55, 0.52)
@@ -49,6 +56,7 @@ ROBOT_QUAT = (0.5, -0.5, 0.5, 0.5)
 TOOL_CENTER = np.array((0.14747, 0.001786, 0.0))
 TABLE_Y = -0.045
 SPONGE_SIZE = (0.04, 0.06, 0.08)
+SPONGE_GRID_RESOLUTION = (4, 6, 8)
 # The grip height keeps the wider finger mounts above the cup rims during the central wiping stroke.
 SPONGE_GRIP_HEIGHT = SPONGE_SIZE[1] - 0.005
 SPONGE_START = (0.0, TABLE_Y + 0.001, -0.17)
@@ -182,7 +190,7 @@ class CoffeeWaterScene:
     cup_distance_field: DistanceField | None
     robot: gs.engine.entities.RigidEntity
     rod: gs.engine.entities.RigidEntity
-    sponge: gs.engine.entities.PBD3DEntity | gs.engine.entities.RigidEntity
+    sponge: gs.engine.entities.FEMEntity | gs.engine.entities.PBD3DEntity | gs.engine.entities.RigidEntity
     hands_link: tuple[RigidLink, RigidLink]
     arms_dofs_idx: tuple[tuple[int, ...], tuple[int, ...]]
     hands_fingers_qs_idx: tuple[tuple[int, int], tuple[int, int]]
@@ -241,8 +249,10 @@ def observe_scene(demo):
     )
     if isinstance(demo.sponge, gs.engine.entities.RigidEntity):
         sponge_pos = demo.sponge.get_pos()
-    else:
+    elif isinstance(demo.sponge, gs.engine.entities.PBD3DEntity):
         sponge_pos = demo.sponge.get_particles_pos().mean(dim=-2)
+    else:
+        sponge_pos = demo.sponge.get_state().pos.mean(dim=-2)[0]
     return SceneObservation(
         cup, rod, hands, cup_tilt, water_in_cup, is_cup_grasped, cup_grasp_span, tensor_to_array(sponge_pos)
     )
@@ -355,13 +365,13 @@ def motion_target(time, motion, observation, *, is_trajectory_checked=False):
             )
             right = interpolate_tool(motion.right_start, end, smooth_progress(elapsed, start=0.0, end=1.2))
             # Measured tilt keeps recovery timing independent of liquid sampling and simulation.
-            if observation.cup_tilt >= 38.0:
+            if observation.cup_tilt >= RECOVERY_TRIGGER_TILT:
                 # Intercept the falling cup with open fingers before closing around its wall.
                 axis = geom.transform_by_quat(np.array((0.0, 1.0, 0.0)), observation.cup.quat)
                 direction = axis * (1.0, 0.0, 1.0)
                 direction /= np.linalg.norm(direction)
                 rotation_axis = np.cross(np.array((0.0, 1.0, 0.0)), direction)
-                quat = geom.rotvec_to_quat(math.radians(54.0) * rotation_axis)
+                quat = geom.rotvec_to_quat(math.radians(RECOVERY_CUP_TILT) * rotation_axis)
                 pivot_offset = 0.037 * direction
                 pivot = observation.cup.pos + geom.transform_by_quat(pivot_offset, observation.cup.quat)
                 pivot[1] = TABLE_Y
@@ -374,7 +384,7 @@ def motion_target(time, motion, observation, *, is_trajectory_checked=False):
                 raise RuntimeError(f"The cup failed to tip at {time:.3f}s: tilt={observation.cup_tilt:.2f}deg.")
         elif motion.right_phase == Phase.CATCH:
             right = interpolate_tool(
-                motion.right_start, motion.catch_goal, smooth_progress(elapsed, start=0.0, end=0.35)
+                motion.right_start, motion.catch_goal, smooth_progress(elapsed, start=0.0, end=RECOVERY_REACH_TIME)
             )
             # Quintic braking retains the incoming velocity and acceleration when the measured tilt triggers recovery.
             fraction = np.clip(elapsed / 0.12, 0.0, 1.0)
@@ -384,9 +394,9 @@ def motion_target(time, motion, observation, *, is_trajectory_checked=False):
                 right.pos + carry * motion.catch_velocity + acceleration_carry * motion.catch_acceleration,
                 right.quat,
             )
-            right_opening -= (0.044 - RECOVERY_GRIP_OPENING) * smooth_progress(elapsed, start=0.02, end=0.35)
+            right_opening -= (0.044 - RECOVERY_GRIP_OPENING) * smooth_progress(elapsed, start=0.02, end=RECOVERY_REACH_TIME)
             motion.cup_hold_time = motion.cup_hold_time + CONTROL_DT if observation.is_cup_grasped else 0.0
-            if elapsed >= 0.43 and motion.cup_hold_time >= 0.12:
+            if elapsed >= RECOVERY_REACH_TIME + 0.08 and motion.cup_hold_time >= 0.12:
                 motion.recovery_cup = observation.cup
                 motion.cup_grasp = relative_grasp(right, observation.cup)
                 motion.has_caught_cup = True
@@ -658,15 +668,20 @@ def build_scene(
     is_motion_only=False,
     is_liquid_enabled=True,
     is_trajectory_checked=False,
+    sponge_solver="fem",
 ):
     """Build contact-driven manipulation in meters with a deformable absorbent sponge.
 
-    Motion-only mode uses a rigid sponge preview. Disabling liquid skips its particles and solver steps while retaining
-    rigid and sponge dynamics. Liquid boundaries receive their motion through one-way coupling. Trajectory checking
-    rejects inaccurate targets and prepares liquid clearance measurements at extra computation and memory cost.
+    The sponge uses implicit finite element method (FEM) elasticity for "fem" or unified position-based dynamics (PBD)
+    constraints for "pbd-unified", each with its own mesh and material settings. Motion-only mode uses a rigid sponge
+    preview and overrides this selection. Disabling liquid skips its particles and solver steps while retaining rigid
+    and sponge dynamics. Liquid boundaries receive their motion through one-way coupling. Trajectory checking rejects
+    inaccurate targets and prepares liquid clearance measurements at extra computation and memory cost.
     """
     if scale <= 0:
         raise ValueError("Particle scale must be positive.")
+    if sponge_solver not in ("fem", "pbd-unified"):
+        raise ValueError(f"Unknown sponge solver: {sponge_solver!r}. Choose 'fem' or 'pbd-unified'.")
     dt = CONTROL_DT / CONTACT_SUBSTEPS
     particle_size = 2.0 / scale
     cup_path = Path(gs.utils.get_assets_dir()) / CUP_ASSET
@@ -709,13 +724,11 @@ def build_scene(
             gs.options.PBSTFAbsorbentBoxStaticColliderOptions(
                 pos=SPONGE_START,
                 is_collider_adhesion_friction_enabled=False,
-                # collider_adhesion_compliance=50.0,
-                # collider_friction=0.5,
                 lower=(-0.5 * SPONGE_SIZE[0], 0.0, -0.5 * SPONGE_SIZE[2]),
                 upper=(0.5 * SPONGE_SIZE[0], SPONGE_SIZE[1], 0.5 * SPONGE_SIZE[2]),
                 absorption_rate=400.0,
                 absorption_capacity_fraction=1.0,
-                pbd_entity_name="sponge",
+                deformable_entity_name="sponge",
             ),
         )
     )
@@ -732,12 +745,26 @@ def build_scene(
             enable_rolling_friction=True,
             constraint_timeconst=0.004,
         ),
-        pbd_options=gs.options.PBDUnifiedOptions(
-            particle_size=0.005,
-            lower_bound=(-0.4, -1.0 / 15.0, -4.0 / 15.0),
-            upper_bound=(0.4, 8.0 / 15.0, 4.0 / 15.0),
-            max_solver_iterations=30,
-            constraint_acceleration=0.85,
+        fem_options=(
+            gs.options.FEMOptions(
+                # The tabletop supports the sponge in this Y-up scene; the solver floor is Z-aligned.
+                floor_height=-1.0,
+                use_implicit_solver=True,
+                n_pcg_iterations=120,
+            )
+            if sponge_solver == "fem"
+            else None
+        ),
+        pbd_options=(
+            gs.options.PBDUnifiedOptions(
+                particle_size=0.005,
+                lower_bound=(-0.4, -1.0 / 15.0, -4.0 / 15.0),
+                upper_bound=(0.4, 8.0 / 15.0, 4.0 / 15.0),
+                max_solver_iterations=30,
+                constraint_acceleration=0.85,
+            )
+            if sponge_solver == "pbd-unified"
+            else None
         ),
         pbstf_options=gs.options.PBSTFOptions(
             diffusion_coeff=0.001,
@@ -823,11 +850,23 @@ def build_scene(
                 name=name,
             )
         )
+    robot_path = Path(gs.utils.get_assets_dir()) / ROBOT_ASSET
+    robot_xml = ET.parse(robot_path).getroot()
+    # Finger contact uses the displayed surface, including its local pose and mesh scale.
+    for link in robot_xml.findall("link"):
+        if link.attrib["name"] in ("right_link27", "right_link28"):
+            visual = link.find("visual")
+            collision = link.find("collision")
+            for tag in ("origin", "geometry"):
+                collision.remove(collision.find(tag))
+                collision.append(deepcopy(visual.find(tag)))
+    for mesh_node in robot_xml.iter("mesh"):
+        mesh_node.set("filename", str(robot_path.parent / mesh_node.attrib["filename"]))
     robot = scene.add_entity(
         morph=gs.morphs.URDF(
             pos=ROBOT_POS,
             quat=ROBOT_QUAT,
-            file=ROBOT_ASSET,
+            file=ET.tostring(robot_xml, encoding="unicode"),
             convexify=False,
             fixed=True,
         ),
@@ -865,7 +904,7 @@ def build_scene(
         sponge_vertices, sponge_elements = element.create_tetrahedral_grid(
             lower=tuple(-0.5 * size for size in SPONGE_SIZE),
             upper=tuple(0.5 * size for size in SPONGE_SIZE),
-            resolution=(10, 7, 20),
+            resolution=SPONGE_GRID_RESOLUTION if sponge_solver == "fem" else (10, 7, 20),
         )
         sponge = scene.add_entity(
             morph=gs.morphs.TetrahedralMesh(
@@ -873,7 +912,11 @@ def build_scene(
                 vertices=sponge_vertices,
                 elements=sponge_elements,
             ),
-            material=gs.materials.PBD.Elastic(rho=30.0, stretch_relaxation=0.25, volume_relaxation=0.15),
+            material=(
+                gs.materials.FEM.Elastic(E=1e4, rho=30.0, model="linear_corotated")
+                if sponge_solver == "fem"
+                else gs.materials.PBD.Elastic(rho=30.0, stretch_relaxation=0.25, volume_relaxation=0.15)
+            ),
             surface=gs.surfaces.Default(color=(0.95, 0.68, 0.12)),
             name="sponge",
         )
@@ -989,6 +1032,12 @@ def main():
     parser.add_argument("--surface", dest="is_surface", action="store_true")
     parser.add_argument("--check-motion", dest="is_motion_only", action="store_true")
     parser.add_argument(
+        "--sponge-solver",
+        choices=("fem", "pbd-unified"),
+        default="fem",
+        help="Sponge deformation: FEM elasticity on a coarse mesh or unified PBD constraints on a finer mesh.",
+    )
+    parser.add_argument(
         "--check-trajectory",
         dest="is_trajectory_checked",
         action="store_true",
@@ -1014,6 +1063,7 @@ def main():
         args.is_motion_only,
         args.is_liquid_enabled,
         args.is_trajectory_checked,
+        sponge_solver=args.sponge_solver,
     )
     dt = demo.scene.dt * CONTACT_SUBSTEPS
     steps = args.steps if args.steps is not None else round(MOTION_END / dt)

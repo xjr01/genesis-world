@@ -1,8 +1,8 @@
-from dataclasses import replace
 import math
 import pickle
 import sys
 import time
+from dataclasses import replace
 
 import numpy as np
 
@@ -27,6 +27,9 @@ from ..utils import assert_allclose, assert_equal
 @pytest.mark.parametrize("vis_mode", [None, "particle", "recon"])
 def test_checkpoint_roundtrip(tmp_path, n_envs, vis_mode, show_viewer):
     scene = gs.Scene(
+        fem_options=gs.options.FEMOptions(
+            use_implicit_solver=True,
+        ),
         pbd_options=gs.options.PBDUnifiedOptions(
             particle_size=0.02,
         ),
@@ -73,6 +76,16 @@ def test_checkpoint_roundtrip(tmp_path, n_envs, vis_mode, show_viewer):
         ),
         material=gs.materials.PBD.Elastic(),
     )
+    elastic = scene.add_entity(
+        morph=gs.morphs.TetrahedralMesh(
+            pos=(0.0, 0.15, 0.15),
+            vertices=vertices,
+            elements=elements,
+        ),
+        material=gs.materials.FEM.Elastic(
+            model="linear_corotated",
+        ),
+    )
     camera = scene.add_camera(res=(128, 128), pos=(0.0, -0.65, 0.45), lookat=(0.0, 0.0, 0.1))
     scene.build(n_envs=n_envs)
     writer = CheckpointWriter(scene, tmp_path / "checkpoints", dt=0.002)
@@ -82,6 +95,7 @@ def test_checkpoint_roundtrip(tmp_path, n_envs, vis_mode, show_viewer):
     if liquid is not None:
         liquid_initial = tensor_to_array(liquid.get_particles_pos())
     sponge_initial = tensor_to_array(sponge.get_particles_pos())
+    elastic_initial = elastic.get_state().pos
 
     rigid.set_pos(rigid.get_pos() + 0.03)
     if liquid is not None:
@@ -91,6 +105,11 @@ def test_checkpoint_roundtrip(tmp_path, n_envs, vis_mode, show_viewer):
         is_active[..., : liquid.n_particles // 2] = False
         liquid.set_particles_active(is_active)
     sponge.set_particles_pos(sponge.get_particles_pos() * 1.2)
+    elastic_state = scene.fem_solver.get_state(scene.sim.cur_substep_local)
+    elastic_state.pos[..., 0] += 0.4 * elastic_state.pos[..., 2]
+    elastic_state.active[:, ::2] = False
+    scene.fem_solver.set_state(scene.sim.cur_substep_local, elastic_state)
+    elastic_changed = elastic.get_state()
     writer.write_frame()
     scene.visualizer.update()
     image_changed, *_ = camera.render()
@@ -118,6 +137,8 @@ def test_checkpoint_roundtrip(tmp_path, n_envs, vis_mode, show_viewer):
             apply_frame(scene, reader.read_frame(index))
             assert_allclose(rigid.get_pos(), rigid_initial + index * 0.03, atol=1e-7)
             assert_allclose(sponge.get_particles_pos(), sponge_initial * (1.0 + index * 0.2), atol=1e-7)
+            assert_allclose(elastic.get_state().pos, elastic_changed.pos if index else elastic_initial, atol=1e-7)
+            assert_equal(elastic.get_state().active, elastic_changed.active if index else gs.ACTIVE)
             if liquid is not None:
                 assert_allclose(liquid.get_particles_pos(), liquid_initial + index * 0.04, atol=1e-7)
                 assert_equal(liquid.get_particles_concentration(), index * 0.75)
@@ -141,7 +162,7 @@ def test_checkpoint_roundtrip(tmp_path, n_envs, vis_mode, show_viewer):
     with pytest.raises(ValueError, match="Cannot read checkpoint"):
         reader.read_frame(1)
     with (writer.directory / "scene.pkl").open("wb") as stream:
-        pickle.dump(replace(reader.description, version=2), stream)
+        pickle.dump(replace(reader.description, version=1), stream)
     with pytest.raises(ValueError, match="Unsupported checkpoint scene format"):
         CheckpointReader(writer.directory)
 

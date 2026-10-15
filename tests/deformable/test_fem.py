@@ -566,7 +566,7 @@ def test_implicit_sap_coupler_collide_sphere_box(show_viewer):
 @pytest.mark.required
 @pytest.mark.parametrize("n_envs", [0, 2])
 def test_implicit_one_way_rigid_surface_projection(n_envs, show_viewer):
-    DT = 0.01
+    DT = 0.002
     DAMPING_ALPHA = 0.5
     vertices, elements = element_utils.create_tetrahedral_grid(
         lower=(-0.16, -0.16, -0.16),
@@ -581,6 +581,7 @@ def test_implicit_one_way_rigid_surface_projection(n_envs, show_viewer):
         fem_options=gs.options.FEMOptions(
             floor_height=-0.2,
             use_implicit_solver=True,
+            n_pcg_iterations=120,
             damping_alpha=DAMPING_ALPHA,
         ),
         coupler_options=gs.options.LegacyCouplerOptions(),
@@ -608,6 +609,35 @@ def test_implicit_one_way_rigid_surface_projection(n_envs, show_viewer):
             is_coup_reaction_enabled=False,
         ),
     )
+    sponge_vertices, sponge_elements = element_utils.create_tetrahedral_grid(
+        lower=(-0.02, -0.03, -0.04), upper=(0.02, 0.03, 0.04), resolution=(2, 2, 2)
+    )
+    sponge = scene.add_entity(
+        morph=gs.morphs.TetrahedralMesh(
+            pos=(0.3, 0.0, 0.1),
+            vertices=sponge_vertices,
+            elements=sponge_elements,
+        ),
+        material=gs.materials.FEM.Elastic(
+            E=1e4,
+            rho=30.0,
+            model="linear_corotated",
+        ),
+    )
+    fingers = [
+        scene.add_entity(
+            morph=gs.morphs.Box(
+                pos=(0.3 + side * 0.03, 0.0, 0.1),
+                size=(0.01, 0.1, 0.12),
+                fixed=True,
+            ),
+            material=gs.materials.Rigid(
+                coup_friction=0.5,
+                is_coup_reaction_enabled=False,
+            ),
+        )
+        for side in (-1, 1)
+    ]
     scene.build(n_envs=n_envs)
 
     pos_initial = fem.get_state().pos
@@ -625,6 +655,34 @@ def test_implicit_one_way_rigid_surface_projection(n_envs, show_viewer):
     scene.step()
 
     assert (fem.get_state().pos[..., 0] < -0.05).all()
+
+    rest_edges = sponge_vertices[sponge_elements[:, 1:]] - sponge_vertices[sponge_elements[:, :1]]
+    rest_determinants = np.linalg.det(rest_edges)
+    for step in range(20):
+        half_opening = 0.025 - 0.009 * min((step + 1) / 10, 1.0)
+        for side, finger in zip((-1, 1), fingers):
+            finger.set_pos((0.3 + side * (half_opening + 0.005), 0.0, 0.1))
+        scene.step()
+        pos = tensor_to_array(sponge.get_state().pos)
+        assert (np.abs(pos[..., 0] - 0.3) <= half_opening + 1e-6).all()
+        edges = pos[:, sponge_elements[:, 1:]] - pos[:, sponge_elements[:, :1]]
+        assert (np.linalg.det(edges) / rest_determinants > 0.0).all()
+    compressed_width = np.ptp(pos[..., 0], axis=-1)
+    assert (compressed_width < 0.033).all()
+    sponge.set_velocity((0.0, 0.0, 0.1))
+    scene.step()
+    is_contact_center = (np.abs(sponge_vertices[:, 0]) > 0.019) & (sponge_vertices[:, 1:] == 0.0).all(axis=-1)
+    assert_allclose(sponge.get_state().vel[:, is_contact_center, 2], 0.0, atol=1e-5)
+    for side, finger in zip((-1, 1), fingers):
+        finger.set_pos((0.3 + side * 0.05, 0.0, 0.1))
+    for _ in range(30):
+        scene.step()
+    released = tensor_to_array(sponge.get_state().pos)
+    # Material-point distances measure recovery independently of the free rigid rotation after release.
+    released_width = np.linalg.norm(
+        released[:, sponge_vertices[:, 0] > 0.019] - released[:, sponge_vertices[:, 0] < -0.019], axis=-1
+    )
+    assert (np.abs(released_width - 0.04) < 0.1 * (0.04 - compressed_width[:, None])).all()
 
 
 # This test cannot be flagged as required because it takes 400s to run on CPU.

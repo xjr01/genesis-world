@@ -5,7 +5,11 @@ import os
 import numpy as np
 import torch
 
-from examples.teapot.pbstf_surface_tension import (
+import igl
+import pytest
+import trimesh
+
+from examples.multiflow.teapot.pbstf_surface_tension import (
     CASES,
     CASE_BOUNCE,
     CASE_CONE,
@@ -23,14 +27,13 @@ from examples.teapot.pbstf_surface_tension import (
     update_wipe_case,
     wipe_pose,
 )
-import igl
-import pytest
-from tests.utils import assert_allclose, assert_equal
-import trimesh
 
 import quadrants as qd
 
 import genesis as gs
+import genesis.utils.geom as geom_utils
+import genesis.utils.mesh as mesh_utils
+import genesis.utils.particle as particle_utils
 from genesis.engine.boundaries import (
     AbsorbentBoxStaticCollider,
     BoxStaticCollider,
@@ -44,10 +47,9 @@ from genesis.engine.boundaries import (
     static_collider_separates,
 )
 from genesis.utils.element import create_tetrahedral_grid
-import genesis.utils.geom as geom_utils
-import genesis.utils.mesh as mesh_utils
 from genesis.utils.misc import qd_to_numpy, tensor_to_array
-import genesis.utils.particle as particle_utils
+
+from ..utils import assert_allclose, assert_equal
 
 
 @pytest.mark.required
@@ -186,7 +188,7 @@ def test_analytic_static_collider_geometry():
         upper=(1.0, 2.0, 3.0),
         absorption_rate=8.0,
         absorption_capacity_fraction=0.25,
-        pbd_entity_name="sponge",
+        deformable_entity_name="sponge",
     )
     deformable_mesh = trimesh.creation.box(extents=(2.0, 4.0, 6.0))
     deformable_vertices = np.array(deformable_mesh.vertices, dtype=gs.np_float)
@@ -261,7 +263,7 @@ def test_analytic_static_collider_geometry():
         upper=(1.0, 2.0, 3.0),
         absorption_rate=8.0,
         absorption_capacity_fraction=0.25,
-        pbd_entity_name="sponge",
+        deformable_entity_name="sponge",
         sdf_res=32,
     )
     dented_mesh = trimesh.creation.box(extents=(2.0, 4.0, 6.0)).subdivide()
@@ -348,7 +350,7 @@ def test_analytic_static_collider_geometry():
             upper=(1.0, -1.0, 1.0),
         )
 
-    with pytest.raises(gs.GenesisException, match="requires `pbd_entity_name`"):
+    with pytest.raises(gs.GenesisException, match="requires `deformable_entity_name`"):
         gs.options.PBSTFAbsorbentBoxStaticColliderOptions(
             lower=(-1.0, -1.0, -1.0),
             upper=(1.0, 1.0, 1.0),
@@ -364,8 +366,8 @@ def test_analytic_static_collider_geometry():
 @pytest.mark.required
 @pytest.mark.parametrize("backend", [gs.cuda])
 @pytest.mark.parametrize("n_envs", [0, 2])
-@pytest.mark.parametrize("is_deformable", [False, True])
-def test_static_collider_pose_and_absorption(asset_tmp_path, n_envs, is_deformable, show_viewer):
+@pytest.mark.parametrize("deformable_solver", [None, "pbd", "fem"])
+def test_static_collider_pose_and_absorption(asset_tmp_path, n_envs, deformable_solver, show_viewer):
     mesh_path = asset_tmp_path / f"pbstf_static_collider_box_{n_envs}.obj"
     trimesh.creation.box().export(mesh_path)
     target_pos = (1.0, 2.0, 3.0)
@@ -391,13 +393,17 @@ def test_static_collider_pose_and_absorption(asset_tmp_path, n_envs, is_deformab
             upper=(0.3, 0.3, 0.3),
             absorption_rate=100.0,
             absorption_capacity_fraction=0.4,
-            pbd_entity_name="absorbent" if is_deformable else None,
+            deformable_entity_name="absorbent" if deformable_solver is not None else None,
         ),
     ]
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
             dt=1e-3,
             gravity=(0.0, 0.0, 0.0),
+        ),
+        fem_options=gs.options.FEMOptions(
+            floor_height=-4.0,
+            use_implicit_solver=True,
         ),
         pbd_options=gs.options.PBDUnifiedOptions(
             lower_bound=(-4.0, -4.0, -4.0),
@@ -439,7 +445,7 @@ def test_static_collider_pose_and_absorption(asset_tmp_path, n_envs, is_deformab
         ),
     )
     absorbent = None
-    if is_deformable:
+    if deformable_solver is not None:
         vertices, elements = create_tetrahedral_grid(
             lower=collider_options[3].lower, upper=collider_options[3].upper, resolution=(1, 1, 1)
         )
@@ -449,12 +455,21 @@ def test_static_collider_pose_and_absorption(asset_tmp_path, n_envs, is_deformab
                 vertices=vertices,
                 elements=elements,
             ),
-            material=gs.materials.PBD.Elastic(),
+            material=(
+                gs.materials.FEM.Elastic(model="linear_corotated")
+                if deformable_solver == "fem"
+                else gs.materials.PBD.Elastic()
+            ),
             name="absorbent",
         )
     scene.build(n_envs=n_envs)
-    if absorbent is not None:
+    if isinstance(absorbent, gs.engine.entities.PBD3DEntity):
         absorbent.fix_particles()
+    if absorbent is not None:
+        if isinstance(absorbent, gs.engine.entities.FEMEntity):
+            set_positions = absorbent.set_position
+        else:
+            set_positions = absorbent.set_particles_pos
 
     scene.pbstf_solver.set_static_colliders_pose(
         pos=target_pos,
@@ -552,6 +567,18 @@ def test_static_collider_pose_and_absorption(asset_tmp_path, n_envs, is_deformab
     assert liquid.get_particles_active().all()
     assert_allclose(particles_pos[..., 2:, 0].min(axis=-1), 1.65, atol=1e-6)
 
+    if isinstance(absorbent, gs.engine.entities.FEMEntity):
+        initial_state = scene.get_state()
+        absorbent.set_velocity((0.0, 1.0, 0.0))
+        scene.step()
+        scene.step()
+        translation = np.array((0.0, scene.dt / (1.0 + scene.fem_options.damping_alpha * scene.dt), 0.0))
+        local_expected = local_pos + (1.0 - (1.0 - beta[..., None]) ** 2) * (target_local_pos - local_pos)
+        local_expected += beta[..., None] * translation
+        positions_advected = tensor_to_array(liquid.get_particles_pos()).reshape((max(n_envs, 1), -1, 3))
+        assert_allclose(positions_advected[is_captured], (local_expected + absorbent_pos)[is_captured], atol=1e-6)
+        scene.reset(initial_state)
+
     moved_pos = (2.5, 0.3, 0.2)
     moved_quat = (math.sqrt(0.5), 0.0, 0.0, math.sqrt(0.5))
     solver.set_static_colliders_pose(
@@ -560,9 +587,7 @@ def test_static_collider_pose_and_absorption(asset_tmp_path, n_envs, is_deformab
         colliders_idx=3,
     )
     if absorbent is not None:
-        absorbent.set_particles_pos(
-            geom_utils.transform_by_trans_quat(vertices, np.array(moved_pos), np.array(moved_quat))
-        )
+        set_positions(geom_utils.transform_by_trans_quat(vertices, np.array(moved_pos), np.array(moved_quat)))
     scene.step()
     particles_moved = tensor_to_array(liquid.get_particles_pos())
     if n_envs == 0:
@@ -591,7 +616,7 @@ def test_static_collider_pose_and_absorption(asset_tmp_path, n_envs, is_deformab
         colliders_idx=3,
     )
     if absorbent is not None:
-        absorbent.set_particles_pos(vertices + (-2.5, -0.3, -0.2))
+        set_positions(vertices + (-2.5, -0.3, -0.2))
     scene.step()
     scene.reset(saved_state)
     positions_restored = tensor_to_array(liquid.get_particles_pos())
@@ -630,7 +655,7 @@ def test_static_collider_pose_and_absorption(asset_tmp_path, n_envs, is_deformab
         scene.reset(saved_state)
         deformed_vertices = vertices.copy()
         deformed_vertices[:, 1] += 0.2 * deformed_vertices[:, 0]
-        absorbent.set_particles_pos(
+        set_positions(
             geom_utils.transform_by_trans_quat(deformed_vertices, np.array(moved_pos), np.array(moved_quat))
         )
         scene.step()
@@ -930,7 +955,7 @@ def test_case_settings():
     assert_equal(mop_settings.static_colliders[1].quat, sweep_settings.static_colliders[1].quat)
     assert_equal(mop_settings.static_colliders[1].absorption_rate, 4000.0)
     assert_equal(mop_settings.static_colliders[1].absorption_capacity_fraction, 1.0)
-    assert mop_settings.static_colliders[1].pbd_entity_name == mop.collider_entity_name
+    assert mop_settings.static_colliders[1].deformable_entity_name == mop.collider_entity_name
     assert mop_settings.static_colliders[1].sdf_res is None
     assert mop.mop_manipulator.asset == "urdf/panda_bullet/panda.urdf"
     assert mop.mop_manipulator.is_visible

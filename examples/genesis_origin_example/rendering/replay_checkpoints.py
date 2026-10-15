@@ -384,7 +384,7 @@ def main():
         parser.error("--precompute requires --cache-surfaces DIRECTORY.")
     reader = CheckpointReader(args.directory, surface_cache=args.cache_surfaces, liquid_vis_mode=args.liquid_vis_mode)
     if args.is_precomputing and not any(
-        isinstance(entity.material, gs.materials.PBSTF.Liquid) and entity.surface.vis_mode == "recon"
+        issubclass(entity.material_type, gs.materials.PBSTF.Liquid) and entity.surface.vis_mode == "recon"
         for entity in reader.description.entities
     ):
         parser.error("--precompute requires liquid surfaces; select --surface or use a surface-mode recording.")

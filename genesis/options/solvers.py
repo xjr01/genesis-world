@@ -827,22 +827,21 @@ class PBSTFAbsorbentStaticColliderOptionsMixin(Options):
 class PBSTFAbsorbentBoxStaticColliderOptions(PBSTFAbsorbentStaticColliderOptionsMixin, PBSTFBoxStaticColliderOptions):
     """Finite position-based surface tension flow (PBSTF) box with rate-limited nearby-voxel capture.
 
-    ``pbd_entity_name`` binds geometry to a volumetric position-based dynamics (PBD) entity using PBDUnifiedOptions.
-    Binding lets the collider and its material-space absorption targets follow deformation, at the cost of updating a
-    triangle surface and voxel search order whenever the PBD shape changes. ``sdf_res`` enables a signed distance field
-    (SDF) that can be built after deformation stops. Higher resolutions preserve smaller surface features at cubic
-    preprocessing and memory cost, while ``None`` keeps exact triangle queries. ``pbd_entity_name=None`` uses
-    inexpensive analytic box geometry.
+    ``deformable_entity_name`` binds geometry to a tetrahedral finite element method (FEM) entity or a volumetric
+    position-based dynamics (PBD) entity using PBDUnifiedOptions. Binding makes absorption follow deformation; updating
+    the triangle surface and voxel search order adds runtime cost. Leaving it unset uses analytic box geometry.
+    ``sdf_res`` enables a signed distance field (SDF) cached after deformation stops. Higher resolutions retain smaller
+    features at cubic preprocessing and memory cost; ``None`` keeps exact triangle queries.
     """
 
     type: Literal["absorbent_box"] = "absorbent_box"
-    pbd_entity_name: str | None = None
+    deformable_entity_name: str | None = None
     sdf_res: StrictInt | None = Field(default=None, ge=16)
 
     @model_validator(mode="after")
     def _validate_sdf(self):
-        if self.sdf_res is not None and self.pbd_entity_name is None:
-            gs.raise_exception("PBSTF absorbent box collider `sdf_res` requires `pbd_entity_name`.")
+        if self.sdf_res is not None and self.deformable_entity_name is None:
+            gs.raise_exception("PBSTF absorbent box collider `sdf_res` requires `deformable_entity_name`.")
         return self
 
 
