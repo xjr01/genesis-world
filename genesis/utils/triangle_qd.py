@@ -4,6 +4,88 @@ import genesis as gs
 
 
 @qd.func
+def point_triangle_constraint(point, v0, v1, v2):
+    """Return signed plane distance, its four vertex gradients, and triangle validity."""
+    edge0 = v1 - v0
+    edge1 = v2 - v0
+    normal = edge0.cross(edge1)
+    area = normal.norm()
+    is_valid = area > gs.EPS * edge0.norm() * edge1.norm()
+    residual = gs.qd_float(0.0)
+    gradients = qd.Matrix.zero(gs.qd_float, 3, 4)
+    if is_valid:
+        normal /= area
+        offset = point - v0
+        residual = offset.dot(normal)
+        tangent = (offset - residual * normal) / area
+        gradients[:, 0] = normal
+        gradients[:, 2] = edge1.cross(tangent)
+        gradients[:, 3] = tangent.cross(edge0)
+        gradients[:, 1] = -normal - gradients[:, 2] - gradients[:, 3]
+    return residual, gradients, is_valid
+
+
+@qd.func
+def point_triangle_entry_time(previous_point, point, previous_triangle, triangle):
+    """Return the last outside-to-inside crossing time for linearly moving vertices, or -1."""
+    offset = previous_point - previous_triangle[:, 0]
+    edge0 = previous_triangle[:, 1] - previous_triangle[:, 0]
+    edge1 = previous_triangle[:, 2] - previous_triangle[:, 0]
+    delta = point - triangle[:, 0] - offset
+    delta0 = triangle[:, 1] - triangle[:, 0] - edge0
+    delta1 = triangle[:, 2] - triangle[:, 0] - edge1
+    normal0 = edge0.cross(edge1)
+    normal1 = delta0.cross(edge1) + edge0.cross(delta1)
+    normal2 = delta0.cross(delta1)
+    coefficients = qd.Vector(
+        [
+            offset.dot(normal0),
+            delta.dot(normal0) + offset.dot(normal1),
+            delta.dot(normal1) + offset.dot(normal2),
+            delta.dot(normal2),
+        ]
+    )
+    scale = qd.abs(coefficients).max()
+    intervals = qd.Vector([0.0, 1.0, 1.0, 1.0])
+    if qd.abs(coefficients[3]) > gs.EPS * scale:
+        discriminant = coefficients[2] ** 2 - 3.0 * coefficients[3] * coefficients[1]
+        if discriminant > 0.0:
+            root0 = (-coefficients[2] - qd.sqrt(discriminant)) / (3.0 * coefficients[3])
+            root1 = (-coefficients[2] + qd.sqrt(discriminant)) / (3.0 * coefficients[3])
+            intervals[1] = qd.min(1.0, qd.max(0.0, qd.min(root0, root1)))
+            intervals[2] = qd.min(1.0, qd.max(0.0, qd.max(root0, root1)))
+    elif qd.abs(coefficients[2]) > gs.EPS * scale:
+        intervals[1] = qd.min(1.0, qd.max(0.0, -coefficients[1] / (2.0 * coefficients[2])))
+    entry_time = gs.qd_float(-1.0)
+    for i_interval in range(3):
+        lower = intervals[i_interval]
+        upper = intervals[i_interval + 1]
+        value_lower = ((coefficients[3] * lower + coefficients[2]) * lower + coefficients[1]) * lower + coefficients[0]
+        value_upper = ((coefficients[3] * upper + coefficients[2]) * upper + coefficients[1]) * upper + coefficients[0]
+        if value_lower >= 0.0 and value_upper <= 0.0 and value_lower > value_upper:
+            while upper - lower > 4.0 * gs.EPS:
+                middle = 0.5 * (lower + upper)
+                value = (
+                    (coefficients[3] * middle + coefficients[2]) * middle + coefficients[1]
+                ) * middle + coefficients[0]
+                if value > 0.0:
+                    lower = middle
+                else:
+                    upper = middle
+            time = 0.5 * (lower + upper)
+            vertices = previous_triangle + time * (triangle - previous_triangle)
+            position = previous_point + time * (point - previous_point)
+            _, gradients, is_valid = point_triangle_constraint(position, vertices[:, 0], vertices[:, 1], vertices[:, 2])
+            if is_valid:
+                is_inside = True
+                for i_v in qd.static(range(3)):
+                    is_inside = is_inside and -gradients[:, i_v + 1].dot(gradients[:, 0]) >= -32.0 * gs.EPS
+                if is_inside:
+                    entry_time = qd.max(entry_time, time)
+    return entry_time
+
+
+@qd.func
 def closest_point_on_triangle(
     point: qd.types.vector(3), v0: qd.types.vector(3), v1: qd.types.vector(3), v2: qd.types.vector(3)
 ) -> qd.types.vector(3):
@@ -91,6 +173,109 @@ def segment_triangle_intersection(
             parameter = qd.min(1.0, qd.max(0.0, parameter))
             hit_position = segment_start + parameter * direction
     return is_hit, hit_position
+
+
+@qd.func
+def segment_triangle_crossing(segment_start, segment_end, vertices):
+    """Return an inclusive segment crossing through a triangle, excluding coplanar contact."""
+    edge0 = vertices[:, 1] - vertices[:, 0]
+    edge1 = vertices[:, 2] - vertices[:, 0]
+    normal = edge0.cross(edge1)
+    distance0 = (segment_start - vertices[:, 0]).dot(normal)
+    distance1 = (segment_end - vertices[:, 0]).dot(normal)
+    is_crossing = distance0 * distance1 <= 0.0
+    position = segment_start
+    if is_crossing:
+        is_crossing, position = segment_triangle_intersection(
+            segment_start, segment_end, vertices[:, 0], vertices[:, 1], vertices[:, 2], gs.EPS
+        )
+    return is_crossing, position
+
+
+@qd.func
+def triangle_crossing_edges(vertices0, vertices1):
+    """Return transverse crossing-edge masks and validity; isolated touching points have empty masks."""
+    edges0 = qd.Vector.zero(gs.qd_int, 3)
+    edges1 = qd.Vector.zero(gs.qd_int, 3)
+    is_valid = True
+    scale = gs.qd_float(0.0)
+    for side in qd.static(range(2)):
+        vertices = vertices0
+        if qd.static(side == 1):
+            vertices = vertices1
+        edge0 = vertices[:, 1] - vertices[:, 0]
+        edge1 = vertices[:, 2] - vertices[:, 0]
+        is_valid = is_valid and edge0.cross(edge1).norm_sqr() > gs.EPS**2 * edge0.norm_sqr() * edge1.norm_sqr()
+        scale = qd.max(scale, edge0.norm(), edge1.norm(), (vertices[:, 2] - vertices[:, 1]).norm())
+    lower = qd.Vector([1.0e30, 1.0e30, 1.0e30])
+    upper = -lower
+    if is_valid:
+        for edge_idx in qd.static(range(3)):
+            is_hit0, position0 = segment_triangle_crossing(
+                vertices0[:, edge_idx], vertices0[:, (edge_idx + 1) % 3], vertices1
+            )
+            is_hit1, position1 = segment_triangle_crossing(
+                vertices1[:, edge_idx], vertices1[:, (edge_idx + 1) % 3], vertices0
+            )
+            edges0[edge_idx] = is_hit0
+            edges1[edge_idx] = is_hit1
+            if is_hit0:
+                lower = qd.min(lower, position0)
+                upper = qd.max(upper, position0)
+            if is_hit1:
+                lower = qd.min(lower, position1)
+                upper = qd.max(upper, position1)
+        if (upper - lower).max() <= 32.0 * gs.EPS * scale:
+            edges0.fill(0)
+            edges1.fill(0)
+    return edges0, edges1, is_valid
+
+
+@qd.func
+def edge_edge_contact(vertices0, vertices1, reference_normal):
+    """Return finite-edge signed distance and endpoint gradients, oriented toward the reference normal."""
+    edge0 = vertices0[:, 1] - vertices0[:, 0]
+    edge1 = vertices1[:, 1] - vertices1[:, 0]
+    offset = vertices0[:, 0] - vertices1[:, 0]
+    length0_sqr = edge0.norm_sqr()
+    length1_sqr = edge1.norm_sqr()
+    is_valid = length0_sqr > 0.0 and length1_sqr > 0.0
+    residual = gs.qd_float(0.0)
+    gradients = qd.Matrix.zero(gs.qd_float, 3, 2)
+    if is_valid:
+        alignment = edge0.dot(edge1)
+        offset0 = edge0.dot(offset)
+        offset1 = edge1.dot(offset)
+        denominator = edge0.cross(edge1).norm_sqr()
+        parameter0 = gs.qd_float(0.0)
+        if denominator > gs.EPS**2 * length0_sqr * length1_sqr:
+            parameter0 = qd.min(1.0, qd.max(0.0, (alignment * offset1 - offset0 * length1_sqr) / denominator))
+        parameter1 = (alignment * parameter0 + offset1) / length1_sqr
+        if parameter1 < 0.0:
+            parameter1 = 0.0
+            parameter0 = qd.min(1.0, qd.max(0.0, -offset0 / length0_sqr))
+        elif parameter1 > 1.0:
+            parameter1 = 1.0
+            parameter0 = qd.min(1.0, qd.max(0.0, (alignment - offset0) / length0_sqr))
+        separation = offset + parameter0 * edge0 - parameter1 * edge1
+        distance = separation.norm()
+        normal = edge0.cross(edge1)
+        if distance > 32.0 * gs.EPS * qd.sqrt(qd.max(length0_sqr, length1_sqr)):
+            normal = separation / distance
+        elif denominator > gs.EPS**2 * length0_sqr * length1_sqr:
+            normal /= qd.sqrt(denominator)
+        else:
+            normal = reference_normal
+        is_valid = normal.norm_sqr() > 0.0
+        if is_valid:
+            normal = normal.normalized()
+            if normal.dot(reference_normal) < 0.0:
+                normal = -normal
+            # Freezing the closest-point coordinates and normal gives a linear contact projection.
+            residual = separation.dot(normal)
+            gradients[:, 0] = (1.0 - parameter0) * normal
+            gradients[:, 1] = parameter0 * normal
+    return residual, gradients, is_valid
 
 
 @qd.func

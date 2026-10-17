@@ -6,8 +6,12 @@ from threading import Lock
 from unittest.mock import MagicMock, Mock
 
 import numpy as np
-import OpenGL.error
 import pytest
+
+import OpenGL.error
+import trimesh
+
+from examples.multiflow.pbd_box_squeeze import SqueezePlayback
 
 import genesis as gs
 from genesis.ext.pyrender.trackball import Trackball
@@ -55,6 +59,141 @@ def test_trackball_orbit_respects_world_up_axis():
 
     assert_allclose(trackball_z.pose, trackball_z_default.pose, atol=1e-12)
     assert_allclose(trackball_y.pose, transform_z_to_y @ trackball_z.pose, atol=1e-12)
+
+
+@pytest.mark.required
+@pytest.mark.skipif(not IS_INTERACTIVE_VIEWER_AVAILABLE, reason=SKIP_NO_VIEWER)
+def test_iteration_playback(show_viewer, asset_tmp_path):
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=0.002,
+            substeps=2,
+            gravity=(0.0, 0.0, 0.0),
+        ),
+        rigid_options=gs.options.RigidOptions(
+            enable_collision=False,
+        ),
+        pbd_options=gs.options.PBDUnifiedOptions(
+            max_solver_iterations=3,
+            is_recording_edge_contacts=True,
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            res=(640, 480),
+            run_in_thread=False,
+            camera_pos=(0.25, -0.3, 0.8),
+            camera_lookat=(0.02, 0.01, 0.5),
+        ),
+        show_viewer=True,
+    )
+    elastic = scene.add_entity(
+        morph=gs.morphs.TetrahedralMesh(
+            pos=(0.0, 0.0, 0.5),
+            vertices=0.05 * np.array(((-1.0, -1.0, 0.0), (2.0, 2.0, 0.0), (-1.0, 2.0, 0.0), (-0.7, 1.0, -0.2))),
+            elements=((0, 2, 1, 3),),
+        ),
+        material=gs.materials.PBD.Elastic(
+            stretch_relaxation=0.0,
+            volume_relaxation=0.0,
+        ),
+    )
+    path = asset_tmp_path / "iteration_playback_probe.obj"
+    trimesh.Trimesh(
+        vertices=0.05 * np.array(((-0.5, 0.0, -1.0), (-0.5, 0.0, 2.0), (2.5, 0.0, 2.0), (0.5, -0.2, 0.5))),
+        faces=((0, 1, 2), (0, 3, 1), (0, 2, 3), (1, 3, 2)),
+        process=False,
+    ).export(path)
+    rigid = scene.add_entity(
+        morph=gs.morphs.Mesh(
+            pos=(0.0, 0.0, 1.0),
+            file=path,
+            convexify=False,
+        ),
+        material=gs.materials.Rigid(
+            is_coup_reaction_enabled=False,
+        ),
+    )
+    camera = scene.add_camera(
+        res=(640, 480),
+        pos=(0.25, -0.3, 0.8),
+        lookat=(0.02, 0.01, 0.5),
+        debug=True,
+    )
+    geometry_camera = scene.add_camera(
+        res=(640, 480),
+        pos=(0.25, -0.3, 0.8),
+        lookat=(0.02, 0.01, 0.5),
+    )
+    scene.build()
+    rigid.set_pos((0.0, 0.0, 0.5))
+    elastic.fix_particles([2, 3])
+    rigid.set_dofs_velocity((0.01, 0.0, 0.0, 0.0, 0.0, 0.0))
+    viewer = scene.viewer._pyrender_viewer
+    viewer.dispatch_event("on_key_release", Key.D, 0)
+    viewer.dispatch_pending_events()
+    viewer.dispatch_events()
+    playback = SqueezePlayback(scene, elastic, is_unified=True)
+    playback.record_frame(step=0)
+    initial, *_ = camera.render()
+    assert (scene.pbd_solver.get_collision_diagnostics().edge_contacts > 0).all()
+    scene.viewer.show_frame(None)
+    scene.step(update_visualizer=False)
+    completed_step, *_ = camera.render()
+    completed_geometry, *_ = geometry_camera.render()
+    playback.record_frame(step=1)
+    step_image, *_ = camera.render()
+    step_geometry, *_ = geometry_camera.render()
+    assert_equal(step_image, completed_step)
+    assert_equal(step_geometry, completed_geometry)
+    history = scene.pbd_solver.get_edge_contact_history()
+    assert_equal(history.positions.shape, (2, 3, 1, 4, 3))
+    assert history.is_detected[0, 0].any(), (history.is_detected, history.positions)
+    assert_allclose(history.links_pos[1] - history.links_pos[0], ((0.00001, 0.0, 0.0),), atol=1e-7)
+    positions = elastic.get_particles_pos().clone()
+    velocities = elastic.get_particles_vel().clone()
+    qpos = rigid.get_qpos().clone()
+    simulation_time = scene.t
+    for key in (Key.T, Key.SPACE):
+        viewer.dispatch_event("on_key_release", key, 0)
+    viewer.dispatch_pending_events()
+    viewer.dispatch_events()
+    assert playback.advance(n_steps=2)
+    playback.show_frame(1)
+    first, *_ = camera.render()
+    first_geometry, *_ = geometry_camera.render()
+    assert (first.max(axis=-1) - first.min(axis=-1) > 80).sum() > 5
+    assert np.any(first_geometry != completed_geometry)
+    playback.show_frame(6)
+    last, *_ = camera.render()
+    last_geometry, *_ = geometry_camera.render()
+    assert np.any(first != last)
+    assert np.any(first_geometry != last_geometry)
+    playback.show_frame(1)
+    replayed, *_ = camera.render()
+    assert_equal(replayed, first)
+    playback.show_frame(6)
+    for key in (Key.T, Key.RIGHT):
+        viewer.dispatch_event("on_key_release", key, 0)
+    viewer.dispatch_pending_events()
+    viewer.dispatch_events()
+    assert playback.advance(n_steps=2)
+    playback.show_frame(1)
+    step_image, *_ = camera.render()
+    assert_equal(step_image, completed_step)
+    playback.show_frame(0)
+    replayed_initial, *_ = camera.render()
+    assert_equal(replayed_initial, initial)
+    playback.show_frame(1)
+    assert_equal(elastic.get_particles_pos(), positions)
+    assert_equal(elastic.get_particles_vel(), velocities)
+    assert_equal(rigid.get_qpos(), qpos)
+    assert_equal(scene.t, simulation_time)
+    for key in (Key.LEFT, Key.RIGHT, Key.SPACE):
+        viewer.dispatch_event("on_key_release", key, 0)
+    viewer.dispatch_pending_events()
+    viewer.dispatch_events()
+    assert playback.advance(n_steps=2)
+    assert_equal(scene.t, simulation_time)
+    scene.viewer.show_frame(None)
 
 
 @pytest.mark.required
