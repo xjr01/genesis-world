@@ -5,7 +5,8 @@ Run with python -m examples.multiflow.pbd_box_squeeze -g -v. Unified position-ba
 method (FEM) elasticity on a coarser mesh. The right hand starts at the sponge, closes for
 0.6 seconds, settles until 1.0 second, then wipes 0.34 meters in 4 seconds and holds. Measured sponge tracking error
 above 1 cm stops the example. --check-penetration measures vertex intrusion against the hand and fingers and unified
-PBD surface crossings against every coupled rigid geom, including the table, with extra geometry queries.
+PBD surface crossings against every coupled rigid geom, including the table, with extra geometry queries. It also
+enables robot self-collision checks and stops on contact; ordinary playback skips these checks for faster stepping.
 --damping controls unified PBD deformation damping in 1/s; use zero to compare elastic oscillations.
 With --vis, Space plays/pauses and Left/Right browse simulation time steps. For unified PBD, T switches to individual
 solver iterations with colored collision edges, recorded after point/face projection and before edge projection.
@@ -264,7 +265,7 @@ def main():
         "--check-penetration",
         dest="is_penetration_checked",
         action="store_true",
-        help="Measure hand/sponge vertex intrusion and unified surface crossings every 0.1 seconds; adds geometry queries",
+        help="Check robot self-collision each step and sponge penetration every 0.1 seconds; adds collision queries",
     )
     args = parser.parse_args()
     if not math.isfinite(args.dt) or args.dt <= 0 or args.substeps <= 0:
@@ -299,6 +300,7 @@ def main():
         ),
         rigid_options=gs.options.RigidOptions(
             integrator=gs.integrator.implicitfast,
+            enable_self_collision=args.is_penetration_checked,
             enable_neutral_collision=True,
             noslip_iterations=10,
             enable_torsional_friction=True,
@@ -518,6 +520,16 @@ def main():
             qpos = target_qpos
         scene.step(update_visualizer=playback is None)
         scene.rigid_solver.check_errno()
+        if args.is_penetration_checked:
+            contacts = robot.get_contacts(with_entity=robot)
+            if contacts["geom_a"].numel():
+                links_a = tensor_to_array(contacts["link_a"])
+                links_b = tensor_to_array(contacts["link_b"])
+                link_pairs = tuple(
+                    (scene.rigid_solver.links[i_a].name, scene.rigid_solver.links[i_b].name)
+                    for i_a, i_b in np.unique(np.column_stack((links_a, links_b)), axis=0)
+                )
+                raise RuntimeError(f"Robot self-collision at {time:.3f}s: {link_pairs}.")
         if playback is not None:
             playback.record_frame(step + 1)
         step += 1

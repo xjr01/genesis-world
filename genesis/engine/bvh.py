@@ -1,7 +1,14 @@
+from itertools import pairwise
+
+import numpy as np
+import torch
+
 import quadrants as qd
 
 import genesis as gs
 from genesis.repr_base import RBC
+from genesis.utils.array_class import V_ANNOTATION
+from genesis.utils.misc import qd_to_torch
 
 # A constant stack size should be sufficient for BVH traversal.
 # https://madmann91.github.io/2021/01/06/bvhs-part-2.html
@@ -30,6 +37,135 @@ def kernel_remap_leaf_faces(faces_idx: qd.types.ndarray(ndim=1), bvh_morton_code
     for batch_idx, leaf_idx in qd.ndrange(bvh_morton_codes.shape[0], bvh_morton_codes.shape[1]):
         face_slot = qd.cast(bvh_morton_codes[batch_idx, leaf_idx][1], gs.qd_int)
         bvh_morton_codes[batch_idx, leaf_idx][1] = qd.cast(faces_idx[face_slot], qd.u32)
+
+
+@qd.func
+def func_refit_bvh(bvh: V_ANNOTATION):
+    for i_b, i_leaf in qd.ndrange(bvh.n_batches, bvh.n_aabbs):
+        i_a = bvh.leaves_idx[i_b, i_leaf]
+        bvh.nodes[i_b, bvh.n_aabbs - 1 + i_leaf].bound = bvh.aabbs[i_b, i_a]
+    # Separate parallel loops publish each level before its parents read the bounds.
+    for i_level in qd.static(range(len(bvh.level_ranges) - 1, -1, -1)):
+        for i_b, i_n in qd.ndrange(bvh.n_batches, bvh.level_ranges[i_level]):
+            i_l = bvh.nodes[i_b, i_n].left
+            i_r = bvh.nodes[i_b, i_n].right
+            bvh.nodes[i_b, i_n].bound.min = qd.min(bvh.nodes[i_b, i_l].bound.min, bvh.nodes[i_b, i_r].bound.min)
+            bvh.nodes[i_b, i_n].bound.max = qd.max(bvh.nodes[i_b, i_l].bound.max, bvh.nodes[i_b, i_r].bound.max)
+
+
+@qd.kernel
+def kernel_refit_bvh(bvh: V_ANNOTATION):
+    func_refit_bvh(bvh)
+
+
+@qd.kernel
+def kernel_refit_bvh_codes(codes: qd.types.ndarray(), bvh: V_ANNOTATION):
+    for i_b, i_a in qd.ndrange(bvh.n_batches, bvh.n_aabbs):
+        root = bvh.nodes[i_b, bvh.roots_idx[bvh.groups_idx[i_a]]].bound
+        center = (bvh.aabbs[i_b, i_a].min + bvh.aabbs[i_b, i_a].max) * 0.5
+        normalized = (center - root.min) / qd.max(root.max - root.min, gs.EPS)
+        coordinates = qd.cast(qd.min(1.0, qd.max(0.0, normalized)) * 1023.0, gs.qd_int)
+        code = 0
+        for bit in qd.static(range(10)):
+            for axis in qd.static(range(3)):
+                code |= ((coordinates[axis] >> bit) & 1) << (3 * bit + 2 - axis)
+        codes[i_b, i_a] = code
+
+
+@qd.kernel
+def kernel_set_bvh_leaves(leaves_idx: qd.types.ndarray(), bvh: V_ANNOTATION):
+    for i_b, i_leaf in qd.ndrange(bvh.n_batches, bvh.n_aabbs):
+        bvh.leaves_idx[i_b, i_leaf] = leaves_idx[i_b, i_leaf]
+
+
+class RefitBVH(RBC):
+    """Balanced bounding volume hierarchy (BVH) with level-wise refits and spatially sorted leaf groups.
+
+    Consecutive input groups retain separate subtrees, allowing callers to reject an entire group at its root.
+    Rebuilding reassigns leaves by Morton order within each group. The balanced layout and level ranges remain fixed,
+    so captured refit graphs remain valid across rebuilds. Input bounds use shape [batch, leaf].
+    """
+
+    def __init__(self, aabb, leaf_counts):
+        if not leaf_counts or min(leaf_counts) < 1 or sum(leaf_counts) != aabb.n_aabbs:
+            gs.raise_exception("BVH leaf counts must be positive and cover every input bound.")
+        self.aabbs = aabb.aabbs
+        self.n_aabbs = aabb.n_aabbs
+        self.n_batches = aabb.n_batches
+        self.nodes = qd.types.struct(left=gs.qd_int, right=gs.qd_int, parent=gs.qd_int, bound=aabb.qd_aabb).field(
+            shape=(self.n_batches, 2 * self.n_aabbs - 1), layout=qd.Layout.SOA
+        )
+        self.leaves_idx = qd.field(gs.qd_int, shape=(self.n_batches, self.n_aabbs))
+        self.groups_idx = qd.field(gs.qd_int, shape=self.n_aabbs)
+        self.roots_idx = qd.field(gs.qd_int, shape=len(leaf_counts))
+        offsets = np.cumsum((0, *leaf_counts))
+        self.leaf_ranges = tuple(pairwise(offsets))
+        left = np.full(2 * self.n_aabbs - 1, -1, dtype=gs.np_int)
+        right = np.full_like(left, -1)
+        parents = np.full_like(left, -1)
+        roots = np.full(len(leaf_counts), -1, dtype=gs.np_int)
+        starts = np.zeros(1, dtype=gs.np_int)
+        ends = np.full_like(starts, self.n_aabbs)
+        nodes = np.zeros_like(starts)
+        next_internal = 1
+        levels = []
+        while nodes.size:
+            first = np.searchsorted(offsets, starts, side="right") - 1
+            last = np.searchsorted(offsets, ends - 1, side="right") - 1
+            is_root = (starts == offsets[first]) & (ends == offsets[first + 1])
+            roots[first[is_root]] = nodes[is_root]
+            is_internal = ends - starts > 1
+            nodes, starts, ends = nodes[is_internal], starts[is_internal], ends[is_internal]
+            first, last = first[is_internal], last[is_internal]
+            if not nodes.size:
+                break
+            levels.append((int(nodes.min()), int(nodes.max()) + 1))
+            middle = np.where(first == last, (starts + ends) // 2, offsets[(first + last + 1) // 2])
+            is_left_internal = middle - starts > 1
+            is_right_internal = ends - middle > 1
+            children_left = self.n_aabbs - 1 + starts
+            children_right = self.n_aabbs - 1 + middle
+            n_left = np.count_nonzero(is_left_internal)
+            n_right = np.count_nonzero(is_right_internal)
+            children_left[is_left_internal] = np.arange(next_internal, next_internal + n_left)
+            next_internal += n_left
+            children_right[is_right_internal] = np.arange(next_internal, next_internal + n_right)
+            next_internal += n_right
+            left[nodes], right[nodes] = children_left, children_right
+            parents[children_left], parents[children_right] = nodes, nodes
+            nodes = np.concatenate((children_left, children_right))
+            ends = np.concatenate((middle, ends))
+            starts = np.concatenate((starts, middle))
+        self.level_ranges = tuple(levels)
+        self.nodes.left.from_numpy(np.tile(left, (self.n_batches, 1)))
+        self.nodes.right.from_numpy(np.tile(right, (self.n_batches, 1)))
+        self.nodes.parent.from_numpy(np.tile(parents, (self.n_batches, 1)))
+        self.roots_idx.from_numpy(roots)
+        self.groups_idx.from_numpy(np.repeat(np.arange(len(leaf_counts)), leaf_counts))
+        self.leaves_idx.from_numpy(np.tile(np.arange(self.n_aabbs), (self.n_batches, 1)))
+        self._codes = torch.empty((self.n_batches, self.n_aabbs), dtype=gs.tc_int, device=gs.device)
+        kernel_refit_bvh(self)
+        self.rebuild()
+
+    def rebuild(self):
+        """Regroup the current input bounds spatially and refit the resulting tree."""
+        kernel_refit_bvh_codes(self._codes, self)
+        leaves_idx = torch.cat(
+            [torch.argsort(self._codes[:, start:end], dim=1, stable=True) + start for start, end in self.leaf_ranges],
+            dim=1,
+        )
+        self.set_leaves(leaves_idx)
+
+    def set_leaves(self, leaves_idx):
+        """Assign a [batch, leaf] permutation within the existing groups and refit its bounds."""
+        if gs.use_zerocopy:
+            leaves = qd_to_torch(self.leaves_idx, transpose=True, copy=False)
+            leaves.copy_(leaves_idx.T)
+            if gs.backend == gs.metal:
+                torch.mps.synchronize()
+        else:
+            kernel_set_bvh_leaves(leaves_idx, self)
+        kernel_refit_bvh(self)
 
 
 @qd.data_oriented

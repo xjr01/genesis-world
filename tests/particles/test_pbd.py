@@ -109,6 +109,8 @@ def test_unified_elastic_projection(n_envs, contact_distances, show_viewer, asse
             constraint_acceleration=0.9,
             collision_thickness=thickness,
             contact_detection_distance=detection_distance,
+            bvh_rebuild_check_interval=1,
+            bvh_rebuild_threshold=1.0,
             is_recording_constraint_history=True,
             is_recording_edge_contacts=True,
         ),
@@ -281,11 +283,14 @@ def test_unified_elastic_projection(n_envs, contact_distances, show_viewer, asse
         contact_elastic.fix_particles([0, 1, 2])
         for gap in (0.5 * thickness, 1.5 * thickness, 1.1 * detection_distance):
             positions = contact_elastic.init_particles.copy()
+            positions[:, 0] -= 2.0
+            positions[3, :2] = (-0.00721, 0.01347)
             contact_elastic.set_particles_pos(positions)
-            contact_rigid.set_pos((2.04, 0.04, 0.6075 + gap))
+            contact_rigid.set_pos(pos=(0.04, 0.04, 0.6075 + gap))
             scene.pbd_solver.project_collision()
             positions[3, 2] -= max(thickness - gap, 0.0)
             assert_allclose(contact_elastic.get_particles_pos(), positions, atol=2e-7)
+            assert_equal(contact_elastic.get_particles_pos()[..., :2], positions[:, :2])
         contact_rigid.set_pos((14.0, 0.0, 1.0))
         face_entity = face_entities[0]
         face_entity.fix_particles([3, 4])
@@ -935,6 +940,8 @@ def test_one_way_rigid_surface_collision(n_envs, is_regular_grid, options_type, 
     )
     if isinstance(pbd_options, gs.options.PBDUnifiedOptions):
         pbd_options.max_solver_iterations = 1
+        pbd_options.bvh_rebuild_check_interval = 1
+        pbd_options.bvh_rebuild_threshold = 1.0
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
             dt=0.01,

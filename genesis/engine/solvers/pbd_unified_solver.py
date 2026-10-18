@@ -11,7 +11,7 @@ import quadrants as qd
 import genesis as gs
 from genesis.engine.boundaries import CubeBoundary
 from genesis.engine.boundaries.rigid_surface import RigidSurface, build_rigid_surface
-from genesis.engine.bvh import AABB, LBVH, point_aabb_distance_sqr
+from genesis.engine.bvh import AABB, RefitBVH, func_refit_bvh, point_aabb_distance_sqr
 from genesis.engine.entities.pbd_entity import PBD2DEntity, PBD3DEntity
 from genesis.engine.states.solvers import PBDSolverState
 from genesis.utils import array_class, geom, sdf
@@ -440,11 +440,14 @@ def func_accumulate_vertex_contacts(
 
 
 @qd.func
-def func_bvh_successor(i_b, node_idx, nodes: V_ANNOTATION):
+def func_bvh_successor(i_b, node_idx, root_idx, nodes: V_ANNOTATION):
     """Return the next depth-first node after skipping the current subtree."""
     previous_node = node_idx
     node_idx = nodes[i_b, node_idx].parent
     while node_idx >= 0:
+        if previous_node == root_idx:
+            node_idx = -1
+            break
         if nodes[i_b, node_idx].right != previous_node:
             break
         previous_node = node_idx
@@ -456,14 +459,7 @@ def func_bvh_successor(i_b, node_idx, nodes: V_ANNOTATION):
 
 @qd.func
 def func_refit_contact_surface(solver: V_ANNOTATION):
-    for i_b, i_n in qd.ndrange(solver._B, solver._surface_bvh.nodes.shape[1]):
-        solver._surface_bvh.nodes[i_b, i_n].bound.min = qd.Vector([1.0e30, 1.0e30, 1.0e30])
-        solver._surface_bvh.nodes[i_b, i_n].bound.max = qd.Vector([-1.0e30, -1.0e30, -1.0e30])
-    for i_e, i_b in qd.ndrange(solver.n_entities, solver._B):
-        solver._surface_bounds[i_e, i_b].lower = qd.Vector([1.0e30, 1.0e30, 1.0e30])
-        solver._surface_bounds[i_e, i_b].upper = qd.Vector([-1.0e30, -1.0e30, -1.0e30])
-    for i_b, i_leaf in qd.ndrange(solver._B, solver._surface_faces.shape[0]):
-        i_f = qd.cast(solver._surface_bvh.morton_codes[i_b, i_leaf][1], gs.qd_int)
+    for i_b, i_f in qd.ndrange(solver._B, solver._surface_faces.shape[0]):
         face = solver._surface_faces[i_f]
         lower = qd.Vector([1.0e30, 1.0e30, 1.0e30])
         upper = -lower
@@ -473,16 +469,18 @@ def func_refit_contact_surface(solver: V_ANNOTATION):
             is_active = is_active and solver.particles_ng[i_p, i_b].active
             lower = qd.min(lower, solver.particles[i_p, i_b].pos, solver.particles[i_p, i_b].ipos)
             upper = qd.max(upper, solver.particles[i_p, i_b].pos, solver.particles[i_p, i_b].ipos)
-        if is_active:
-            i_e = solver._surface_face_entities[i_f]
-            qd.atomic_min(solver._surface_bounds[i_e, i_b].lower, lower)
-            qd.atomic_max(solver._surface_bounds[i_e, i_b].upper, upper)
-            node_idx = i_leaf + solver._surface_faces.shape[0] - 1
-            # Each leaf contributes directly to its ancestors, avoiding cross-thread readiness dependencies.
-            while node_idx >= 0:
-                qd.atomic_min(solver._surface_bvh.nodes[i_b, node_idx].bound.min, lower)
-                qd.atomic_max(solver._surface_bvh.nodes[i_b, node_idx].bound.max, upper)
-                node_idx = solver._surface_bvh.nodes[i_b, node_idx].parent
+        solver._surface_bvh.aabbs[i_b, i_f].min = qd.select(is_active, lower, 1.0e30)
+        solver._surface_bvh.aabbs[i_b, i_f].max = qd.select(is_active, upper, -1.0e30)
+    func_refit_bvh(solver._surface_bvh)
+    for i_e, i_b in qd.ndrange(solver.n_entities, solver._B):
+        i_root = solver._surface_roots[i_e]
+        lower = qd.Vector([1.0e30, 1.0e30, 1.0e30])
+        upper = -lower
+        if i_root >= 0:
+            lower = solver._surface_bvh.nodes[i_b, i_root].bound.min
+            upper = solver._surface_bvh.nodes[i_b, i_root].bound.max
+        solver._surface_bounds[i_e, i_b].lower = lower
+        solver._surface_bounds[i_e, i_b].upper = upper
 
 
 @qd.func
@@ -491,8 +489,10 @@ def func_accumulate_face_contacts(
     dyn_info: array_class.DynInfo,
     surface_info: array_class.RigidSurfaceInfo,
     solver: V_ANNOTATION,
+    is_projecting: qd.template(),
 ):
     for i_v, i_b in qd.ndrange(solver._contact_vertices.shape[0], solver._B):
+        counts = qd.Vector.zero(gs.qd_int, 6)
         vertex_idx, geom_slot = solver._contact_vertices[i_v]
         geom_idx = surface_info.surface_geoms_idx[geom_slot]
         point_local = dyn_info.verts.init_pos[vertex_idx]
@@ -510,8 +510,10 @@ def func_accumulate_face_contacts(
                 point <= bounds.upper + solver._options.contact_detection_distance
             ).all():
                 winding_crossings = 0
-                node_idx = 0
+                counts[0] += 1
+                node_idx = solver._surface_roots[i_e]
                 while node_idx >= 0:
+                    counts[1] += 1
                     node = solver._surface_bvh.nodes[i_b, node_idx]
                     has_hit = ray_aabb_intersection(point, ray_dir, node.bound.min, node.bound.max, gs.EPS) >= 0.0
                     if has_hit and node.left >= 0:
@@ -519,8 +521,9 @@ def func_accumulate_face_contacts(
                     else:
                         if has_hit:
                             leaf_idx = node_idx - (solver._surface_faces.shape[0] - 1)
-                            i_f = qd.cast(solver._surface_bvh.morton_codes[i_b, leaf_idx][1], gs.qd_int)
+                            i_f = solver._surface_bvh.leaves_idx[i_b, leaf_idx]
                             if solver._surface_face_entities[i_f] == i_e:
+                                counts[2] += 1
                                 face = solver._surface_faces[i_f]
                                 v0 = solver.particles[face[0], i_b].pos
                                 v1 = solver.particles[face[1], i_b].pos
@@ -532,7 +535,9 @@ def func_accumulate_face_contacts(
                                         winding_crossings += 1
                                     elif alignment < 0.0:
                                         winding_crossings -= 1
-                        node_idx = func_bvh_successor(i_b, node_idx, solver._surface_bvh.nodes)
+                        node_idx = func_bvh_successor(
+                            i_b, node_idx, solver._surface_roots[i_e], solver._surface_bvh.nodes
+                        )
                 if winding_crossings != 0 or qd.static(solver._options.contact_detection_distance > 0.0):
                     closest_face = -1
                     closest_distance_sqr = gs.qd_float(solver._options.contact_detection_distance**2)
@@ -542,8 +547,10 @@ def func_accumulate_face_contacts(
                     last_entry_time = gs.qd_float(-1.0)
                     segment_lower = qd.min(point, previous_point)
                     segment_upper = qd.max(point, previous_point)
-                    node_idx = 0
+                    counts[3] += 1
+                    node_idx = solver._surface_roots[i_e]
                     while node_idx >= 0:
+                        counts[4] += 1
                         node = solver._surface_bvh.nodes[i_b, node_idx]
                         has_overlap = (
                             winding_crossings != 0
@@ -556,8 +563,9 @@ def func_accumulate_face_contacts(
                         else:
                             if has_overlap or is_near:
                                 leaf_idx = node_idx - (solver._surface_faces.shape[0] - 1)
-                                i_f = qd.cast(solver._surface_bvh.morton_codes[i_b, leaf_idx][1], gs.qd_int)
+                                i_f = solver._surface_bvh.leaves_idx[i_b, leaf_idx]
                                 if solver._surface_face_entities[i_f] == i_e:
+                                    counts[5] += 1
                                     face = solver._surface_faces[i_f]
                                     triangle = qd.Matrix.zero(gs.qd_float, 3, 3)
                                     previous_triangle = qd.Matrix.zero(gs.qd_float, 3, 3)
@@ -578,8 +586,10 @@ def func_accumulate_face_contacts(
                                         if entry_time > last_entry_time:
                                             last_entry_time = entry_time
                                             entry_face = i_f
-                            node_idx = func_bvh_successor(i_b, node_idx, solver._surface_bvh.nodes)
-                    if closest_face >= 0:
+                            node_idx = func_bvh_successor(
+                                i_b, node_idx, solver._surface_roots[i_e], solver._surface_bvh.nodes
+                            )
+                    if qd.static(is_projecting) and closest_face >= 0:
                         face = solver._surface_faces[qd.select(entry_face >= 0, entry_face, closest_face)]
                         residual, gradients, is_valid = point_triangle_constraint(
                             point,
@@ -607,6 +617,18 @@ def func_accumulate_face_contacts(
                             func_accumulate_contact(
                                 i_b, face, residual, gradients[:, 1:4], weights, solver.particles, solver._errno
                             )
+        solver._surface_query_counts[i_v, i_b] = counts
+
+
+@qd.kernel
+def kernel_measure_surface_queries(
+    dyn_state: array_class.DynState,
+    dyn_info: array_class.DynInfo,
+    surface_info: array_class.RigidSurfaceInfo,
+    solver: V_ANNOTATION,
+):
+    func_refit_contact_surface(solver)
+    func_accumulate_face_contacts(dyn_state, dyn_info, surface_info, solver, is_projecting=False)
 
 
 @qd.func
@@ -806,7 +828,7 @@ def func_edge_contacts(
                                             for slot in qd.static(range(2)):
                                                 if weights[slot] > 0.0:
                                                     qd.atomic_add(solver._edge_contact_counts[indices[slot], i_b], 1)
-                    node_idx = func_bvh_successor(0, node_idx, solver._rigid_surface.bvh.nodes)
+                    node_idx = func_bvh_successor(0, node_idx, -1, solver._rigid_surface.bvh.nodes)
 
     if qd.static(not is_diagnostic):
         for i_p, i_b in qd.ndrange(solver.n_particles, solver._B):
@@ -1003,9 +1025,9 @@ def func_project_collision(
     is_recording: qd.template(),
 ):
     func_store_contact_positions(solver.particles)
-    if qd.static(isinstance(solver._surface_bvh, LBVH)):
+    if qd.static(isinstance(solver._surface_bvh, RefitBVH)):
         func_refit_contact_surface(solver)
-        func_accumulate_face_contacts(dyn_state, dyn_info, surface_info, solver)
+        func_accumulate_face_contacts(dyn_state, dyn_info, surface_info, solver, is_projecting=True)
     func_accumulate_vertex_contacts(
         solver.particles,
         solver.particles_ng,
@@ -1023,7 +1045,7 @@ def func_project_collision(
             i_substep = solver._edge_history_substep[()]
             i_iteration = solver._options.max_solver_iterations - solver._graph_counter[()]
             solver._edge_history_positions[i_substep, i_iteration, i_p, i_b] = solver.particles[i_p, i_b].pos
-    if qd.static(isinstance(solver._surface_bvh, LBVH)):
+    if qd.static(isinstance(solver._surface_bvh, RefitBVH)):
         func_edge_contacts(dyn_state, dyn_info, surface_info, solver, is_diagnostic=False)
         if qd.static(is_recording and solver._options.is_recording_edge_contacts):
             for i_e, i_b in qd.ndrange(solver._detected_edge_contacts.shape[0], solver._B):
@@ -1193,6 +1215,10 @@ class PBDUnifiedSolver(Solver):
         self._surface_face_entities = None
         self._surface_bounds = None
         self._surface_bvh = None
+        self._surface_roots = None
+        self._surface_query_counts = None
+        self._surface_query_baseline = None
+        self._surface_query_updates = 0
         self._surface_edge_adjacency = None
         self._edge_contact_counts = None
         self._detected_edge_contacts = None
@@ -1431,8 +1457,10 @@ class PBDUnifiedSolver(Solver):
             surface_faces = []
             surface_face_entities = []
             surface_triangles = []
+            surface_entities = []
             for i_e, entity in enumerate(self.entities):
                 if isinstance(entity, PBD3DEntity):
+                    surface_entities.append(i_e)
                     faces, adjacent_tets, _ = igl.boundary_facets(entity.elems)
                     vertices = entity.init_particles
                     triangles = vertices[faces]
@@ -1480,8 +1508,13 @@ class PBDUnifiedSolver(Solver):
             surface_aabbs = AABB(n_batches=self._B, n_aabbs=len(faces))
             surface_aabbs.aabbs.min.from_numpy(np.tile(triangles.min(axis=1)[None], (self._B, 1, 1)))
             surface_aabbs.aabbs.max.from_numpy(np.tile(triangles.max(axis=1)[None], (self._B, 1, 1)))
-            self._surface_bvh = LBVH(surface_aabbs, max_n_query_result_per_aabb=0)
-            self._surface_bvh.build()
+            self._surface_bvh = RefitBVH(surface_aabbs, tuple(len(faces) for faces in surface_faces))
+            roots = np.full(self.n_entities, -1, dtype=gs.np_int)
+            roots[surface_entities] = qd_to_numpy(self._surface_bvh.roots_idx, transpose=True)
+            self._surface_roots = qd.field(gs.qd_int, shape=self.n_entities)
+            self._surface_roots.from_numpy(roots)
+            # Each query type stores its count, visited nodes, and tested triangles independently.
+            self._surface_query_counts = qd.field(qd.types.vector(6, gs.qd_int), shape=(len(contact_vertices), self._B))
         self._surface_info = (
             self._rigid_surface.info
             if self._rigid_surface is not None
@@ -1553,6 +1586,7 @@ class PBDUnifiedSolver(Solver):
             self,
             self._errno,
         )
+        self.update_contact_bvh()
         rigid = self.scene.rigid_solver
         kernel_solve_constraints(
             self._iteration_positions if self._iteration_positions is not None else self._graph_counter,
@@ -1573,6 +1607,7 @@ class PBDUnifiedSolver(Solver):
         """Apply simultaneous vertex-face and domain corrections, then average edge-edge corrections per vertex."""
         if gs.use_zerocopy and gs.backend == gs.metal:
             torch.mps.synchronize()
+        self.update_contact_bvh()
         rigid = self.scene.rigid_solver
         kernel_project_collision(
             rigid.dyn_state,
@@ -1582,6 +1617,50 @@ class PBDUnifiedSolver(Solver):
             self._surface_info,
             self,
         )
+
+    def update_contact_bvh(self):
+        """Check query work periodically and retain a spatial rebuild when it reduces the current traversal work."""
+        if self._surface_bvh is None:
+            return
+        self._surface_query_updates += 1
+        if self._surface_query_updates % self._options.bvh_rebuild_check_interval:
+            return
+        counts = tensor_to_array(self.get_contact_query_counts())
+        work = counts[:, 1:].sum(axis=1) / np.maximum(counts[:, 0], 1)
+        if self._surface_query_baseline is None:
+            self._surface_query_baseline = work
+            return
+        is_populated = self._surface_query_baseline > 0
+        is_degraded = is_populated & (work > self._options.bvh_rebuild_threshold * self._surface_query_baseline)
+        self._surface_query_baseline[~is_populated] = work[~is_populated]
+        if not is_degraded.any():
+            return
+        rigid = self.scene.rigid_solver
+        # Evaluate both orders on the same positions; changing contact populations alone can increase query work.
+        kernel_measure_surface_queries(rigid.dyn_state, rigid.dyn_info, self._surface_info, self)
+        before = tensor_to_array(self.get_contact_query_counts())
+        leaves_idx = qd_to_torch(self._surface_bvh.leaves_idx, transpose=True, copy=True).T.contiguous()
+        self._surface_bvh.rebuild()
+        kernel_measure_surface_queries(rigid.dyn_state, rigid.dyn_info, self._surface_info, self)
+        after = tensor_to_array(self.get_contact_query_counts())
+        # Require a margin while keeping both work categories bounded to avoid a traversal-order tradeoff.
+        is_improved = (after[:, 1:].sum(axis=0) <= before[:, 1:].sum(axis=0)).all()
+        is_improved = is_improved and after[:, 1:].sum() < 0.9 * before[:, 1:].sum()
+        if not is_improved:
+            self._surface_bvh.set_leaves(leaves_idx)
+        # Establish the baseline at the regular sampling phase, matching the work used to trigger a trial.
+        self._surface_query_baseline = None if is_improved else work
+        gs.logger.debug(
+            f"PBD surface BVH rebuild: accepted={is_improved}, "
+            f"node tests={before[:, 1].sum()} -> {after[:, 1].sum()}, "
+            f"triangle tests={before[:, 2].sum()} -> {after[:, 2].sum()}."
+        )
+
+    def get_contact_query_counts(self):
+        """Return [ray/proximity, query/node/triangle] counts summed over environments for the last surface query pass."""
+        if self._surface_query_counts is None:
+            return torch.zeros((2, 3), dtype=gs.tc_int, device=gs.device)
+        return qd_to_torch(self._surface_query_counts, transpose=True).sum(dim=(0, 1)).reshape(2, 3)
 
     def substep_post_coupling(self, f):
         self._store_contact_poses()
@@ -1611,6 +1690,8 @@ class PBDUnifiedSolver(Solver):
     def set_state(self, f, state, envs_idx=None):
         if not self.is_active:
             return
+        self._surface_query_baseline = None
+        self._surface_query_updates = 0
         envs_idx = self.scene._sanitize_envs_idx(envs_idx)
         particles_idx = torch.arange(self.n_particles, device=gs.device).repeat(len(envs_idx), 1)
         for field, value in (

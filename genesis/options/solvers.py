@@ -1164,6 +1164,12 @@ class PBDUnifiedOptions(Options):
     at the cost of a visible gap. Contact detection distance includes nearby separated surfaces; keep it slightly larger
     than the thickness to retain contacts around the target gap. Larger distances increase contact counts and runtime.
     Setting both distances to zero restricts contact generation to intersections.
+    ``bvh_rebuild_check_interval`` sets the number of simulation substeps between search-efficiency checks; explicit
+    collision-projection calls each count as one substep for this purpose.
+    Smaller intervals react sooner to deformation at greater monitoring cost. ``bvh_rebuild_threshold`` is the relative
+    increase in average search work that triggers a trial reorganization: smaller values spend more time reorganizing,
+    while larger values tolerate slower searches. A trial is retained when the current queries require substantially
+    less work.
     """
 
     dt: PositiveFloat | None = None
@@ -1175,6 +1181,8 @@ class PBDUnifiedOptions(Options):
     constraint_acceleration: Annotated[float, Field(ge=0.0, lt=1.0)] = 0.0
     collision_thickness: NonNegativeFloat = 0.0
     contact_detection_distance: NonNegativeFloat = 0.0
+    bvh_rebuild_check_interval: PositiveInt = 32
+    bvh_rebuild_threshold: Annotated[float, Field(ge=1.0)] = 1.5
     is_recording_constraint_history: StrictBool = False
     is_recording_edge_contacts: StrictBool = False
 

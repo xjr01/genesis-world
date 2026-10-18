@@ -128,10 +128,9 @@ def closest_point_on_triangle(
                             w = (d4 - d3) / ((d4 - d3) + (d5 - d6))
                             closest = v1 + w * (v2 - v1)
                         else:
-                            denom = 1.0 / (va + vb + vc)
-                            v = vb * denom
-                            w = vc * denom
-                            closest = v0 + v * ab + w * ac
+                            # Plane projection avoids tangential roundoff amplified by near-surface contact normals.
+                            normal = ab.cross(ac)
+                            closest = point - ap.dot(normal) / normal.norm_sqr() * normal
     return closest
 
 

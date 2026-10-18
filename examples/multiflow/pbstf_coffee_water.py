@@ -7,8 +7,8 @@ Replay with ``python -m examples.genesis_origin_example.rendering.replay_checkpo
 It supports ``--record``; ``--check-motion`` also replaces the sponge with a rigid preview.
 ``--check-trajectory`` enables trajectory acceptance checks and stops on failures, at extra checking cost.
 From the robot's perspective, world X points right, Y points up, and negative Z points forward across the table.
-Use ``--sponge-solver fem`` (default) for implicit corotated finite element method (FEM) elasticity on a coarse mesh.
-``--sponge-solver pbd-unified`` uses unified position-based dynamics (PBD) on a finer mesh with relaxed constraints.
+The sponge defaults to unified position-based dynamics (PBD) with adaptive bounding volume hierarchy (BVH) updates.
+Use ``--sponge-solver fem`` for implicit corotated finite element method (FEM) elasticity on a coarser mesh.
 The default particle scale resolves pouring and the wall film; coarse scales can retain liquid inside the tilted cup.
 """
 
@@ -394,7 +394,9 @@ def motion_target(time, motion, observation, *, is_trajectory_checked=False):
                 right.pos + carry * motion.catch_velocity + acceleration_carry * motion.catch_acceleration,
                 right.quat,
             )
-            right_opening -= (0.044 - RECOVERY_GRIP_OPENING) * smooth_progress(elapsed, start=0.02, end=RECOVERY_REACH_TIME)
+            right_opening -= (0.044 - RECOVERY_GRIP_OPENING) * smooth_progress(
+                elapsed, start=0.02, end=RECOVERY_REACH_TIME
+            )
             motion.cup_hold_time = motion.cup_hold_time + CONTROL_DT if observation.is_cup_grasped else 0.0
             if elapsed >= RECOVERY_REACH_TIME + 0.08 and motion.cup_hold_time >= 0.12:
                 motion.recovery_cup = observation.cup
@@ -668,7 +670,7 @@ def build_scene(
     is_motion_only=False,
     is_liquid_enabled=True,
     is_trajectory_checked=False,
-    sponge_solver="fem",
+    sponge_solver="pbd-unified",
 ):
     """Build contact-driven manipulation in meters with a deformable absorbent sponge.
 
@@ -761,7 +763,9 @@ def build_scene(
                 lower_bound=(-0.4, -1.0 / 15.0, -4.0 / 15.0),
                 upper_bound=(0.4, 8.0 / 15.0, 4.0 / 15.0),
                 max_solver_iterations=30,
-                constraint_acceleration=0.85,
+                constraint_acceleration=0.0,
+                collision_thickness=5e-5,
+                contact_detection_distance=1.5e-4,
             )
             if sponge_solver == "pbd-unified"
             else None
@@ -915,7 +919,7 @@ def build_scene(
             material=(
                 gs.materials.FEM.Elastic(E=1e4, rho=30.0, model="linear_corotated")
                 if sponge_solver == "fem"
-                else gs.materials.PBD.Elastic(rho=30.0, stretch_relaxation=0.25, volume_relaxation=0.15)
+                else gs.materials.PBD.Elastic(rho=30.0, stretch_relaxation=0.1, volume_relaxation=0.1, damping=80.0)
             ),
             surface=gs.surfaces.Default(color=(0.95, 0.68, 0.12)),
             name="sponge",
@@ -1034,8 +1038,8 @@ def main():
     parser.add_argument(
         "--sponge-solver",
         choices=("fem", "pbd-unified"),
-        default="fem",
-        help="Sponge deformation: FEM elasticity on a coarse mesh or unified PBD constraints on a finer mesh.",
+        default="pbd-unified",
+        help="Sponge deformation: unified PBD constraints (default) or FEM elasticity on a coarser mesh.",
     )
     parser.add_argument(
         "--check-trajectory",
