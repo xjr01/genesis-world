@@ -1,3 +1,4 @@
+import math
 from dataclasses import dataclass
 
 import numpy as np
@@ -936,14 +937,19 @@ def func_compute_momentum(solver: V_ANNOTATION, is_initial: qd.template(), is_co
         else:
             mass = solver._momentum[i_e, i_b].mass
             denominator = mass if mass > 0.0 else 1.0
+            # Muller et al., Position Based Dynamics, section 3.5: damp deformation while preserving rigid modes.
+            # Scaling the measured momenta folds damping into the final momentum correction.
+            decay = solver._entities_velocity_decay[i_e]
             solver._momentum[i_e, i_b].linear = (
-                solver._momentum[i_e, i_b].linear_target - solver._momentum[i_e, i_b].linear
+                solver._momentum[i_e, i_b].linear_target - decay * solver._momentum[i_e, i_b].linear
             ) / denominator
             covariance = solver._momentum[i_e, i_b].covariance
             trace = covariance.trace()
             scale = trace if trace > 0.0 else 1.0
             inertia = (trace * qd.Matrix.identity(gs.qd_float, 3) - covariance) / scale
-            angular_error = (solver._momentum[i_e, i_b].angular_target - solver._momentum[i_e, i_b].angular) / scale
+            angular_error = (
+                solver._momentum[i_e, i_b].angular_target - decay * solver._momentum[i_e, i_b].angular
+            ) / scale
             cofactors = qd.Matrix.rows(
                 [
                     inertia[1, :].cross(inertia[2, :]),
@@ -1091,6 +1097,9 @@ def kernel_solve_constraints(
         if solver.particles_ng[i_p, i_b].active:
             i_e = solver.particles_info[i_p].entity_idx
             vel = solver.particles[i_p, i_b].momentum_vel
+            if solver.particles[i_p, i_b].free:
+                # See func_compute_momentum for the matching rigid-mode correction.
+                vel *= solver._entities_velocity_decay[i_e]
             if solver._momentum[i_e, i_b].is_free:
                 relative = solver.particles[i_p, i_b].pos - solver._momentum[i_e, i_b].center
                 vel += solver._momentum[i_e, i_b].linear + solver._momentum[i_e, i_b].angular.cross(relative)
@@ -1205,6 +1214,7 @@ class PBDUnifiedSolver(Solver):
         self._iteration_positions = None
         self._momentum = None
         self._entities_particle_start = None
+        self._entities_velocity_decay = None
         self._graph_counter = None
         self._edges = None
         self._inner_edges = None
@@ -1335,6 +1345,18 @@ class PBDUnifiedSolver(Solver):
         self._entities_particle_start = qd.field(gs.qd_int, shape=(self.n_entities,))
         self._entities_particle_start.from_numpy(
             np.array([entity.particle_start for entity in self.entities], dtype=gs.np_int)
+        )
+        self._entities_velocity_decay = qd.field(gs.qd_float, shape=(self.n_entities,))
+        self._entities_velocity_decay.from_numpy(
+            np.array(
+                [
+                    math.exp(-entity.material.damping * self.substep_dt)
+                    if isinstance(entity.material, gs.materials.PBD.Elastic)
+                    else 1.0
+                    for entity in self.entities
+                ],
+                dtype=gs.np_float,
+            )
         )
         self._graph_counter = qd.ndarray(gs.qd_int, shape=())
         particles_entity_idx = np.empty(self.n_particles, dtype=gs.np_int)

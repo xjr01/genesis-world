@@ -6,6 +6,7 @@ method (FEM) elasticity on a coarser mesh. The right hand starts at the sponge, 
 0.6 seconds, settles until 1.0 second, then wipes 0.34 meters in 4 seconds and holds. Measured sponge tracking error
 above 1 cm stops the example. --check-penetration measures vertex intrusion against the hand and fingers and unified
 PBD surface crossings against every coupled rigid geom, including the table, with extra geometry queries.
+--damping controls unified PBD deformation damping in 1/s; use zero to compare elastic oscillations.
 With --vis, Space plays/pauses and Left/Right browse simulation time steps. For unified PBD, T switches to individual
 solver iterations with colored collision edges, recorded after point/face projection and before edge projection.
 T switches back to completed time steps with plain meshes. D cycles wireframe modes. The viewer starts paused
@@ -252,6 +253,12 @@ def main():
     )
     parser.add_argument("--dt", type=float, default=0.002, help="Simulation step duration in seconds")
     parser.add_argument("--substeps", type=int, default=1, help="More substeps resolve contacts at extra cost")
+    parser.add_argument(
+        "--damping",
+        type=float,
+        default=80.0,
+        help="Unified PBD damping rate in 1/s; higher values settle faster but recover slower",
+    )
     parser.add_argument("-t", "--seconds", type=float, default=5.5, help="Duration; wiping finishes at 5 seconds")
     parser.add_argument(
         "--check-penetration",
@@ -264,6 +271,8 @@ def main():
         parser.error("--dt and --substeps must be positive and finite")
     if not math.isfinite(args.seconds) or args.seconds <= 0:
         parser.error("--seconds must be finite and positive")
+    if not math.isfinite(args.damping) or args.damping < 0:
+        parser.error("--damping must be finite and nonnegative")
     if "PYTEST_VERSION" in os.environ:
         args.seconds = min(args.seconds, 0.02)
 
@@ -337,9 +346,9 @@ def main():
             camera_up=(0.0, 1.0, 0.0),
             camera_fov=50,
         ),
-        profiling_options=gs.options.ProfilingOptions(
-            show_FPS=False,
-        ),
+        # profiling_options=gs.options.ProfilingOptions(
+        #     show_FPS=False,
+        # ),
         show_viewer=args.is_viewer_shown,
     )
     table = scene.add_entity(
@@ -394,7 +403,12 @@ def main():
         material=(
             gs.materials.FEM.Elastic(E=1e4, rho=30.0, model="linear_corotated")
             if args.solver == "fem"
-            else gs.materials.PBD.Elastic(rho=30.0, stretch_relaxation=0.1, volume_relaxation=0.1)
+            else gs.materials.PBD.Elastic(
+                rho=30.0,
+                stretch_relaxation=0.1,
+                volume_relaxation=0.1,
+                damping=args.damping if args.solver == "unified" else 0.0,
+            )
         ),
         surface=gs.surfaces.Default(color=(0.95, 0.68, 0.12), smooth=False),
         name="sponge",

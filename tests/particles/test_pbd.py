@@ -593,6 +593,76 @@ def test_unified_elastic_projection(n_envs, contact_distances, show_viewer, asse
         scene.step()
 
 
+@pytest.mark.required
+@pytest.mark.parametrize("n_envs", [0, 2])
+def test_elastic_damping(n_envs, show_viewer):
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=0.01,
+            gravity=(0.0, 0.0, 0.0),
+        ),
+        pbd_options=gs.options.PBDUnifiedOptions(
+            max_solver_iterations=1,
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(0.8, -1.2, 1.1),
+            camera_lookat=(0.05, -0.7, 0.55),
+        ),
+        show_viewer=show_viewer,
+    )
+    damping_entities = []
+    # Binary-exact offsets within one exponent range give comparable single-precision position differences.
+    for i_entity, damping in enumerate((0.0, 40.0, 4000.0)):
+        damping_entities.append(
+            scene.add_entity(
+                morph=gs.morphs.TetrahedralMesh(
+                    pos=(0.0, -0.625 - 0.125 * i_entity, 0.5),
+                    vertices=((0.0, 0.0, 0.0), (0.1, 0.0, 0.0), (0.0, 0.1, 0.0), (0.0, 0.0, 0.1)),
+                    elements=((0, 1, 2, 3),),
+                ),
+                material=gs.materials.PBD.Elastic(damping=damping),
+            )
+        )
+    scene.build(n_envs=n_envs)
+    initial_state = scene.get_state()
+    for is_fixed in (False, True):
+        scene.reset(initial_state)
+        for entity in damping_entities:
+            relative = entity.init_particles - entity.init_particles.mean(axis=0)
+            velocities = np.cross((-2.0, 1.0, 3.0), relative) + (0.02, -0.03, 0.04) + 2.0 * relative
+            entity.set_particles_vel(velocities)
+            if is_fixed:
+                entity.fix_particles([0, 1, 2])
+                entity.set_particles_vel((0.02, -0.03, 0.04), particles_idx_local=[0, 1, 2])
+        scene.step()
+        positions = tensor_to_array(damping_entities[0].get_particles_pos())
+        velocities = tensor_to_array(damping_entities[0].get_particles_vel())
+        relative = positions - positions.mean(axis=-2, keepdims=True)
+        linear = velocities.mean(axis=-2, keepdims=True)
+        angular = np.cross(relative, velocities).sum(axis=-2)
+        covariance = np.swapaxes(relative, -2, -1) @ relative
+        inertia = np.trace(covariance, axis1=-2, axis2=-1)[..., None, None] * np.eye(3) - covariance
+        omega = np.linalg.solve(inertia, angular[..., None])[..., 0]
+        rigid_velocities = linear + np.cross(omega[..., None, :], relative)
+        for entity in damping_entities[1:]:
+            decay = math.exp(-entity.material.damping * scene.dt)
+            expected = rigid_velocities + decay * (velocities - rigid_velocities)
+            if is_fixed:
+                expected = velocities.copy()
+                expected[..., 3, :] *= decay
+            offset = entity.init_particles - damping_entities[0].init_particles
+            assert_allclose(entity.get_particles_pos(), positions + offset, atol=2e-7)
+            damped = tensor_to_array(entity.get_particles_vel())
+            assert_allclose(damped, expected, atol=2e-6)
+            if not is_fixed:
+                assert_allclose(damped.mean(axis=-2, keepdims=True), linear, atol=2e-6)
+                assert_allclose(np.cross(relative, damped).sum(axis=-2), angular, atol=1e-7)
+                energy = ((velocities - rigid_velocities) ** 2).sum(axis=(-2, -1))
+                damped_energy = ((damped - rigid_velocities) ** 2).sum(axis=(-2, -1))
+                assert (energy > 1e-4).all()
+                assert_allclose(damped_energy, decay**2 * energy, atol=1e-7)
+
+
 # Note that "session" scope must NOT be used because the material while be altered without copy when building the scene
 @pytest.fixture(scope="function")
 def pbd_material():
