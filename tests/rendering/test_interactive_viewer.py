@@ -6,8 +6,10 @@ from threading import Lock
 from unittest.mock import MagicMock, Mock
 
 import numpy as np
-import OpenGL.error
 import pytest
+
+import av
+import OpenGL.error
 
 import genesis as gs
 from genesis.ext.pyrender.trackball import Trackball
@@ -55,6 +57,59 @@ def test_trackball_orbit_respects_world_up_axis():
 
     assert_allclose(trackball_z.pose, trackball_z_default.pose, atol=1e-12)
     assert_allclose(trackball_y.pose, transform_z_to_y @ trackball_z.pose, atol=1e-12)
+
+
+@pytest.mark.required
+@pytest.mark.skipif(not IS_INTERACTIVE_VIEWER_AVAILABLE, reason=SKIP_NO_VIEWER)
+@pytest.mark.parametrize("n_envs", [0, 2])
+def test_frame_sync(n_envs, show_viewer, asset_tmp_path, monkeypatch):
+    video_path = asset_tmp_path / f"viewer_frame_sync_{n_envs}.mp4"
+    monkeypatch.setattr("genesis.ext.pyrender.viewer.Viewer._get_save_filename", lambda self, file_exts: video_path)
+    camera_distance = 3.0
+    box_halfsize = 0.1
+    camera_fov = 40
+    scene = gs.Scene(
+        viewer_options=gs.options.ViewerOptions(
+            res=(160, 120),
+            refresh_rate=2,
+            is_frame_sync_enabled=True,
+            realtime_factor=None,
+            camera_pos=(0.0, -camera_distance, 0.0),
+            camera_lookat=(0.0, 0.0, 0.0),
+            camera_fov=camera_fov,
+        ),
+        vis_options=gs.options.VisOptions(
+            show_world_frame=False,
+            shadow=False,
+        ),
+        show_viewer=True,
+    )
+    entity = scene.add_entity(
+        morph=gs.morphs.Box(
+            size=(2.0 * box_halfsize,) * 3,
+            collision=False,
+        ),
+        material=gs.materials.Kinematic(),
+        surface=gs.surfaces.Default(color=(1.0, 0.0, 0.0)),
+    )
+    scene.build(n_envs=n_envs, env_spacing=(1.0, 0.0))
+    scene.step()
+    positions_x = (-0.4, 0.0, 0.4)
+    scene.viewer.toggle_recording()
+    for pos_x in positions_x:
+        entity.set_pos((pos_x, 0.0, 0.0))
+        scene.step()
+    scene.viewer.toggle_recording()
+
+    with av.open(video_path) as video:
+        frames = tuple(frame.to_ndarray(format="rgb24") for frame in video.decode(video=0))
+    assert_equal(len(frames), len(positions_x))
+    for frame, pos_x in zip(frames, positions_x):
+        is_entity = (frame[..., 0] > frame[..., 1]) & (frame[..., 0] > frame[..., 2])
+        pixels_x = np.nonzero(is_entity)[1]
+        focal_length = frame.shape[0] / (2.0 * np.tan(np.radians(camera_fov) / 2.0))
+        center_x = (frame.shape[1] - 1) / 2.0 + focal_length * pos_x / (camera_distance - box_halfsize)
+        assert_allclose(pixels_x.mean(), center_x, atol=2.0)
 
 
 @pytest.mark.required

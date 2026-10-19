@@ -43,6 +43,7 @@ class Viewer(RBC):
         self._res = options.res
         self._run_in_thread = options.run_in_thread
         self._refresh_rate = options.refresh_rate
+        self._is_frame_sync_enabled = options.is_frame_sync_enabled
         self._realtime_factor = options.realtime_factor
         self._camera_init_pos = np.asarray(options.camera_pos, dtype=gs.np_float)
         self._camera_init_lookat = np.asarray(options.camera_lookat, dtype=gs.np_float)
@@ -146,6 +147,8 @@ class Viewer(RBC):
                     if not self._run_in_thread:
                         self._pyrender_viewer.start(auto_refresh=False)
                     self._pyrender_viewer.wait_until_initialized()
+                    if self._is_frame_sync_enabled:
+                        self._pyrender_viewer.set_vsync(True)
                 break
             except (OpenGL.error.Error, RuntimeError) as e:
                 # Invalid OpenGL context. Trying another platform if any...
@@ -223,11 +226,17 @@ class Viewer(RBC):
                 viewer_thread = self._pyrender_viewer._thread or threading.main_thread()
                 auto_refresh = viewer_thread == threading.current_thread()
 
-            # Redraw at most refresh_rate times per second, independently of how often the simulation steps, so
-            # the refresh rate stays unrelated to the physics timestep.
             if auto_refresh and not self._pyrender_viewer.run_in_thread:
                 now = time.perf_counter()
-                if self._last_refresh_time is None or now - self._last_refresh_time >= 1.0 / self._refresh_rate:
+                # Wait for the refresh budget so each simulation state reaches the screen.
+                if self._is_frame_sync_enabled and self._last_refresh_time is not None:
+                    time.sleep(max(0.0, 1.0 / self._refresh_rate - (now - self._last_refresh_time)))
+                    now = time.perf_counter()
+                if (
+                    self._is_frame_sync_enabled
+                    or self._last_refresh_time is None
+                    or now - self._last_refresh_time >= 1.0 / self._refresh_rate
+                ):
                     self._last_refresh_time = now
                     self._pyrender_viewer.refresh()
 

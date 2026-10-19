@@ -30,11 +30,15 @@ class ViewerOptions(Options):
         The resolution of the viewer. If not set, will auto-compute using resolution of the connected display.
     run_in_thread : bool
         Whether to run the viewer in a background thread. This option is not supported on MacOS. True by default if
-        available.
+        available. Resolves to False when is_frame_sync_enabled is True.
     refresh_rate : int
         The rate (in frames per second) at which the viewer repaints on screen, and the framerate the video recorded
         from the viewer window is encoded at. Independent of the physics timestep, and of the framerate passed to
         `camera.start_recording`.
+    is_frame_sync_enabled : bool
+        Display every simulation step before advancing, slowing the simulation to the viewer's rendering and display
+        rate when needed. Window input is processed between simulation steps. Leave False for independent viewer
+        updates and more responsive input during expensive steps. Defaults to False.
     realtime_factor : float | None
         Multiple of wall-clock real time that one second of playback stands for (1.0 is real time, 2.0 is twice as
         fast). When the viewer is shown, the simulation is paced to it, falling behind gracefully when it cannot keep
@@ -65,6 +69,7 @@ class ViewerOptions(Options):
     res: PositiveVec2IType | None = None
     run_in_thread: StrictBool | None = None
     refresh_rate: PositiveInt = 60
+    is_frame_sync_enabled: StrictBool = False
     realtime_factor: PositiveFloat | None = 1.0
     camera_pos: Vec3FType = (3.5, 0.5, 2.5)
     camera_lookat: Vec3FType = (0.0, 0.0, 0.5)
@@ -78,6 +83,10 @@ class ViewerOptions(Options):
 
     def model_post_init(self, context: Any) -> None:
         super().model_post_init(context)
+        if self.is_frame_sync_enabled:
+            if self.run_in_thread is True:
+                gs.raise_exception("'run_in_thread' must be False when 'is_frame_sync_enabled' is True.")
+            self.run_in_thread = False
         # 'max_FPS' is deprecated in favor of 'refresh_rate'; map it over when set, but refuse to guess which the user
         # meant when they also set 'refresh_rate' explicitly.
         if self.max_FPS is not None:

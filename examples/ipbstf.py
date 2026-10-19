@@ -51,6 +51,18 @@ def _liquid_material(case, viscosity=0.0, surface_tension=0.0):
     )
 
 
+def _add_ground(scene, height):
+    """Display the horizontal simulation boundary."""
+    scene.add_entity(
+        morph=gs.morphs.Plane(
+            pos=(0.0, height, 0.0),
+            normal=(0.0, 1.0, 0.0),
+            collision=False,
+        ),
+        material=gs.materials.Kinematic(),
+    )
+
+
 def build_scene(
     case=CASE_CUBE,
     scale=None,
@@ -146,6 +158,7 @@ def build_scene(
             ),
             viewer_options=gs.options.ViewerOptions(
                 refresh_rate=round(1.0 / dt),
+                is_frame_sync_enabled=True,
                 camera_pos=camera_pos,
                 camera_lookat=camera_lookat,
                 camera_up=(0.0, 1.0, 0.0),
@@ -188,6 +201,7 @@ def build_scene(
                 material=solid_material,
                 surface=solid_surface,
             )
+        _add_ground(scene, height=0.0)
         scene.build()
         return scene, tuple(entities)
 
@@ -230,6 +244,7 @@ def build_scene(
         ),
         viewer_options=gs.options.ViewerOptions(
             refresh_rate=round(1.0 / dt),
+            is_frame_sync_enabled=True,
             camera_pos=settings.camera_pos,
             camera_lookat=settings.camera_lookat,
             camera_up=(0.0, 1.0, 0.0),
@@ -239,6 +254,7 @@ def build_scene(
     )
     material_factory = functools.partial(_liquid_material, viscosity=viscosity, surface_tension=surface_tension)
     entities_and_velocities = add_case_entities(scene, case, particle_size, settings, material_factory)
+    _add_ground(scene, height=settings.lower_bound[1])
     scene.build()
     for entity, velocity in entities_and_velocities:
         if velocity is not None:
@@ -362,7 +378,6 @@ def main():
                     kuka_qpos,
                 )
             scene.step()
-            # while True: pass
     finally:
         stop_viewer(scene, is_viewer_shown)
 
