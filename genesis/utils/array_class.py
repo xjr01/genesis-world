@@ -2367,6 +2367,10 @@ def get_rigid_adjoint_cache(solver):
 @dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
 class FEMProjectionState:
     normals: qd.Tensor
+    reactions: qd.Tensor
+    rigid_vel: qd.Tensor
+    friction: qd.Tensor
+    is_sticking: qd.Tensor
     is_active: qd.Tensor
     is_processed: qd.Tensor
     has_changed: qd.Tensor

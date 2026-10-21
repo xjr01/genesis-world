@@ -1,15 +1,22 @@
 """Grasp and pour water, catch a tipped cup, and wipe the spill while the other arm stirs coffee.
 
 Run headlessly with ``python -m examples.multiflow.pbstf_coffee_water`` from the repository. Add ``--vis`` for the viewer,
-``--record`` for a video and stage images, or ``--surface`` for a reconstructed liquid surface.
-``--check-motion`` simulates rigid manipulation with a rigid sponge and ``--no-liquid`` keeps the soft sponge.
+``--record`` for a checkpoint at every control frame, or ``--surface`` for a reconstructed liquid surface.
+Replay with ``python -m examples.genesis_origin_example.rendering.replay_checkpoints out/pbstf_coffee_water/checkpoints``.
+``--no-liquid`` skips liquid creation and simulation for faster trajectory tuning while keeping the soft sponge.
+It supports ``--record``; ``--check-motion`` also replaces the sponge with a rigid preview.
+``--check-trajectory`` enables trajectory acceptance checks and stops on failures, at extra checking cost.
 From the robot's perspective, world X points right, Y points up, and negative Z points forward across the table.
+The sponge defaults to unified position-based dynamics (PBD) with adaptive bounding volume hierarchy (BVH) updates.
+Use ``--sponge-solver fem`` for implicit corotated finite element method (FEM) elasticity on a coarser mesh.
 The default particle scale resolves pouring and the wall film; coarse scales can retain liquid inside the tilted cup.
 """
 
 import argparse
 import csv
 import math
+import xml.etree.ElementTree as ET
+from copy import deepcopy
 from dataclasses import dataclass
 from enum import IntEnum
 from pathlib import Path
@@ -17,13 +24,13 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from PIL import Image
-from scipy.spatial.transform import Rotation
 import trimesh
+from scipy.spatial.transform import Rotation
 
 import genesis as gs
 from genesis.engine.entities.rigid_entity.rigid_link import RigidLink
 from genesis.utils import element, geom, mesh, particle
+from genesis.utils.checkpoint_replay import CheckpointWriter
 from genesis.utils.misc import tensor_to_array
 
 CUP_ASSET = "meshes/drinking_glass/12-oz-glass.obj"
@@ -39,6 +46,9 @@ WATER_FILL_FRACTION = 1.0
 CUP_GRIP_HEIGHT = 0.09
 CUP_GRIP_OPENING = 0.034
 RECOVERY_GRIP_OPENING = 0.032
+RECOVERY_CUP_TILT = 40.0
+RECOVERY_TRIGGER_TILT = 30.0
+RECOVERY_REACH_TIME = 0.25
 ROBOT_ASSET = "urdf/sim1_acone/acone_collision.urdf"
 ROD_ASSET = "meshes/glass_stirring_rod/glass_rod.obj"
 ROBOT_POS = (-0.06, -0.55, 0.52)
@@ -46,6 +56,7 @@ ROBOT_QUAT = (0.5, -0.5, 0.5, 0.5)
 TOOL_CENTER = np.array((0.14747, 0.001786, 0.0))
 TABLE_Y = -0.045
 SPONGE_SIZE = (0.04, 0.06, 0.08)
+SPONGE_GRID_RESOLUTION = (4, 6, 8)
 # The grip height keeps the wider finger mounts above the cup rims during the central wiping stroke.
 SPONGE_GRIP_HEIGHT = SPONGE_SIZE[1] - 0.005
 SPONGE_START = (0.0, TABLE_Y + 0.001, -0.17)
@@ -61,8 +72,7 @@ RECOVERY_GRIP_QUAT = (
     Rotation.from_euler("z", 4, degrees=True) * Rotation.from_quat(POUR_QUAT, scalar_first=True)
 ).as_quat(scalar_first=True)
 MOP_QUAT = (
-    Rotation.from_euler("x", 15, degrees=True)
-    * Rotation.from_matrix(((0, -1, 0), (-1, 0, 0), (0, 0, -1)))
+    Rotation.from_euler("x", 15, degrees=True) * Rotation.from_matrix(((0, -1, 0), (-1, 0, 0), (0, 0, -1)))
 ).as_quat(scalar_first=True)
 ROD_GRIP_QUAT = (
     Rotation.from_euler("y", -20, degrees=True)
@@ -72,7 +82,7 @@ ROD_GRIP_QUAT = (
 PARALLEL_START = 6.4
 MOTION_END = 28.0
 CONTROL_DT = 0.002
-CONTACT_SUBSTEPS = 2
+CONTACT_SUBSTEPS = 1
 
 
 class Phase(IntEnum):
@@ -176,12 +186,11 @@ class CoffeeWaterScene:
     coffee: gs.engine.entities.PBSTFEntity | None
     water: gs.engine.entities.PBSTFEntity | None
     water_cup: gs.engine.entities.RigidEntity
-    camera: gs.vis.camera.Camera | None
     cup_cavity: trimesh.Trimesh
     cup_distance_field: DistanceField | None
     robot: gs.engine.entities.RigidEntity
     rod: gs.engine.entities.RigidEntity
-    sponge: gs.engine.entities.PBD3DEntity | gs.engine.entities.RigidEntity
+    sponge: gs.engine.entities.FEMEntity | gs.engine.entities.PBD3DEntity | gs.engine.entities.RigidEntity
     hands_link: tuple[RigidLink, RigidLink]
     arms_dofs_idx: tuple[tuple[int, ...], tuple[int, ...]]
     hands_fingers_qs_idx: tuple[tuple[int, int], tuple[int, int]]
@@ -192,6 +201,7 @@ class CoffeeWaterScene:
     qpos: gs.Tensor
     motion: MotionState
     is_motion_only: bool
+    is_trajectory_checked: bool
 
 
 def smooth_progress(time, start, end):
@@ -213,9 +223,7 @@ def observe_scene(demo):
     poses = tensor_to_array(torch.cat((positions, quaternions), dim=-1))
     cup = ToolPose(poses[0, :3], poses[0, 3:])
     rod = ToolPose(poses[1, :3], poses[1, 3:])
-    hands = tuple(
-        ToolPose(pose[:3] + geom.transform_by_quat(TOOL_CENTER, pose[3:]), pose[3:]) for pose in poses[2:]
-    )
+    hands = tuple(ToolPose(pose[:3] + geom.transform_by_quat(TOOL_CENTER, pose[3:]), pose[3:]) for pose in poses[2:])
     cup_axis = geom.transform_by_quat(np.array((0.0, 1.0, 0.0)), cup.quat)
     cup_tilt = math.degrees(math.acos(np.clip(cup_axis[1], -1.0, 1.0)))
     water_in_cup = None
@@ -241,8 +249,10 @@ def observe_scene(demo):
     )
     if isinstance(demo.sponge, gs.engine.entities.RigidEntity):
         sponge_pos = demo.sponge.get_pos()
-    else:
+    elif isinstance(demo.sponge, gs.engine.entities.PBD3DEntity):
         sponge_pos = demo.sponge.get_particles_pos().mean(dim=-2)
+    else:
+        sponge_pos = demo.sponge.get_state().pos.mean(dim=-2)[0]
     return SceneObservation(
         cup, rod, hands, cup_tilt, water_in_cup, is_cup_grasped, cup_grasp_span, tensor_to_array(sponge_pos)
     )
@@ -305,8 +315,8 @@ def measure_motion(time, target, observation):
     )
 
 
-def motion_target(time, motion, observation):
-    """Advance independent arm phases using the measured cup pose for tipping and recovery."""
+def motion_target(time, motion, observation, *, is_trajectory_checked=False):
+    """Advance arm phases from the measured cup pose, optionally rejecting failed grasps and recovery limits."""
     cup_pos, cup_quat = water_cup_pose(time)
     right = grasp_pose(ToolPose(np.array(cup_pos), np.array(cup_quat)), motion.cup_grasp)
     right_opening = 0.044
@@ -323,7 +333,7 @@ def motion_target(time, motion, observation):
     elif time < 6.0:
         motion.right_phase = Phase.POUR
         right_opening = CUP_GRIP_OPENING
-        if not observation.is_cup_grasped:
+        if is_trajectory_checked and not observation.is_cup_grasped:
             raise RuntimeError(f"The water cup lost a finger contact during pouring at {time:.3f}s.")
     elif time < PARALLEL_START:
         motion.right_phase = Phase.RELEASE
@@ -341,22 +351,27 @@ def motion_target(time, motion, observation):
             motion.max_knock_tilt = max(motion.max_knock_tilt, observation.cup_tilt)
             if observation.water_in_cup is not None:
                 motion.spilled_particles = max(0, motion.water_before_reach - observation.water_in_cup)
-            if observation.cup_tilt > 65.0:
+            if is_trajectory_checked and observation.cup_tilt > 65.0:
                 raise RuntimeError(f"The tipped cup exceeded the recovery angle at {time:.3f}s.")
-        if motion.right_phase in (Phase.UPRIGHT, Phase.PLACE_CUP) and not observation.is_cup_grasped:
+        if (
+            is_trajectory_checked
+            and motion.right_phase in (Phase.UPRIGHT, Phase.PLACE_CUP)
+            and not observation.is_cup_grasped
+        ):
             raise RuntimeError(f"The cup lost its opposing wall contacts at {time:.3f}s.")
         if motion.right_phase == Phase.REACH_SPONGE:
             end = ToolPose(
                 np.array((SPONGE_START[0], motion.right_start.pos[1], SPONGE_START[2])), motion.right_start.quat
             )
             right = interpolate_tool(motion.right_start, end, smooth_progress(elapsed, start=0.0, end=1.2))
-            if observation.cup_tilt >= 38.0 and (observation.water_in_cup is None or motion.spilled_particles > 0):
+            # Measured tilt keeps recovery timing independent of liquid sampling and simulation.
+            if observation.cup_tilt >= RECOVERY_TRIGGER_TILT:
                 # Intercept the falling cup with open fingers before closing around its wall.
                 axis = geom.transform_by_quat(np.array((0.0, 1.0, 0.0)), observation.cup.quat)
                 direction = axis * (1.0, 0.0, 1.0)
                 direction /= np.linalg.norm(direction)
                 rotation_axis = np.cross(np.array((0.0, 1.0, 0.0)), direction)
-                quat = geom.rotvec_to_quat(math.radians(54.0) * rotation_axis)
+                quat = geom.rotvec_to_quat(math.radians(RECOVERY_CUP_TILT) * rotation_axis)
                 pivot_offset = 0.037 * direction
                 pivot = observation.cup.pos + geom.transform_by_quat(pivot_offset, observation.cup.quat)
                 pivot[1] = TABLE_Y
@@ -365,11 +380,11 @@ def motion_target(time, motion, observation):
                 motion.catch_velocity = (right.pos - motion.right_target.pos) / CONTROL_DT
                 motion.catch_acceleration = (motion.catch_velocity - motion.right_velocity) / CONTROL_DT
                 next_phase = Phase.CATCH
-            elif elapsed > 1.3:
+            elif is_trajectory_checked and elapsed > 1.3:
                 raise RuntimeError(f"The cup failed to tip at {time:.3f}s: tilt={observation.cup_tilt:.2f}deg.")
         elif motion.right_phase == Phase.CATCH:
             right = interpolate_tool(
-                motion.right_start, motion.catch_goal, smooth_progress(elapsed, start=0.0, end=0.35)
+                motion.right_start, motion.catch_goal, smooth_progress(elapsed, start=0.0, end=RECOVERY_REACH_TIME)
             )
             # Quintic braking retains the incoming velocity and acceleration when the measured tilt triggers recovery.
             fraction = np.clip(elapsed / 0.12, 0.0, 1.0)
@@ -379,14 +394,16 @@ def motion_target(time, motion, observation):
                 right.pos + carry * motion.catch_velocity + acceleration_carry * motion.catch_acceleration,
                 right.quat,
             )
-            right_opening -= (0.044 - RECOVERY_GRIP_OPENING) * smooth_progress(elapsed, start=0.02, end=0.35)
+            right_opening -= (0.044 - RECOVERY_GRIP_OPENING) * smooth_progress(
+                elapsed, start=0.02, end=RECOVERY_REACH_TIME
+            )
             motion.cup_hold_time = motion.cup_hold_time + CONTROL_DT if observation.is_cup_grasped else 0.0
-            if elapsed >= 0.43 and motion.cup_hold_time >= 0.12:
+            if elapsed >= RECOVERY_REACH_TIME + 0.08 and motion.cup_hold_time >= 0.12:
                 motion.recovery_cup = observation.cup
                 motion.cup_grasp = relative_grasp(right, observation.cup)
                 motion.has_caught_cup = True
                 next_phase = Phase.UPRIGHT
-            elif elapsed > 0.8:
+            elif is_trajectory_checked and elapsed > 0.8:
                 raise RuntimeError(f"Both fingers failed to grip the cup wall at {time:.3f}s.")
         elif motion.right_phase == Phase.UPRIGHT:
             cup = interpolate_tool(
@@ -400,7 +417,7 @@ def motion_target(time, motion, observation):
                 motion.recovery_cup = observation.cup
                 motion.cup_grasp = relative_grasp(right, observation.cup)
                 next_phase = Phase.PLACE_CUP
-            elif elapsed > 1.9:
+            elif is_trajectory_checked and elapsed > 1.9:
                 raise RuntimeError(f"The cup failed to stand upright at {time:.3f}s: {observation.cup_tilt:.3f}deg.")
         elif motion.right_phase == Phase.PLACE_CUP:
             pos = motion.recovery_cup.pos + smooth_progress(elapsed, start=0.0, end=0.6) * (
@@ -538,7 +555,7 @@ def update_motion(demo, time, observation=None):
     """Drive arm joints and fingers while fluid boundaries follow measured rigid poses."""
     if observation is None:
         observation = observe_scene(demo)
-    target = motion_target(time, demo.motion, observation)
+    target = motion_target(time, demo.motion, observation, is_trajectory_checked=demo.is_trajectory_checked)
     qpos = demo.qpos
     errors = []
     for link, dofs, pose in zip(demo.hands_link, demo.arms_dofs_idx, (target.right, target.left)):
@@ -558,7 +575,9 @@ def update_motion(demo, time, observation=None):
         error_array = tensor_to_array(error)
         pos_error = np.linalg.norm(error_array[..., :3], axis=-1).max()
         rot_error = np.linalg.norm(error_array[..., 3:], axis=-1).max()
-        if not np.isfinite(error_array).all() or pos_error > 2e-4 or rot_error > 2e-4:
+        if not np.isfinite(error_array).all() or (
+            demo.is_trajectory_checked and (pos_error > 2e-4 or rot_error > 2e-4)
+        ):
             raise RuntimeError(f"{link.name} IK failed at {time:.3f}s: position={pos_error}, rotation={rot_error}.")
         velocity = (qpos[list(dofs)] - demo.qpos[list(dofs)]) / CONTROL_DT
         if time == 0.0:
@@ -571,16 +590,16 @@ def update_motion(demo, time, observation=None):
     return target, max(errors)
 
 
-def step_scene(demo):
+def step_scene(demo, *, is_rendering=True):
     """Advance contact steps with one-way fluid boundaries synchronized to measured rigid poses."""
-    for _ in range(CONTACT_SUBSTEPS):
+    for substep in range(CONTACT_SUBSTEPS):
         if demo.scene.pbstf_solver.is_active:
             demo.scene.pbstf_solver.set_static_colliders_pose(
                 demo.scene.rigid_solver.get_links_pos(demo.observed_links_idx[:2]),
                 demo.scene.rigid_solver.get_links_quat(demo.observed_links_idx[:2]),
                 colliders_idx=(2, 3),
             )
-        demo.scene.step()
+        demo.scene.step(update_visualizer=is_rendering and substep + 1 == CONTACT_SUBSTEPS)
 
 
 def water_cup_pose(time):
@@ -647,17 +666,24 @@ def check_contacts(demo, time):
 def build_scene(
     scale=1500,
     is_viewer_shown=False,
-    is_recording=False,
     is_surface=False,
     is_motion_only=False,
     is_liquid_enabled=True,
+    is_trajectory_checked=False,
+    sponge_solver="pbd-unified",
 ):
     """Build contact-driven manipulation in meters with a deformable absorbent sponge.
 
-    Motion-only mode uses a rigid sponge preview. Disabling liquid keeps sponge dynamics for isolated contact checks.
+    The sponge uses implicit finite element method (FEM) elasticity for "fem" or unified position-based dynamics (PBD)
+    constraints for "pbd-unified", each with its own mesh and material settings. Motion-only mode uses a rigid sponge
+    preview and overrides this selection. Disabling liquid skips its particles and solver steps while retaining rigid
+    and sponge dynamics. Liquid boundaries receive their motion through one-way coupling. Trajectory checking rejects
+    inaccurate targets and prepares liquid clearance measurements at extra computation and memory cost.
     """
     if scale <= 0:
         raise ValueError("Particle scale must be positive.")
+    if sponge_solver not in ("fem", "pbd-unified"):
+        raise ValueError(f"Unknown sponge solver: {sponge_solver!r}. Choose 'fem' or 'pbd-unified'.")
     dt = CONTROL_DT / CONTACT_SUBSTEPS
     particle_size = 2.0 / scale
     cup_path = Path(gs.utils.get_assets_dir()) / CUP_ASSET
@@ -699,14 +725,12 @@ def build_scene(
             ),
             gs.options.PBSTFAbsorbentBoxStaticColliderOptions(
                 pos=SPONGE_START,
-                is_collider_adhesion_friction_enabled=True,
-                collider_adhesion_compliance=50.0,
-                collider_friction=0.5,
+                is_collider_adhesion_friction_enabled=False,
                 lower=(-0.5 * SPONGE_SIZE[0], 0.0, -0.5 * SPONGE_SIZE[2]),
                 upper=(0.5 * SPONGE_SIZE[0], SPONGE_SIZE[1], 0.5 * SPONGE_SIZE[2]),
-                absorption_rate=4000.0,
+                absorption_rate=400.0,
                 absorption_capacity_fraction=1.0,
-                pbd_entity_name="sponge",
+                deformable_entity_name="sponge",
             ),
         )
     )
@@ -723,17 +747,33 @@ def build_scene(
             enable_rolling_friction=True,
             constraint_timeconst=0.004,
         ),
-        pbd_options=gs.options.PBDUnifiedOptions(
-            particle_size=0.005,
-            lower_bound=(-0.4, -1.0 / 15.0, -4.0 / 15.0),
-            upper_bound=(0.4, 8.0 / 15.0, 4.0 / 15.0),
-            max_solver_iterations=100,
-            constraint_acceleration=0.85,
+        fem_options=(
+            gs.options.FEMOptions(
+                # The tabletop supports the sponge in this Y-up scene; the solver floor is Z-aligned.
+                floor_height=-1.0,
+                use_implicit_solver=True,
+                n_pcg_iterations=120,
+            )
+            if sponge_solver == "fem"
+            else None
+        ),
+        pbd_options=(
+            gs.options.PBDUnifiedOptions(
+                particle_size=0.005,
+                lower_bound=(-0.4, -1.0 / 15.0, -4.0 / 15.0),
+                upper_bound=(0.4, 8.0 / 15.0, 4.0 / 15.0),
+                max_solver_iterations=30,
+                constraint_acceleration=0.0,
+                collision_thickness=5e-5,
+                contact_detection_distance=1.5e-4,
+            )
+            if sponge_solver == "pbd-unified"
+            else None
         ),
         pbstf_options=gs.options.PBSTFOptions(
-            diffusion_coeff=0.005,
+            diffusion_coeff=0.001,
             particle_size=particle_size,
-            max_solver_iterations=20,
+            max_solver_iterations=10,
             topology_rebuild_interval=10,
             max_surface_neighbors=128,
             max_localmesh_neighbors=64,
@@ -750,9 +790,6 @@ def build_scene(
             camera_lookat=camera_lookat,
             camera_up=(0.0, 1.0, 0.0),
             camera_fov=80,
-        ),
-        profiling_options=gs.options.ProfilingOptions(
-            show_FPS=False,
         ),
         show_viewer=is_viewer_shown,
     )
@@ -805,7 +842,7 @@ def build_scene(
                 material=gs.materials.PBSTF.Liquid(
                     sampler="regular",
                     rho=1000.0,
-                    density_compliance=843750.0,
+                    density_compliance=375000.0,
                     surface_tension_compliance=1.0 / 225.0,
                     surface_distance_compliance=40.0,
                     interior_distance_compliance=180.0,
@@ -817,11 +854,23 @@ def build_scene(
                 name=name,
             )
         )
+    robot_path = Path(gs.utils.get_assets_dir()) / ROBOT_ASSET
+    robot_xml = ET.parse(robot_path).getroot()
+    # Finger contact uses the displayed surface, including its local pose and mesh scale.
+    for link in robot_xml.findall("link"):
+        if link.attrib["name"] in ("right_link27", "right_link28"):
+            visual = link.find("visual")
+            collision = link.find("collision")
+            for tag in ("origin", "geometry"):
+                collision.remove(collision.find(tag))
+                collision.append(deepcopy(visual.find(tag)))
+    for mesh_node in robot_xml.iter("mesh"):
+        mesh_node.set("filename", str(robot_path.parent / mesh_node.attrib["filename"]))
     robot = scene.add_entity(
         morph=gs.morphs.URDF(
             pos=ROBOT_POS,
             quat=ROBOT_QUAT,
-            file=ROBOT_ASSET,
+            file=ET.tostring(robot_xml, encoding="unicode"),
             convexify=False,
             fixed=True,
         ),
@@ -859,7 +908,7 @@ def build_scene(
         sponge_vertices, sponge_elements = element.create_tetrahedral_grid(
             lower=tuple(-0.5 * size for size in SPONGE_SIZE),
             upper=tuple(0.5 * size for size in SPONGE_SIZE),
-            resolution=(10, 7, 20),
+            resolution=SPONGE_GRID_RESOLUTION if sponge_solver == "fem" else (10, 7, 20),
         )
         sponge = scene.add_entity(
             morph=gs.morphs.TetrahedralMesh(
@@ -867,19 +916,13 @@ def build_scene(
                 vertices=sponge_vertices,
                 elements=sponge_elements,
             ),
-            material=gs.materials.PBD.Elastic(rho=30.0, stretch_relaxation=0.25, volume_relaxation=0.15),
+            material=(
+                gs.materials.FEM.Elastic(E=1e4, rho=30.0, model="linear_corotated")
+                if sponge_solver == "fem"
+                else gs.materials.PBD.Elastic(rho=30.0, stretch_relaxation=0.1, volume_relaxation=0.1, damping=80.0)
+            ),
             surface=gs.surfaces.Default(color=(0.95, 0.68, 0.12)),
             name="sponge",
-        )
-    camera = None
-    if is_recording:
-        camera = scene.add_camera(
-            res=(960, 720),
-            pos=camera_pos,
-            lookat=camera_lookat,
-            up=(0.0, 1.0, 0.0),
-            fov=80,
-            GUI=False,
         )
     scene.build()
     # Normalize mass after convex decomposition so the empty-cup weight stays explicit.
@@ -905,9 +948,7 @@ def build_scene(
         robot.set_dofs_kp(kp=[5000, 5000, 5000, 1500, 1500, 1500], dofs_idx_local=dofs)
         robot.set_dofs_kv(kv=[100, 100, 100, 30, 30, 30], dofs_idx_local=dofs)
         robot.set_dofs_force_range(lower=[-27, -27, -27, -7, -7, -7], upper=[27, 27, 27, 7, 7, 7], dofs_idx_local=dofs)
-    for dofs, fingers, friction, torsion in zip(
-        hands_fingers_dofs_idx, hands_finger_links, (2.0, 5.0), (0.001, 0.02)
-    ):
+    for dofs, fingers, friction, torsion in zip(hands_fingers_dofs_idx, hands_finger_links, (2.0, 5.0), (0.001, 0.02)):
         robot.set_dofs_kp(kp=3000, dofs_idx_local=dofs)
         robot.set_dofs_kv(kv=30, dofs_idx_local=dofs)
         robot.set_dofs_force_range(lower=-20, upper=20, dofs_idx_local=dofs)
@@ -946,16 +987,17 @@ def build_scene(
             qpos.new_tensor(cavity_sdf["T_mesh_to_sdf"] @ normalization),
             qpos.new_tensor(2.0 / (np.array(cavity_sdf["voxels"].shape) - 1)),
         )
-        gripper_distance_fields = tuple(
-            DistanceField(
-                collision_geom.idx,
-                qpos.new_tensor(collision_geom.sdf_val)[None, None],
-                qpos.new_tensor(collision_geom.T_mesh_to_sdf),
-                2.0 / qpos.new_tensor(collision_geom.sdf_res - 1),
+        if is_trajectory_checked:
+            gripper_distance_fields = tuple(
+                DistanceField(
+                    collision_geom.idx,
+                    qpos.new_tensor(collision_geom.sdf_val)[None, None],
+                    qpos.new_tensor(collision_geom.T_mesh_to_sdf),
+                    2.0 / qpos.new_tensor(collision_geom.sdf_res - 1),
+                )
+                for link in (hands_link[0], *hands_finger_links[0])
+                for collision_geom in link.geoms
             )
-            for link in (hands_link[0], *hands_finger_links[0])
-            for collision_geom in link.geoms
-        )
     cup_grasp = ToolPose(np.array((0.0, CUP_GRIP_HEIGHT, 0.0)), POUR_QUAT)
     right_start = grasp_pose(ToolPose(np.array(WATER_CUP_POS), np.array((1.0, 0.0, 0.0, 0.0))), cup_grasp)
     demo = CoffeeWaterScene(
@@ -963,7 +1005,6 @@ def build_scene(
         liquids[0] if liquids else None,
         liquids[1] if liquids else None,
         cups[1],
-        camera,
         cup_cavity,
         cup_distance_field,
         robot,
@@ -979,6 +1020,7 @@ def build_scene(
         qpos,
         MotionState(Phase.GRASP_CUP, 0.0, right_start, right_start, cup_grasp),
         is_motion_only,
+        is_trajectory_checked,
     )
     update_motion(demo, time=0.0)
     robot.set_qpos(demo.qpos)
@@ -987,13 +1029,30 @@ def build_scene(
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--scale", type=int, default=1500)
+    parser.add_argument("--scale", type=int, default=1000)
     parser.add_argument("--steps", type=int)
     parser.add_argument("--vis", dest="is_viewer_shown", action="store_true")
     parser.add_argument("--record", dest="is_recording", action="store_true")
     parser.add_argument("--surface", dest="is_surface", action="store_true")
     parser.add_argument("--check-motion", dest="is_motion_only", action="store_true")
-    parser.add_argument("--no-liquid", dest="is_liquid_enabled", action="store_false")
+    parser.add_argument(
+        "--sponge-solver",
+        choices=("fem", "pbd-unified"),
+        default="pbd-unified",
+        help="Sponge deformation: unified PBD constraints (default) or FEM elasticity on a coarser mesh.",
+    )
+    parser.add_argument(
+        "--check-trajectory",
+        dest="is_trajectory_checked",
+        action="store_true",
+        help="Stop on trajectory acceptance failures; adds per-step checks. Disabled by default for uninterrupted preview.",
+    )
+    parser.add_argument(
+        "--no-liquid",
+        dest="is_liquid_enabled",
+        action="store_false",
+        help="Skip liquid creation and simulation for faster trajectory tuning; keep the soft sponge and support --record.",
+    )
     parser.add_argument("--output", type=Path, default=Path("out/pbstf_coffee_water"))
     args = parser.parse_args()
     if args.scale <= 0 or (args.steps is not None and args.steps <= 0):
@@ -1004,85 +1063,93 @@ def main():
     demo = build_scene(
         args.scale,
         args.is_viewer_shown,
-        args.is_recording,
         args.is_surface,
         args.is_motion_only,
         args.is_liquid_enabled,
+        args.is_trajectory_checked,
+        sponge_solver=args.sponge_solver,
     )
-    dt = CONTROL_DT
+    dt = demo.scene.dt * CONTACT_SUBSTEPS
     steps = args.steps if args.steps is not None else round(MOTION_END / dt)
+    render_stride = 1
+    if demo.scene.viewer is not None:
+        render_stride = max(1, round(1.0 / (demo.scene.viewer.refresh_rate * dt)))
     initial_mass = None
     if demo.coffee is not None:
         initial_mass = tensor_to_array(demo.coffee.get_mass() + demo.water.get_mass()).sum()
-    if demo.camera is not None:
-        demo.camera.start_recording(save_to_filename=str(output / "coffee-water.mp4"), fps=50)
+    checkpoint_writer = None
+    if args.is_recording:
+        checkpoint_writer = CheckpointWriter(demo.scene, output / "checkpoints", dt)
+        checkpoint_writer.write_frame()
+        gs.logger.info(f"Saving checkpoints to {checkpoint_writer.directory}")
     previous_phases = None
     observation = observe_scene(demo)
-    checkpoint_steps = {round(time / dt) - 1 for time in (3.0, 4.0, 6.0, 6.4, 14.0, 20.0, MOTION_END)}
+    milestone_steps = {round(time / dt) - 1 for time in (3.0, 4.0, 6.0, 6.4, 14.0, 20.0, MOTION_END)}
     absorbed_particles = 0
     absorbed_water_particles = 0
     gripper_clearance = math.inf
     previous_stir_angle = None
     measured_stir_angle = 0.0
+    target = None
     gripper_geoms_idx = tuple(field.geom_idx for field in demo.gripper_distance_fields)
-    try:
-        with (output / "metrics.csv").open("w", newline="", encoding="ascii") as metrics:
-            writer = csv.writer(metrics)
-            writer.writerow(
-                (
-                    "step",
-                    "time",
-                    "right_phase",
-                    "left_phase",
-                    "ik_error_m",
-                    "right_hand_error_m",
-                    "left_hand_error_m",
-                    "cup_position_error_m",
-                    "cup_rotation_error_deg",
-                    "cup_tilt_deg",
-                    "knock_spilled_particles",
-                    "water_particles_in_cup",
-                    "water_particles_before_knock",
-                    "max_knock_tilt_deg",
-                    "cup_grasp_span_m",
-                    "right_finger_opening_m",
-                    "left_finger_opening_m",
-                    "pour_liquid_gripper_clearance_m",
-                    "stir_turns",
-                    "measured_stir_turns",
-                    "sponge_position_error_m",
-                    "active_particles",
-                    "mass_kg",
-                    "coffee_amount",
-                    "variance",
-                    "water_in_coffee_cup",
-                    "absorbed_particles",
-                    "absorbed_water_particles",
-                    "sponge_wetness",
-                )
+    with (output / "metrics.csv").open("w", newline="", encoding="ascii") as metrics:
+        writer = csv.writer(metrics)
+        writer.writerow(
+            (
+                "step",
+                "time",
+                "right_phase",
+                "left_phase",
+                "ik_error_m",
+                "right_hand_error_m",
+                "left_hand_error_m",
+                "cup_position_error_m",
+                "cup_rotation_error_deg",
+                "cup_tilt_deg",
+                "knock_spilled_particles",
+                "water_particles_in_cup",
+                "water_particles_before_knock",
+                "max_knock_tilt_deg",
+                "cup_grasp_span_m",
+                "right_finger_opening_m",
+                "left_finger_opening_m",
+                "pour_liquid_gripper_clearance_m",
+                "stir_turns",
+                "measured_stir_turns",
+                "sponge_position_error_m",
+                "active_particles",
+                "mass_kg",
+                "coffee_amount",
+                "variance",
+                "water_in_coffee_cup",
+                "absorbed_particles",
+                "absorbed_water_particles",
+                "sponge_wetness",
             )
-            for step in range(steps):
-                if args.steps is None and step > 0 and target.right_phase == target.left_phase == Phase.REST:
-                    break
-                time = (step + 1) * dt
-                target, ik_error = update_motion(demo, time, observation)
-                step_scene(demo)
-                observation = observe_scene(demo)
-                measurement = measure_motion(time, target, observation)
+        )
+        for step in range(steps):
+            if args.steps is None and target is not None and target.right_phase == target.left_phase == Phase.REST:
+                break
+            time = (step + 1) * dt
+            target, ik_error = update_motion(demo, time, observation)
+            step_scene(demo, is_rendering=(step + 1) % render_stride == 0 or step + 1 == steps)
+            observation = observe_scene(demo)
+            measurement = measure_motion(time, target, observation)
+            if target.left_phase == Phase.STIR:
+                rod_offset = observation.rod.pos - COFFEE_CUP_POS
+                angle = math.atan2(rod_offset[2], rod_offset[0])
+                if previous_stir_angle is not None:
+                    difference = angle - previous_stir_angle
+                    measured_stir_angle += math.atan2(math.sin(difference), math.cos(difference))
+                previous_stir_angle = angle
+            demo.scene.rigid_solver.check_errno()
+            if args.is_trajectory_checked:
                 if measurement.hands_position_error[1] > 0.005 or (
                     target.right_phase not in (Phase.REACH_SPONGE, Phase.CATCH)
                     and measurement.hands_position_error[0] > 0.005
                 ):
                     raise RuntimeError(f"Arm tracking failed at {time:.3f}s: {measurement.hands_position_error}m.")
-                if target.left_phase == Phase.STIR:
-                    rod_offset = observation.rod.pos - COFFEE_CUP_POS
-                    angle = math.atan2(rod_offset[2], rod_offset[0])
-                    if previous_stir_angle is not None:
-                        difference = angle - previous_stir_angle
-                        measured_stir_angle += math.atan2(math.sin(difference), math.cos(difference))
-                    previous_stir_angle = angle
                 check_contacts(demo, time)
-                demo.scene.rigid_solver.check_errno()
                 if demo.water is not None and time <= 6.0:
                     clearance = surface_clearance(
                         demo.water.get_particles_pos(),
@@ -1095,9 +1162,7 @@ def main():
                         raise RuntimeError(
                             f"Pouring liquid reached the right gripper at {time:.3f}s: {clearance:.6f}m."
                         )
-                if time <= 6.0 and (
-                    measurement.cup_position_error > 0.002 or measurement.cup_rotation_error > 2.0
-                ):
+                if time <= 6.0 and (measurement.cup_position_error > 0.002 or measurement.cup_rotation_error > 2.0):
                     raise RuntimeError(
                         f"Pour tracking failed at {time:.3f}s: position={measurement.cup_position_error:.6f}m, "
                         f"rotation={measurement.cup_rotation_error:.3f}deg."
@@ -1113,105 +1178,81 @@ def main():
                     raise RuntimeError(
                         f"Sponge tracking failed at {time:.3f}s: {measurement.sponge_position_error:.6f}m."
                     )
-                phases = (target.right_phase, target.left_phase)
-                is_checkpoint = phases != previous_phases or step + 1 == steps or step in checkpoint_steps
-                if is_checkpoint:
-                    gs.logger.info(f"{time:.3f}s: right={target.right_phase.name}, left={target.left_phase.name}")
-                previous_phases = phases
-                if demo.camera is not None and is_checkpoint:
-                    rgb, *_ = demo.camera.render()
-                    stage = f"{target.right_phase.name.lower()}-{target.left_phase.name.lower()}"
-                    Image.fromarray(rgb).save(output / f"stage-{step:05d}-{stage}.png")
-                if (step + 1) % 100 == 0 or step + 1 == steps or is_checkpoint:
-                    motion_row = (
-                        step + 1,
-                        time,
-                        target.right_phase.name,
-                        target.left_phase.name,
-                        ik_error,
-                        *measurement.hands_position_error,
-                        measurement.cup_position_error,
-                        measurement.cup_rotation_error,
-                        observation.cup_tilt,
-                        demo.motion.spilled_particles,
-                        observation.water_in_cup,
-                        demo.motion.water_before_reach,
-                        demo.motion.max_knock_tilt,
-                        observation.cup_grasp_span,
-                        target.right_opening,
-                        target.left_opening,
-                        gripper_clearance if demo.water is not None else None,
-                        target.stir_angle / (2.0 * math.pi),
-                        measured_stir_angle / (2.0 * math.pi),
-                        measurement.sponge_position_error,
-                    )
-                    if demo.water is None:
-                        writer.writerow(motion_row + (None,) * 8)
-                        metrics.flush()
-                        continue
-                    state = demo.scene.pbstf_solver.get_state(demo.scene.sim.cur_substep_local)
-                    concentrations = tensor_to_array(state.c)
-                    positions = tensor_to_array(state.pos)
-                    velocities = tensor_to_array(state.vel)
-                    if not all(np.isfinite(values).all() for values in (positions, velocities, concentrations)):
-                        raise RuntimeError("Liquid state contains non-finite values.")
-                    mass = tensor_to_array(demo.coffee.get_mass() + demo.water.get_mass()).sum()
-                    if abs(mass - initial_mass) > initial_mass * 2e-6:
-                        raise RuntimeError("Liquid mass changed during the simulation.")
-                    demo.scene.pbstf_solver.check_errno()
-                    is_absorbed = tensor_to_array(state.absorbed_collider_idx) >= 0
-                    absorbed_particles = is_absorbed.sum()
-                    absorbed_water_particles = is_absorbed[:, demo.water.particle_start : demo.water.particle_end].sum()
-                    wetness = tensor_to_array(demo.scene.pbstf_solver.get_static_collider_wetness(4))
-                    if args.is_recording and is_checkpoint:
-                        np.savez_compressed(
-                            output / f"state-{step:05d}.npz",
-                            pos=positions,
-                            vel=velocities,
-                            c=concentrations,
-                            cup_pos=observation.cup.pos,
-                            cup_quat=observation.cup.quat,
-                            robot_qpos=tensor_to_array(demo.robot.get_qpos()),
-                            rod_pos=observation.rod.pos,
-                            rod_quat=observation.rod.quat,
-                            sponge_pos=tensor_to_array(demo.sponge.get_particles_pos()),
-                            absorbed=is_absorbed,
-                            wetness=wetness,
-                        )
-                    water_pos = positions[:, demo.water.particle_start : demo.water.particle_end] - COFFEE_CUP_POS
-                    is_in_cup = demo.cup_cavity.contains(water_pos.reshape((-1, 3)))
-                    writer.writerow(
-                        motion_row
-                        + (
-                            tensor_to_array(state.active).sum(),
-                            mass,
-                            concentrations.sum(),
-                            concentrations.var(),
-                            is_in_cup.mean(),
-                            absorbed_particles,
-                            absorbed_water_particles,
-                            wetness.mean(),
-                        )
-                    )
+            phases = (target.right_phase, target.left_phase)
+            is_milestone = phases != previous_phases or step + 1 == steps or step in milestone_steps
+            if is_milestone:
+                gs.logger.info(f"{time:.3f}s: right={target.right_phase.name}, left={target.left_phase.name}")
+            previous_phases = phases
+            if checkpoint_writer is not None:
+                checkpoint_writer.write_frame()
+            if (step + 1) % 100 == 0 or step + 1 == steps or is_milestone:
+                motion_row = (
+                    step + 1,
+                    time,
+                    target.right_phase.name,
+                    target.left_phase.name,
+                    ik_error,
+                    *measurement.hands_position_error,
+                    measurement.cup_position_error,
+                    measurement.cup_rotation_error,
+                    observation.cup_tilt,
+                    demo.motion.spilled_particles,
+                    observation.water_in_cup,
+                    demo.motion.water_before_reach,
+                    demo.motion.max_knock_tilt,
+                    observation.cup_grasp_span,
+                    target.right_opening,
+                    target.left_opening,
+                    gripper_clearance if args.is_trajectory_checked and demo.water is not None else None,
+                    target.stir_angle / (2.0 * math.pi),
+                    measured_stir_angle / (2.0 * math.pi),
+                    measurement.sponge_position_error,
+                )
+                if demo.water is None:
+                    writer.writerow(motion_row + (None,) * 8)
                     metrics.flush()
-            if steps * dt >= MOTION_END:
-                if (
-                    target.right_phase != Phase.REST
-                    or target.left_phase != Phase.REST
-                    or not demo.motion.has_caught_cup
-                ):
-                    raise RuntimeError("The manipulation sequence did not complete.")
-                if abs(measured_stir_angle - 6.0 * math.pi) > 0.05:
-                    raise RuntimeError(f"The rod completed {measured_stir_angle / (2.0 * math.pi):.6f} stirring turns.")
-                if np.max(np.abs(observation.rod.pos - ROD_PARK)) > 0.002:
-                    raise RuntimeError(f"The rod missed its parking position: {observation.rod.pos}.")
-                if demo.water is not None and absorbed_water_particles == 0:
-                    raise RuntimeError("The wiping stroke absorbed no water; inspect the spill and sponge path.")
-                if demo.water is not None and not 0 < observation.water_in_cup < demo.motion.water_before_reach:
-                    raise RuntimeError("Cup recovery must spill some water and retain some in the cup.")
-    finally:
-        if demo.camera is not None:
-            demo.camera.stop_recording()
+                    continue
+                state = demo.scene.pbstf_solver.get_state(demo.scene.sim.cur_substep_local)
+                concentrations = tensor_to_array(state.c)
+                positions = tensor_to_array(state.pos)
+                velocities = tensor_to_array(state.vel)
+                if not all(np.isfinite(values).all() for values in (positions, velocities, concentrations)):
+                    raise RuntimeError("Liquid state contains non-finite values.")
+                mass = tensor_to_array(demo.coffee.get_mass() + demo.water.get_mass()).sum()
+                if abs(mass - initial_mass) > initial_mass * 2e-6:
+                    raise RuntimeError("Liquid mass changed during the simulation.")
+                demo.scene.pbstf_solver.check_errno()
+                is_absorbed = tensor_to_array(state.absorbed_collider_idx) >= 0
+                absorbed_particles = is_absorbed.sum()
+                absorbed_water_particles = is_absorbed[:, demo.water.particle_start : demo.water.particle_end].sum()
+                wetness = tensor_to_array(demo.scene.pbstf_solver.get_static_collider_wetness(4))
+                water_pos = positions[:, demo.water.particle_start : demo.water.particle_end] - COFFEE_CUP_POS
+                is_in_cup = demo.cup_cavity.contains(water_pos.reshape((-1, 3)))
+                writer.writerow(
+                    motion_row
+                    + (
+                        tensor_to_array(state.active).sum(),
+                        mass,
+                        concentrations.sum(),
+                        concentrations.var(),
+                        is_in_cup.mean(),
+                        absorbed_particles,
+                        absorbed_water_particles,
+                        wetness.mean(),
+                    )
+                )
+                metrics.flush()
+        if args.is_trajectory_checked and steps * dt >= MOTION_END:
+            if target.right_phase != Phase.REST or target.left_phase != Phase.REST or not demo.motion.has_caught_cup:
+                raise RuntimeError("The manipulation sequence did not complete.")
+            if abs(measured_stir_angle - 6.0 * math.pi) > 0.05:
+                raise RuntimeError(f"The rod completed {measured_stir_angle / (2.0 * math.pi):.6f} stirring turns.")
+            if np.max(np.abs(observation.rod.pos - ROD_PARK)) > 0.002:
+                raise RuntimeError(f"The rod missed its parking position: {observation.rod.pos}.")
+            if demo.water is not None and absorbed_water_particles == 0:
+                raise RuntimeError("The wiping stroke absorbed no water; inspect the spill and sponge path.")
+            if demo.water is not None and not 0 < observation.water_in_cup < demo.motion.water_before_reach:
+                raise RuntimeError("Cup recovery must spill some water and retain some in the cup.")
 
 
 if __name__ == "__main__":

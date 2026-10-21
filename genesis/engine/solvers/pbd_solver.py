@@ -1402,6 +1402,8 @@ class PBDSolver(Solver):
             )
 
         elif isinstance(material, gs.materials.PBD.Elastic):
+            if material.damping > 0.0:
+                gs.raise_exception("PBD.Elastic damping requires PBDUnifiedOptions.")
             entity = PBD3DEntity(
                 scene=self.scene,
                 solver=self,

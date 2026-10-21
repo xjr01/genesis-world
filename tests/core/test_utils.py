@@ -67,6 +67,19 @@ def _qd_kernel_wrapper(qd_func, num_inputs, num_outputs, *args):
             for I in qd.grouped(qd.ndrange(*qd_in_1.shape)):
                 qd_out_1[I], qd_out_2[I] = qd_func(qd_in_1[I], qd_in_2[I], *args)
 
+    elif num_inputs == 2 and num_outputs == 3:
+
+        @qd.kernel
+        def kernel(
+            qd_in_1: qd.template(),
+            qd_in_2: qd.template(),
+            qd_out_1: qd.template(),
+            qd_out_2: qd.template(),
+            qd_out_3: qd.template(),
+        ):
+            for I in qd.grouped(qd.ndrange(*qd_in_1.shape)):
+                qd_out_1[I], qd_out_2[I], qd_out_3[I] = qd_func(qd_in_1[I], qd_in_2[I], *args)
+
     elif num_inputs == 3 and num_outputs == 2:
 
         @qd.kernel
@@ -1019,3 +1032,75 @@ def test_triangle_queries():
     intersect(vertices[0], vertices[2], is_hit, displacement)
     assert_equal(qd_to_numpy(is_hit, transpose=True), True)
     assert_allclose(qd_to_numpy(displacement, transpose=True)[:, 2] / scales, 0.0, atol=2e-6)
+    elastic_triangle = np.array(((-1.0, -1.0, 0.0), (2.0, 2.0, 0.0), (-1.0, 2.0, 0.0)), dtype=gs.np_float)
+    rigid_triangle = np.array(((-0.5, 0.0, -1.0), (-0.5, 0.0, 2.0), (2.5, 0.0, 2.0)), dtype=gs.np_float)
+    masks = [qd.Vector.field(3, dtype=gs.qd_int, shape=len(scales)) for _ in range(2)]
+    crossings = _qd_kernel_wrapper(triangle_qd.triangle_crossing_edges, 2, 3)
+    edge_positions = [qd.Matrix.field(3, 2, dtype=gs.qd_float, shape=len(scales)) for _ in range(2)]
+    gradients = qd.Matrix.field(3, 2, dtype=gs.qd_float, shape=len(scales))
+    residuals = qd.field(gs.qd_float, shape=len(scales))
+    rotation = R.from_euler("xyz", (20.0, 30.0, 40.0), degrees=True).as_matrix()
+    for transform in (np.eye(3), rotation):
+        normal = qd.Vector(np.array((-1.0, 1.0, 0.0)) @ transform.T)
+        contact = _qd_kernel_wrapper(triangle_qd.edge_edge_contact, 2, 3, normal)
+        for field, points in zip(vertices[:2], (elastic_triangle, rigid_triangle)):
+            field.from_numpy(scales[:, None, None] * (points @ transform.T).T)
+        crossings(vertices[0], vertices[1], *masks, is_hit)
+        assert_equal(qd_to_numpy(is_hit, transpose=True), True)
+        for mask in masks:
+            assert_equal(qd_to_numpy(mask, transpose=True), np.broadcast_to((1, 0, 0), (len(scales), 3)))
+        for is_reversed in (False, True):
+            indices = (1, 0) if is_reversed else (0, 1)
+            for field, points in zip(edge_positions, (elastic_triangle, rigid_triangle)):
+                field.from_numpy(scales[:, None, None] * (points[list(indices)] @ transform.T).T)
+            contact(*edge_positions, residuals, gradients, is_hit)
+            assert_equal(qd_to_numpy(is_hit, transpose=True), True)
+            gap = qd_to_numpy(residuals, transpose=True) / scales
+            gradient = qd_to_numpy(gradients, transpose=True)
+            assert_allclose(gap, -0.5 / np.sqrt(2.0), atol=2e-6)
+            for inverse_mass in (np.array((1.0, 1.0)), np.array((1.0, 2.0)), np.array((0.0, 1.0))):
+                inverse_mass = inverse_mass[list(indices)]
+                denominator = (gradient**2 * inverse_mass).sum(axis=(1, 2))
+                correction = -gap[:, None, None] * gradient * inverse_mass / denominator[:, None, None]
+                points = (elastic_triangle[list(indices)] @ transform.T).T + correction
+                contact_position = points @ np.array((0.75, 0.25))[list(indices)]
+                assert_allclose(contact_position, np.array((-0.5, 0.0, 0.0)) @ transform.T, atol=2e-6)
+                assert_allclose(correction[:, :, inverse_mass == 0.0], 0.0, atol=2e-6)
+    vertices[0].from_numpy(scales[:, None, None] * elastic_triangle.T)
+    for points, expected in (
+        (rigid_triangle + (0.5, 0.0, 0.0), (0, 0, 0)),
+        (rigid_triangle + (1.0, 0.0, 0.0), (0, 0, 0)),
+        (np.array(((-2.0, 0.0, -1.0), (-2.0, 0.0, 2.0), (7.0, 0.0, 2.0))), (1, 0, 1)),
+        (elastic_triangle, (0, 0, 0)),
+    ):
+        vertices[1].from_numpy(scales[:, None, None] * points.T)
+        crossings(vertices[0], vertices[1], *masks, is_hit)
+        assert_equal(qd_to_numpy(is_hit, transpose=True), True)
+        assert_equal(qd_to_numpy(masks[0], transpose=True), np.broadcast_to(expected, (len(scales), 3)))
+        assert_equal(qd_to_numpy(masks[1], transpose=True), 0)
+    for field, points in zip(
+        edge_positions, (np.array(((0.0, 0.0, 0.0), (1.0, 0.0, 0.0))), np.array(((2.0, 1.0, 0.0), (3.0, 1.0, 0.0))))
+    ):
+        field.from_numpy(scales[:, None, None] * points.T)
+    contact = _qd_kernel_wrapper(triangle_qd.edge_edge_contact, 2, 3, qd.Vector([0.0, 1.0, 0.0]))
+    contact(*edge_positions, residuals, gradients, is_hit)
+    assert_equal(qd_to_numpy(is_hit, transpose=True), True)
+    assert_allclose(qd_to_numpy(residuals, transpose=True) / scales, -np.sqrt(2.0), atol=2e-6)
+    assert_allclose(qd_to_numpy(gradients, transpose=True)[:, :, 0], 0.0, atol=2e-6)
+    for field, points in zip(
+        edge_positions,
+        (np.array(((0.0, 0.0, 0.0), (1.0, 0.0, 0.0))), np.array(((0.0, 0.1, 0.0), (1.0, 0.100001, 0.0)))),
+    ):
+        field.from_numpy(scales[:, None, None] * points.T)
+    contact(*edge_positions, residuals, gradients, is_hit)
+    assert_equal(qd_to_numpy(is_hit, transpose=True), True)
+    assert_allclose(qd_to_numpy(residuals, transpose=True) / scales, -0.1, atol=2e-6)
+    edge_positions[1].from_numpy(scales[:, None, None] * np.array(((0.0, 0.0, 0.0), (1.0, 0.0, 0.0))).T)
+    contact(*edge_positions, residuals, gradients, is_hit)
+    assert_equal(qd_to_numpy(is_hit, transpose=True), True)
+    assert_equal(qd_to_numpy(residuals, transpose=True), 0.0)
+    assert_allclose(qd_to_numpy(gradients, transpose=True)[:, :, 0], (0.0, 1.0, 0.0), atol=2e-6)
+    assert_equal(qd_to_numpy(gradients, transpose=True)[:, :, 1], 0.0)
+    edge_positions[0].fill(0.0)
+    contact(*edge_positions, residuals, gradients, is_hit)
+    assert_equal(qd_to_numpy(is_hit, transpose=True), False)

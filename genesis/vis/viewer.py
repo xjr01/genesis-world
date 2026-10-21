@@ -7,6 +7,7 @@ from traceback import TracebackException
 from typing import TYPE_CHECKING
 
 import numpy as np
+
 import OpenGL.error
 import OpenGL.platform
 import pyglet
@@ -14,6 +15,7 @@ import pyglet
 import genesis as gs
 import genesis.utils.geom as gu
 from genesis.ext import pyrender
+from genesis.ext.pyrender.jit_render import RenderBuffer
 from genesis.ext.pyrender.overlay import ImGuiOverlayPlugin
 from genesis.repr_base import RBC
 from genesis.utils.misc import redirect_libc_stderr, tensor_to_array
@@ -76,9 +78,13 @@ class Viewer(RBC):
         # physics dt is known.
         self._last_refresh_time = None
         self._realtime_pacer = None
+        self._display_frame: tuple[RenderBuffer, ...] | None = None
+        self._display_label: str | None = None
 
     def build(self, scene):
         self.scene = scene
+        self._display_frame = None
+        self._display_label = None
 
         # When the viewer is shown, hold the stepping loop to realtime_factor x wall-clock real time: each step advances
         # dt seconds of simulation, so it should take dt / realtime_factor seconds of wall time. Rate skips sleeping
@@ -213,10 +219,15 @@ class Viewer(RBC):
             self.update_following()
 
         self._pyrender_viewer.update_on_sim_step()
+        if self._display_label is not None:
+            self._pyrender_viewer.set_message_text(self._display_label)
 
         with self.lock:
             # Update context
-            self.context.update(force)
+            if self._display_frame is None:
+                self.context.update(force)
+            else:
+                self.context.jit.restore_buffers(self.context._scene, self._display_frame)
 
             # Refresh viewer by default if and if this is possible
             if auto_refresh is None:
@@ -236,6 +247,31 @@ class Viewer(RBC):
         realtime_pacer = self._realtime_pacer
         if realtime_pacer is not None:
             realtime_pacer.sleep()
+
+    def capture_frame(self) -> tuple[RenderBuffer, ...]:
+        """Copy current render arrays for playback of a scene with fixed mesh topology.
+
+        Call on the simulation thread after a step. Storage grows with the rendered vertex and instance counts;
+        the caller chooses how many frames to retain. Camera pose and debug markers remain independently editable.
+        """
+        with self.lock:
+            self.context.update(force_render=True)
+            if self.context.dynamic_nodes:
+                gs.raise_exception("Viewer frame playback requires fixed mesh topology.")
+            return self.context.jit.capture_buffers()
+
+    def show_frame(self, frame: tuple[RenderBuffer, ...] | None, *, label: str | None = None) -> None:
+        """Display captured render arrays while keeping physics state and simulation time intact.
+
+        Pass None to return to live rendering before advancing the simulation. Call on the simulation thread,
+        with meshes from the same built scene as capture_frame().
+        """
+        with self.lock:
+            self._display_frame = frame
+            self._display_label = label
+            if frame is None:
+                self.context.update(force_render=True)
+        self.update()
 
     def close_offscreen(self, render_target):
         return self._pyrender_viewer.close_offscreen(render_target)

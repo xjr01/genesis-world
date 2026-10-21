@@ -20,15 +20,54 @@ def sector_seeds(n_sectors=6, bands=((0.087, 0.09), (0.044, 0.19))):
     ]
 
 
+def fragment_layout(n_fragments):
+    """Pick (n_sectors, bands) and per-band (radius, height) for a requested fragment count.
+
+    Prefers cell shapes that are roughly square on the wall: the arc span per sector and the band
+    height should be comparable. Only exact factorizations within sectors [4, 16] and bands [1, 6]
+    are used; the caller validates the requested count.
+    """
+    best = None
+    for n_bands in range(1, 7):
+        for n_sectors in range(4, 17):
+            if n_sectors * n_bands != n_fragments:
+                continue
+            arc = 2.0 * np.pi * 0.065 / n_sectors
+            height = 0.24 / n_bands
+            err = abs(arc - height)
+            if best is None or err < best[2]:
+                best = (n_sectors, n_bands, err)
+    if best is None:
+        return None, None
+    n_sectors, n_bands = best[0], best[1]
+    if n_bands == 1:
+        bands = ((0.065, 0.14),)
+    elif n_bands == 2:
+        bands = ((0.087, 0.09), (0.044, 0.19))
+    else:
+        z_lo, z_hi = 0.05, 0.22
+        bands = []
+        for i in range(n_bands):
+            z = z_lo + (z_hi - z_lo) * i / (n_bands - 1)
+            r = 0.087 + (0.044 - 0.087) * (z - 0.09) / (0.19 - 0.09)
+            bands.append((max(r, 0.02), z))
+        bands = tuple(bands)
+    return n_sectors, bands
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("-v", "--vis", action="store_true", default=False)
     parser.add_argument("-r", "--record", action="store_true", default=False, help="record an mp4 of the shatter")
     parser.add_argument("--duration", type=float, default=8.0, help="simulation duration in seconds")
     parser.add_argument("--output", type=Path, default=Path("pbd_vase_fracture.mp4"), help="recording output path")
+    parser.add_argument("--fragments", type=int, default=12,
+                        help="number of pre-seeded fragments (4-64); the actual count equals sectors x bands" )
     args = parser.parse_args()
     if args.duration <= 0.0:
         parser.error("--duration must be positive")
+    if not 4 <= args.fragments <= 64:
+        parser.error("--fragments must be in [4, 64]")
 
     gs.init(backend=gs.gpu, precision="32", logging_level="info")
 
@@ -79,10 +118,9 @@ def main():
             shear_threshold=0.2,
             rotation_threshold=0.25,
             seam_failure_threshold=1.0,
-            # 12 fragments (6 sectors x 2 bands). sector_seeds(8) is the denser 16-fragment option at the same
-            # thresholds; the smaller curved-bottom shards then rock on their hull facets for seconds before
-            # fully resting, since the native contacts carry no rolling friction (condim=3).
-            fragment_seeds=sector_seeds(),
+            # The seed count controls the partition granularity; denser layouts produce smaller shards
+            # that may rock on their hull facets before resting (condim=3 carries no rolling friction).
+            fragment_seeds=sector_seeds(*fragment_layout(args.fragments)),
             bond_radius_factor=1.15,
         ),
         surface=gs.surfaces.Default(

@@ -9,13 +9,13 @@ import genesis as gs
 from genesis.engine.boundaries import FloorBoundary
 from genesis.engine.entities.fem_entity import FEMEntity
 from genesis.engine.states.solvers import FEMSolverState
-import genesis.utils.array_class as array_class
+from genesis.utils import array_class, sdf
 from genesis.utils.geom import qd_transform_by_quat, qd_transform_quat_by_quat
 from genesis.utils.misc import qd_to_torch
-import genesis.utils.sdf as sdf
 
-from .base_solver import Solver
+from .base_solver import Solver, StateChange, mutates
 
+FEM_PCG_CONVERGENCE_CHECK_INTERVAL = 8
 FEM_RIGID_SURFACE_PROJECTION_ITERATIONS = 16
 
 
@@ -867,6 +867,8 @@ class FEMSolver(Solver):
         corrected_pos = pos
         collision_normal = qd.Vector.zero(gs.qd_float, 3)
         is_collision_active = False
+        friction = 0.0
+        rigid_vel = qd.Vector.zero(gs.qd_float, 3)
         for projection_pass in qd.static(range(2)):
             if qd.static(projection_pass == 1):
                 collision_normal = qd.Vector.zero(gs.qd_float, 3)
@@ -888,9 +890,17 @@ class FEMSolver(Solver):
                 if qd.static(projection_pass == 1) and is_active:
                     collision_normal += normal
                     is_collision_active = True
+                    if dyn_info.geoms.coup_friction[geom_idx] > friction:
+                        friction = dyn_info.geoms.coup_friction[geom_idx]
+                        rigid_vel = self.sim.rigid_solver._func_vel_at_point(
+                            pos_world=corrected_pos,
+                            link_idx=dyn_info.geoms.link_idx[geom_idx],
+                            i_b=env_idx,
+                            links_state=dyn_state.links,
+                        )
         if collision_normal.norm_sqr() > rigid_info.EPS[None] ** 2:
             collision_normal = collision_normal.normalized()
-        return corrected_pos, collision_normal, is_collision_active
+        return corrected_pos, collision_normal, is_collision_active, friction, rigid_vel
 
     @qd.func
     def _func_project_pcg_positions(
@@ -919,17 +929,26 @@ class FEMSolver(Solver):
             if not self._func_is_vertex_projection_enabled(vertex_idx, env_idx):
                 continue
             pos = self.elements_v[f + 1, vertex_idx, env_idx].pos + self.pcg_state_v[env_idx, vertex_idx].x
-            corrected_pos, collision_normal, is_collision_active = self._func_project_vertex_against_rigid(
-                env_idx,
-                pos,
-                bvh_nodes,
-                bvh_morton_codes,
-                dyn_state,
-                dyn_info,
-                rigid_info,
-                collider_info,
-                surface_info,
+            corrected_pos, collision_normal, is_collision_active, friction, rigid_vel = (
+                self._func_project_vertex_against_rigid(
+                    env_idx,
+                    pos,
+                    bvh_nodes,
+                    bvh_morton_codes,
+                    dyn_state,
+                    dyn_info,
+                    rigid_info,
+                    collider_info,
+                    surface_info,
+                )
             )
+            projection_state.friction[env_idx, vertex_idx] = friction
+            projection_state.rigid_vel[env_idx, vertex_idx] = rigid_vel
+            if is_collision_active and friction > 0.0 and projection_state.is_sticking[env_idx, vertex_idx]:
+                displacement = (
+                    corrected_pos - self.elements_v[f, vertex_idx, env_idx].pos - self.substep_dt * rigid_vel
+                )
+                corrected_pos -= displacement - displacement.dot(collision_normal) * collision_normal
             correction = corrected_pos - pos
             self.pcg_state_v[env_idx, vertex_idx].Ap = correction
             projection_state.normals[env_idx, vertex_idx] = collision_normal
@@ -937,7 +956,7 @@ class FEMSolver(Solver):
             if correction.norm_sqr() > rigid_info.EPS[None] ** 2:
                 self.pcg_state_v[env_idx, vertex_idx].x += correction
                 qd.atomic_max(projection_state.has_changed[env_idx], 1)
-            if is_collision_active:
+            if is_collision_active or projection_state.reactions[env_idx, vertex_idx].norm_sqr() > 0.0:
                 qd.atomic_max(projection_state.has_contact[env_idx], 1)
 
         for env_idx in range(self._B):
@@ -960,13 +979,39 @@ class FEMSolver(Solver):
                 projection_state.has_changed[env_idx] == 0 and projection_state.has_contact[env_idx] == 0
             ):
                 continue
+            residual = self.pcg_state_v[env_idx, vertex_idx].r + projection_state.reactions[env_idx, vertex_idx]
             if projection_state.has_changed[env_idx] != 0:
-                self.pcg_state_v[env_idx, vertex_idx].r -= self.pcg_state_v[env_idx, vertex_idx].Ap
+                residual -= self.pcg_state_v[env_idx, vertex_idx].Ap
+            projected_residual = residual
             if projection_state.is_active[env_idx, vertex_idx]:
                 normal = projection_state.normals[env_idx, vertex_idx]
-                normal_component = self.pcg_state_v[env_idx, vertex_idx].r.dot(normal)
-                if normal_component < 0.0:
-                    self.pcg_state_v[env_idx, vertex_idx].r -= normal_component * normal
+                normal_component = residual.dot(normal)
+                normal_force = qd.max(-normal_component, 0.0)
+                projected_residual += normal_force * normal
+                friction_limit = projection_state.friction[env_idx, vertex_idx] * normal_force
+                if projection_state.friction[env_idx, vertex_idx] > 0.0:
+                    tangent_force = residual - normal_component * normal
+                    if tangent_force.norm() > friction_limit:
+                        projection_state.is_sticking[env_idx, vertex_idx] = False
+                    if projection_state.is_sticking[env_idx, vertex_idx]:
+                        projected_residual = qd.max(normal_component, 0.0) * normal
+                    else:
+                        displacement = (
+                            self.elements_v[f + 1, vertex_idx, env_idx].pos
+                            + self.pcg_state_v[env_idx, vertex_idx].x
+                            - self.elements_v[f, vertex_idx, env_idx].pos
+                            - self.substep_dt * projection_state.rigid_vel[env_idx, vertex_idx]
+                        )
+                        tangent = displacement - displacement.dot(normal) * normal
+                        if tangent.norm() > rigid_info.EPS[None]:
+                            projected_residual -= friction_limit * tangent.normalized()
+                        elif tangent_force.norm() > rigid_info.EPS[None]:
+                            projected_residual -= (
+                                qd.min(friction_limit, tangent_force.norm()) * tangent_force.normalized()
+                            )
+            # Keep the full reaction so changing contacts recover the unprojected force residual.
+            projection_state.reactions[env_idx, vertex_idx] = residual - projected_residual
+            self.pcg_state_v[env_idx, vertex_idx].r = projected_residual
             self.pcg_state_v[env_idx, vertex_idx].z = (
                 self.pcg_state_v[env_idx, vertex_idx].prec @ self.pcg_state_v[env_idx, vertex_idx].r
             )
@@ -1014,6 +1059,9 @@ class FEMSolver(Solver):
         for env_idx in range(self._B):
             projection_state.is_processed[env_idx] = self.batch_active[env_idx]
             projection_state.is_pcg_active_saved[env_idx] = self.batch_pcg_active[env_idx]
+        for env_idx, vertex_idx in qd.ndrange(self._B, self.n_vertices):
+            projection_state.reactions[env_idx, vertex_idx] = qd.Vector.zero(gs.qd_float, 3)
+            projection_state.is_sticking[env_idx, vertex_idx] = True
         self._func_project_pcg_positions(
             f,
             bvh_nodes,
@@ -1074,7 +1122,7 @@ class FEMSolver(Solver):
             if qd.static(is_committed):
                 is_env_active = True
             if is_env_active and self._func_is_vertex_projection_enabled(vertex_idx, env_idx):
-                corrected_pos, _, _ = self._func_project_vertex_against_rigid(
+                corrected_pos, _, _, _, _ = self._func_project_vertex_against_rigid(
                     env_idx,
                     self.elements_v[f + 1, vertex_idx, env_idx].pos,
                     bvh_nodes,
@@ -1237,10 +1285,11 @@ class FEMSolver(Solver):
         self.init_pcg_solve()
         if self._is_implicit_rigid_projection_enabled:
             self.sim._coupler.project_fem_implicit_pcg(f, is_initial=True)
-        for _ in range(self._n_pcg_iterations):
-            # Copy-backed conversions require a fresh read after each iteration.
-            if not qd_to_torch(self.batch_pcg_active, transpose=True).any():
-                break
+        for iteration in range(self._n_pcg_iterations):
+            # Group host checks to amortize synchronization; inactive environments skip work inside the kernels.
+            if iteration % FEM_PCG_CONVERGENCE_CHECK_INTERVAL == 0:
+                if not qd_to_torch(self.batch_pcg_active, transpose=True).any():
+                    break
             if self._is_implicit_rigid_projection_enabled:
                 self.sim._coupler.project_fem_implicit_pcg(f, is_initial=False)
             else:
@@ -1406,6 +1455,7 @@ class FEMSolver(Solver):
             self.compute_vel.grad(f)
             self.init_pos_and_vel.grad(f)
 
+    @mutates(StateChange.GEOMETRY, StateChange.DYNAMICS)
     def substep_post_coupling(self, f):
         if self.is_active:
             # IPCCoupler owns FEM integration and writes the complete committed position/velocity state to frame
@@ -1513,6 +1563,7 @@ class FEMSolver(Solver):
     # --------------------------------------- io -----------------------------------------
     # ------------------------------------------------------------------------------------
 
+    @mutates(StateChange.GEOMETRY, StateChange.DYNAMICS)
     def set_state(self, f, state, envs_idx=None):
         if self.is_active:
             self._kernel_set_state(f, state.pos, state.vel, state.active)
@@ -1706,6 +1757,7 @@ class FEMSolver(Solver):
             self.surface[i_global].tri2el = i_global
             self.surface[i_global].active = True
 
+    @mutates(StateChange.GEOMETRY)
     @qd.kernel
     def _kernel_set_elements_pos(
         self,
@@ -1784,6 +1836,7 @@ class FEMSolver(Solver):
             i_global = i_e + element_el_start
             self.elements_el.grad[f, i_global, i_b].actu = actu_grad[i_b, i_e]
 
+    @mutates(StateChange.GEOMETRY)
     @qd.kernel
     def _kernel_set_active(
         self,

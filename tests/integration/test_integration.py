@@ -1,12 +1,13 @@
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
-import pytest
 
 import igl
+import pytest
 import trimesh
 
-from examples import pbstf_coffee_water
+from examples.multiflow import pbstf_coffee_water
 
 import genesis as gs
 from genesis.utils import geom
@@ -18,8 +19,48 @@ from ..utils import assert_allclose, assert_equal, get_hf_dataset
 @pytest.mark.required
 @pytest.mark.slow("gpu")
 @pytest.mark.parametrize("backend", [gs.cuda])
-def test_dual_arm_manipulation(show_viewer):
-    demo = pbstf_coffee_water.build_scene(is_viewer_shown=show_viewer, is_motion_only=True)
+@pytest.mark.parametrize("is_motion_only", [True, False])
+def test_dual_arm_manipulation(is_motion_only, show_viewer):
+    demo = pbstf_coffee_water.build_scene(
+        is_viewer_shown=show_viewer,
+        is_motion_only=is_motion_only,
+        is_liquid_enabled=False,
+        is_trajectory_checked=True,
+    )
+    if not is_motion_only:
+        grip_pose = pbstf_coffee_water.ToolPose(
+            np.array(pbstf_coffee_water.SPONGE_START) + (0.0, pbstf_coffee_water.SPONGE_GRIP_HEIGHT, 0.0),
+            pbstf_coffee_water.MOP_QUAT,
+        )
+        demo.motion.right_phase = pbstf_coffee_water.Phase.GRASP_SPONGE
+        demo.motion.phase_started = pbstf_coffee_water.PARALLEL_START
+        demo.motion.right_start = grip_pose
+        demo.motion.right_target = grip_pose
+        pbstf_coffee_water.update_motion(demo, time=pbstf_coffee_water.PARALLEL_START)
+        demo.qpos[list(demo.hands_fingers_qs_idx[0])] = 0.028
+        demo.robot.set_qpos(demo.qpos)
+        observation = pbstf_coffee_water.observe_scene(demo)
+        max_error = 0.0
+        # The full closing, settling and wiping phases exercise contact retention throughout the prescribed travel.
+        for step in range(round(5.6 / pbstf_coffee_water.CONTROL_DT)):
+            time = pbstf_coffee_water.PARALLEL_START + (step + 1) * pbstf_coffee_water.CONTROL_DT
+            target, _ = pbstf_coffee_water.update_motion(demo, time, observation)
+            pbstf_coffee_water.step_scene(demo)
+            observation = pbstf_coffee_water.observe_scene(demo)
+            measurement = pbstf_coffee_water.measure_motion(time, target, observation)
+            max_error = max(max_error, measurement.sponge_position_error)
+            assert measurement.hands_position_error[0] < 0.005
+            assert measurement.sponge_position_error < 0.01
+            if (step + 1) % 100 == 0:
+                gs.logger.info(f"{time:.3f}s: sponge tracking error={measurement.sponge_position_error:.6f}m.")
+        assert_equal(target.right_phase, pbstf_coffee_water.Phase.REST)
+        assert_allclose(
+            observation.sponge_pos,
+            np.array(pbstf_coffee_water.SPONGE_END) + (0.0, 0.5 * pbstf_coffee_water.SPONGE_SIZE[1], 0.0),
+            atol=0.005,
+        )
+        gs.logger.info(f"Maximum sponge tracking error: {max_error:.6f}m.")
+        return
     lower, upper = map(tensor_to_array, demo.robot.get_dofs_limit())
     rim = demo.cup_cavity.bounds[1, 1]
     phases = set()
@@ -28,6 +69,16 @@ def test_dual_arm_manipulation(show_viewer):
     previous_openings = np.array((0.044, 0.0007))
     previous_opening_velocity = np.zeros(2)
     observation = pbstf_coffee_water.observe_scene(demo)
+    ungrasped_observation = replace(observation, is_cup_grasped=False)
+    target = pbstf_coffee_water.motion_target(time=1.0, motion=replace(demo.motion), observation=ungrasped_observation)
+    assert_equal(target.right_phase, pbstf_coffee_water.Phase.POUR)
+    with pytest.raises(RuntimeError, match="lost a finger contact"):
+        pbstf_coffee_water.motion_target(
+            time=1.0,
+            motion=replace(demo.motion),
+            observation=ungrasped_observation,
+            is_trajectory_checked=True,
+        )
     previous_positions = np.stack([hand.pos for hand in observation.hands])
     previous_quaternions = np.stack([hand.quat for hand in observation.hands])
     previous_velocity = np.zeros((2, 3))
@@ -41,6 +92,15 @@ def test_dual_arm_manipulation(show_viewer):
     # The contact-driven sequence needs the full pouring, recovery and wiping horizons in one scene.
     for step in range(round(pbstf_coffee_water.MOTION_END / pbstf_coffee_water.CONTROL_DT)):
         time = (step + 1) * pbstf_coffee_water.CONTROL_DT
+        if demo.motion.right_phase == pbstf_coffee_water.Phase.REACH_SPONGE and observation.cup_tilt >= 38.0:
+            for water_in_cup in (None, 10, 9):
+                recovery_target = pbstf_coffee_water.motion_target(
+                    time,
+                    replace(demo.motion, water_before_reach=10),
+                    replace(observation, water_in_cup=water_in_cup),
+                    is_trajectory_checked=True,
+                )
+                assert_equal(recovery_target.right_phase, pbstf_coffee_water.Phase.CATCH)
         target, error = pbstf_coffee_water.update_motion(demo, time, observation)
         positions = np.stack((target.right.pos, target.left.pos))
         quaternions = np.stack((target.right.quat, target.left.quat))

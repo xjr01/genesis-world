@@ -317,7 +317,7 @@ def sdf_func_true_sdf(geom_idx, pos_sdf, sdf_info: array_class.SDFInfo):
     values = qd.Vector.zero(gs.qd_float, 8)
     for x, y, z in qd.static(qd.ndrange(2, 2, 2)):
         pos_cell = base + qd.Vector([x, y, z])
-        values[4*x + 2*y + z] = sdf_info.geoms_sdf_val[
+        values[4 * x + 2 * y + z] = sdf_info.geoms_sdf_val[
             sdf_func_ravel_cell_idx(pos_cell, geom_idx, geom_sdf_res, sdf_info)
         ]
     fraction = pos_sdf - base
@@ -626,7 +626,7 @@ def sdf_func_exact_mesh_surface_bvh_local(
         else:
             closest_normal = delta / surface_distance
 
-    return closest_position - atlas_offset, closest_normal, is_inside, surface_distance
+    return closest_position - atlas_offset, closest_normal, is_inside, surface_distance, closest_face_idx
 
 
 @qd.func
@@ -644,7 +644,7 @@ def sdf_func_exact_mesh_surface_bvh(
     geom_pos = dyn_state.geoms.pos[geom_idx, env_idx]
     geom_quat = dyn_state.geoms.quat[geom_idx, env_idx]
     pos_mesh = gu.qd_inv_transform_by_trans_quat(pos_world, geom_pos, geom_quat)
-    closest_position, closest_normal, is_inside, surface_distance = sdf_func_exact_mesh_surface_bvh_local(
+    closest_position, closest_normal, is_inside, surface_distance, face_idx = sdf_func_exact_mesh_surface_bvh_local(
         geom_idx,
         pos_mesh,
         bvh_nodes,
@@ -658,6 +658,7 @@ def sdf_func_exact_mesh_surface_bvh(
         gu.qd_transform_by_quat(closest_normal, geom_quat),
         is_inside,
         surface_distance,
+        face_idx,
     )
 
 
@@ -751,7 +752,7 @@ def sdf_func_project_vertex_outside_geom(
         pos_mesh = gu.qd_inv_transform_by_trans_quat(pos_world, geom_pos, geom_quat)
         is_in_query_aabb = (pos_mesh >= geom_lower - clearance).all() and (pos_mesh <= geom_upper + clearance).all()
         if is_in_query_aabb:
-            closest_position, normal, is_inside, surface_distance = sdf_func_exact_mesh_surface_bvh(
+            closest_position, normal, is_inside, surface_distance, _ = sdf_func_exact_mesh_surface_bvh(
                 geom_idx,
                 env_idx,
                 pos_world,
@@ -1003,7 +1004,7 @@ def sdf_func_triangle_surface_corrections(
                         surface_state.previous_geoms_pos[i_b, i_g_],
                         surface_state.previous_geoms_quat[i_b, i_g_],
                     )
-                    _, previous_direction_mesh, _, _ = sdf_func_exact_mesh_surface_bvh_local(
+                    _, previous_direction_mesh, _, _, _ = sdf_func_exact_mesh_surface_bvh_local(
                         i_g,
                         previous_centroid_mesh,
                         bvh_nodes,

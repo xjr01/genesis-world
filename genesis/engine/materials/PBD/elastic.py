@@ -15,7 +15,7 @@ class Elastic(Base["PBD3DEntity"]):
     Parameters
     ----------
     rho : float, optional
-        The density of the elastic material (kg/m³). Default is 1000.0.
+        The density of the elastic material (kg/m^3). Default is 1000.0.
     static_friction : float, optional
         Static friction coefficient. Default is 0.15.
     kinetic_friction : float, optional
@@ -25,13 +25,17 @@ class Elastic(Base["PBD3DEntity"]):
     bending_compliance : float, optional
         The bending compliance (rad/N). Default is 0.0.
     volume_compliance : float, optional
-        The volume compliance (m³/N). Default is 0.0.
+        The volume compliance (m^3/N). Default is 0.0.
     stretch_relaxation : float, optional
         The stretch relaxation. Default is 0.1.
     bending_relaxation : float, optional
         The bending relaxation. Default is 0.1.
     volume_relaxation : float, optional
         The volume relaxation. Default is 0.1.
+    damping : float, optional
+        Velocity damping rate (1/s), supported by PBDUnifiedOptions. Larger values reduce deformation oscillations
+        but slow elastic recovery; zero retains elastic oscillations. Free entities retain their overall translation
+        and rotation. With fixed particles, movable particles damp toward rest. Default is 0.0.
     """
 
     rho: PositiveFloat = 1000.0
@@ -43,3 +47,4 @@ class Elastic(Base["PBD3DEntity"]):
     stretch_relaxation: ValidFloat = 0.1
     bending_relaxation: ValidFloat = 0.1
     volume_relaxation: ValidFloat = 0.1
+    damping: NonNegativeFloat = 0.0

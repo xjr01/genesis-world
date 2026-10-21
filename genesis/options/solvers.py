@@ -827,22 +827,21 @@ class PBSTFAbsorbentStaticColliderOptionsMixin(Options):
 class PBSTFAbsorbentBoxStaticColliderOptions(PBSTFAbsorbentStaticColliderOptionsMixin, PBSTFBoxStaticColliderOptions):
     """Finite position-based surface tension flow (PBSTF) box with rate-limited nearby-voxel capture.
 
-    ``pbd_entity_name`` binds geometry to a volumetric position-based dynamics (PBD) entity using PBDUnifiedOptions.
-    Binding lets the collider and its material-space absorption targets follow deformation, at the cost of updating a
-    triangle surface and voxel search order whenever the PBD shape changes. ``sdf_res`` enables a signed distance field
-    (SDF) that can be built after deformation stops. Higher resolutions preserve smaller surface features at cubic
-    preprocessing and memory cost, while ``None`` keeps exact triangle queries. ``pbd_entity_name=None`` uses
-    inexpensive analytic box geometry.
+    ``deformable_entity_name`` binds geometry to a tetrahedral finite element method (FEM) entity or a volumetric
+    position-based dynamics (PBD) entity using PBDUnifiedOptions. Binding makes absorption follow deformation; updating
+    the triangle surface and voxel search order adds runtime cost. Leaving it unset uses analytic box geometry.
+    ``sdf_res`` enables a signed distance field (SDF) cached after deformation stops. Higher resolutions retain smaller
+    features at cubic preprocessing and memory cost; ``None`` keeps exact triangle queries.
     """
 
     type: Literal["absorbent_box"] = "absorbent_box"
-    pbd_entity_name: str | None = None
+    deformable_entity_name: str | None = None
     sdf_res: StrictInt | None = Field(default=None, ge=16)
 
     @model_validator(mode="after")
     def _validate_sdf(self):
-        if self.sdf_res is not None and self.pbd_entity_name is None:
-            gs.raise_exception("PBSTF absorbent box collider `sdf_res` requires `pbd_entity_name`.")
+        if self.sdf_res is not None and self.deformable_entity_name is None:
+            gs.raise_exception("PBSTF absorbent box collider `sdf_res` requires `deformable_entity_name`.")
         return self
 
 
@@ -1149,16 +1148,28 @@ class PBSTFOptions(Options):
 class PBDUnifiedOptions(Options):
     """Options for unified position-based dynamics (PBD) of cloth and elastic solids.
 
-    Each iteration combines elastic corrections and enforces one-way rigid contact. More iterations improve
-    shape preservation under load at increased runtime cost. Rigid contact acts at particle positions and assumes
-    separated rigid geoms with clearance from domain boundaries. Finer particle sampling resolves smaller rigid
-    features at increased memory and runtime cost.
-    Constraint acceleration extrapolates consecutive elastic iterates within each time step. Larger values can
-    improve shape recovery with fewer iterations, with a greater risk of overshoot under changing contacts.
+    Each iteration applies elastic corrections, then full vertex-face and domain contact corrections, followed by
+    edge-edge corrections averaged per participating vertex at the updated positions. Contacts use the elastic boundary
+    and rigid collision meshes. More iterations improve shape preservation and contact convergence under load at increased
+    runtime cost. Finer mesh sampling resolves smaller features at increased memory and runtime cost.
+    Constraint acceleration extrapolates consecutive iterates before contact projection. Larger values can improve shape
+    recovery with fewer iterations, with a greater risk of overshoot under changing contacts.
     Zero uses the current correction alone.
     Particle size controls mesh sampling. Explicit tetrahedral meshes retain their supplied vertices.
-    Recording constraint history retains three position samples per iteration for convergence diagnostics,
+    Recording constraint history retains input, post-elastic, and post-contact positions for convergence diagnostics,
     using memory proportional to the particle count, environment count, and iteration count.
+    Recording edge contacts enables iteration-by-iteration visual inspection, retaining detection positions and flags.
+    Memory scales with particles, surface edges, environments, substeps, and iterations; disable it for normal runs.
+    Collision thickness is the target surface gap in meters: a small positive value smooths sliding over mesh features
+    at the cost of a visible gap. Contact detection distance includes nearby separated surfaces; keep it slightly larger
+    than the thickness to retain contacts around the target gap. Larger distances increase contact counts and runtime.
+    Setting both distances to zero restricts contact generation to intersections.
+    ``bvh_rebuild_check_interval`` sets the number of simulation substeps between search-efficiency checks; explicit
+    collision-projection calls each count as one substep for this purpose.
+    Smaller intervals react sooner to deformation at greater monitoring cost. ``bvh_rebuild_threshold`` is the relative
+    increase in average search work that triggers a trial reorganization: smaller values spend more time reorganizing,
+    while larger values tolerate slower searches. A trial is retained when the current queries require substantially
+    less work.
     """
 
     dt: PositiveFloat | None = None
@@ -1168,11 +1179,20 @@ class PBDUnifiedOptions(Options):
     upper_bound: Vec3FType = (100.0, 100.0, 100.0)
     max_solver_iterations: PositiveInt = 30
     constraint_acceleration: Annotated[float, Field(ge=0.0, lt=1.0)] = 0.0
+    collision_thickness: NonNegativeFloat = 0.0
+    contact_detection_distance: NonNegativeFloat = 0.0
+    bvh_rebuild_check_interval: PositiveInt = 32
+    bvh_rebuild_threshold: Annotated[float, Field(ge=1.0)] = 1.5
     is_recording_constraint_history: StrictBool = False
+    is_recording_edge_contacts: StrictBool = False
 
     def model_post_init(self, context: Any) -> None:
         if not np.all(np.array(self.upper_bound) > np.array(self.lower_bound)):
             gs.raise_exception("Invalid pair of upper_bound and lower_bound.")
+        if self.contact_detection_distance <= self.collision_thickness and (
+            self.collision_thickness > 0.0 or self.contact_detection_distance > 0.0
+        ):
+            gs.raise_exception("contact_detection_distance must exceed collision_thickness when either is positive.")
 
 
 class PBDOptions(Options):
