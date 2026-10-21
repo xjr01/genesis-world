@@ -13,10 +13,10 @@ from .base_solver import Solver
 # capacity of the mesh-SDF obstacle's grid pool (allocated at build; ~33.5M cells = 134 MB f32),
 # shared by all slots via per-slot pool offsets
 SDFO_MAX_CELLS = 2**25
-# number of mesh-SDF obstacle slots (e.g. slot 0 = a static boundary mesh, slot 1 = a moving
-# tool mesh): every slot keeps its own pose/velocity/grid placement, and the contact kernel
+# number of mesh-SDF obstacle slots (e.g. slot 0 = the moving tool mesh, slots 1..3 = static
+# boundary meshes): every slot keeps its own pose/velocity/grid placement, and the contact kernel
 # resolves them sequentially like independent colliders
-SDFO_SLOTS = 2
+SDFO_SLOTS = 4
 
 
 @qd.data_oriented
