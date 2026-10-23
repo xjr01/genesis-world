@@ -34,6 +34,8 @@ class Config:
     adhesion_range: float = 0.0008
     board_normal_stress: float = 40.0
     board_shear_stress: float = 80.0
+    cut_end_time: float = 0.95
+    spread_transition_time: float = 3.6
     spread_start_offset: float = -0.037
     spread_end_offset: float = -0.0196
     spread_start_gap: float = 0.0028

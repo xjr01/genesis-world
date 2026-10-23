@@ -23,10 +23,11 @@ time step, it takes 230,000 steps to simulate 5.75 seconds. Outputs include a
 Allow several GB of RAM and disk space for full trajectories. First-run compilation
 adds initialization time.
 
-Everything needed is in this repository and its declared Python dependencies.
-There are no external asset files, separate project checkouts, proprietary rendering
-environments, downloaded trajectories, or local-path imports. Geometry is generated
-in code. Particle video uses Matplotlib's noninteractive Agg backend and PyAV; no
+The default primitive example uses only this repository and its declared Python
+dependencies. Its geometry is generated in code. The optional authored-asset
+workflow below consumes user-supplied meshes; its Blender export utility runs
+separately from Genesis. Neither simulation workflow requires Isaac or another
+project checkout. Particle video uses Matplotlib's noninteractive Agg backend and PyAV; no
 window, graphics context, separately installed video encoder, or surface mesh is needed.
 The existing `examples.butter_spreading` modules provide shared material parameters,
 bread contact and physics-only display notification management. They are used without
@@ -90,6 +91,12 @@ python -m examples.butter_cut_spread.pipeline --config examples/butter_cut_sprea
 the prescribed trajectory. `--config` accepts a partial JSON object; omitted fields
 use defaults. The expanded configuration is saved with each run.
 
+`demo`, `asset_demo`, and `pipeline` accept `--material` with a partial
+`ButterParameters` JSON. The effective physical parameters are saved separately in
+`material.json`. See [material calibration](MATERIAL_CALIBRATION.md) for the
+self-support and flow checks; changing a Blender surface shader does not change
+the mechanical material.
+
 - `butter_size`, `blade_size` and `cut_offset` control slice geometry. For the
   upright cut, slice thickness is `butter_size[0]/2 - cut_offset - blade_size[2]/2`.
   Keep it several particle spacings thick and fit the cut face within the blade.
@@ -114,14 +121,105 @@ linear velocity and angular velocity at each integration step. The helper
 `angular_velocities` supplies body-frame joint rates and world-frame contact rates.
 
 This is a complete reproducible example, not an arbitrary-asset loading interface.
-The contact frame currently supports pitch and yaw. Replacing the blade requires
+The contact frame supports pitch, yaw and an optional world-X roll. Replacing the blade requires
 matching the convex collision mesh, contact halfspaces and broad-face bounds.
-The board contact region and floor initialization are tied to this scene's Z=0
-support layout. The contact recipe changes from anchored pickup to wet spreading
+Board contact and box initialization use the configured board bounds and top height.
+Curved supports require the sampled height map used by the asset example below.
+The contact recipe changes from anchored pickup to wet spreading
 during 3.6-4.0 s, with a cutting shear cap before 0.95 s. When changing phase timing
 or importing an external trajectory, adapt these controls together; changing only
 the pose samples is insufficient. Material strengths are fitted demonstration
 settings, not measured traction labels for a specific butter product.
+
+## Authored Blender assets
+
+`export_blend.py` runs inside Blender and exports explicitly named evaluated mesh
+objects. It applies object transforms and the scene unit scale exactly once. Select
+the finished assets; exclude hidden scan references, preview floors and cameras.
+The Genesis runtime consumes exported geometry and has no Blender dependency.
+
+```shell
+blender --background --python examples/butter_cut_spread/export_blend.py -- --file BUTTER.blend --output out/assets/butter --names BUTTER_OBJECT
+blender --background --python examples/butter_cut_spread/export_blend.py -- --file DISH.blend --output out/assets/dish --names DISH_OBJECT
+blender --background --python examples/butter_cut_spread/export_blend.py -- --file KNIFE.blend --output out/assets/knife --names HANDLE_OBJECT CAP_OBJECT SEAM_OBJECT FERRULE_OBJECT STEEL_OBJECT
+python -m examples.butter_cut_spread.asset_init --exports out/assets --output out/initialized
+python -m examples.butter_cut_spread.asset_demo --assets out/initialized --run out/asset-cut
+python -m examples.butter_cut_spread.asset_particles --run out/asset-cut
+```
+
+The initialization adapter is for a butter asset with long X, middle Y and short Z
+dimensions, a dish with Z up, and the offset-neck palette knife whose steel is the
+last exported mesh. It rotates the butter onto its long/short footprint, fits the
+knife's broad-face plane, and places the actual butter bottom against the measured
+dish surface. Dimensions are preserved. `assets.json` records the transforms and
+`support.npz` records the support height field. Other asset conventions need a
+corresponding adapter, not an implicit axis swap or arbitrary scale correction.
+
+The asset demo uses the same constitutive model and a 25 microsecond physical step.
+Its default [physical material preset](asset_material.json) uses yield stress
+160 Pa and consistency 15 Pa s^0.5 for the 39.17 mm tall asset. Moduli, density,
+and flow exponent are unchanged. This is an engineering fit, not a measured
+universal butter material; see [material calibration](MATERIAL_CALIBRATION.md).
+Use `--material` to select another physical preset. The primitive example and
+shared engine defaults are unaffected.
+It settles for 0.6 s, lowers the blade through 1.5 s, draws across
+a nominal 5 mm end slice through 2.6 s, separates through 2.9 s, lifts through
+3.7 s, and holds through 4.0 s. The 15-degree handle elevation clears the dish rim;
+the entry is positioned above the full short side, using the actual steel
+cross-section in the cutting plane. The draw stroke moves the lowest cutting
+edge from 1 mm beyond the far short-side boundary to 1 mm beyond the near
+boundary (or two particle spacings when larger). This covers the upper section
+during descent and the lower section during drawing. The blade then returns to
+the butter's short-side center for pickup. A blade too short to span the entry
+section is rejected; different tool shapes require checking the complete swept
+section and dish clearance. Native
+ordinary contact uses the actual nonconvex steel and dish meshes. The example's
+`CuttingScene` restricts CPIC separation to the steel entity selected through
+`scene.build(cutting_tools=(blade,))`. The dish and countertop retain native
+normal contact and friction, but do not participate in cutting separation.
+The same selection is used in the primitive cut-and-spread example. Other scenes
+using `gs.Scene` are unaffected; no engine files or global classes are patched.
+The handle is rendered outside the contact region; this example does not simulate
+a robot grip. See [validation notes](VALIDATION.md) for the concave-support
+failure diagnosed before this separation and the remaining material-size limits.
+
+When integrating external assets, import `CuttingScene` from
+`examples.butter_cut_spread.cutting_scene`, keep `enable_CPIC=True`, and pass the
+rigid cutting entities explicitly to `build(cutting_tools=(blade,))`. Every geom
+of a selected entity participates in CPIC, so keep non-cutting supports in separate
+entities. Selection is fixed at build time and survives scene reset. The adapter
+uses the repository's legacy coupler; it does not support other coupler types.
+`scene.get_cpic_transfer_counts()` reports separated transfers by rigid geom in
+the most recent substep. This diagnostic is not intended for every-step polling.
+
+Broad-face adhesion is limited to the fitted planar blade patch. Post-step
+nonpenetration correction uses the actual steel mesh's native signed distance
+field, replacing the rectangular correction in the primitive demo. It removes
+inward relative normal velocity and tracks the previous side within the interior
+of the broad face. Flow around the blade edge remains allowed. This adapter
+assumes the constant tool orientation of this trajectory; rotating trajectories
+require recording the previous and current contact frames separately. The
+correction is a numerical contact constraint, not an additional material model.
+The prescribed tool uses `align=False`: automatic COM/principal-axis alignment
+would change the frame addressed by absolute pose setters. Native geometry poses
+are checked against the authored trajectory and recorded for rendering. Do not
+replace this with a link-pose-only check, which can miss a collision-frame offset.
+The MPM domain covers the dish footprint with an additional 25 mm margin.
+
+For an isolated support check, add `--stationary --duration 0.6` and use a new run
+directory. `particle-metrics.json` reports height, width and center-of-mass changes,
+including height of fixed initial central particle IDs (whole-block height alone
+can hide central settling);
+a larger asset may still yield under its own weight with unchanged material settings.
+The first high-resolution collision-distance-field build can be expensive; its
+cached cost is distinct from steady simulation time.
+
+The asset example exports `asset-cut-particles.mp4` and `asset-audit.json`
+(`python -m examples.butter_cut_spread.asset_audit --run out/asset-cut`). The mesh
+audit tests all particles within each saved blade AABB and a fixed particle-ID
+sample against the dish. These are saved-time checks, not proof that no crossing
+occurs between samples. The pickup/deposition acceptance criteria below apply to
+the primitive cut-and-spread example, not this separate asset cut-and-lift case.
 
 ## Outputs and validation
 
