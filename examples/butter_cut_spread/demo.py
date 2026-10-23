@@ -13,6 +13,7 @@ import numpy as np
 import genesis as gs
 from examples.butter_cut_spread.config import PHASES, Config, angular_velocities, motion
 from examples.butter_cut_spread.contact import ToolContact
+from examples.butter_cut_spread.cutting_scene import CuttingScene
 from examples.butter_cut_spread.geometry import tool_mesh
 from examples.butter_spreading.config import BreadParameters, ButterParameters, ContactParameters
 from examples.butter_spreading.contact import ButterContact
@@ -47,11 +48,15 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run", type=Path, required=True, help="New output directory for this simulation.")
     parser.add_argument("--steps", type=int, help="Limit integration steps for a smoke check.")
+    parser.add_argument("--material", type=Path, help="ButterParameters JSON; omitted fields retain material defaults.")
     parser.add_argument(
         "--config", type=Path, help="Partial JSON configuration; omitted fields use end-slice defaults."
     )
     args = parser.parse_args()
     config = Config() if args.config is None else Config(**json.loads(args.config.read_text()))
+    material = (
+        ButterParameters() if args.material is None else ButterParameters.model_validate_json(args.material.read_text())
+    )
     steps = math.ceil(config.duration / config.dt) if args.steps is None else args.steps
     if not 0 < steps <= math.ceil(config.duration / config.dt):
         parser.error("Step count outside trajectory.")
@@ -60,6 +65,7 @@ def main():
         parser.error("Use a new output directory.")
     run.mkdir(parents=True, exist_ok=True)
     (run / "config.json").write_text(json.dumps(asdict(config), indent=2))
+    (run / "material.json").write_text(material.model_dump_json(indent=2))
     snapshot = run / "source"
     snapshot.mkdir()
     for path in Path(__file__).parent.glob("*.py"):
@@ -67,7 +73,7 @@ def main():
     started = time.perf_counter()
     # The complete scene integrates over one million material points for 230,000 steps.
     gs.init(backend=gs.gpu, precision="32", seed=config.seed, logging_level="warning")
-    scene = gs.Scene(
+    scene = CuttingScene(
         sim_options=gs.options.SimOptions(dt=config.dt, substeps=1, gravity=(0, 0, -9.81)),
         rigid_options=gs.options.RigidOptions(enable_collision=False, disable_constraint=True),
         mpm_options=gs.options.MPMOptions(
@@ -93,7 +99,7 @@ def main():
     butter = scene.add_entity(
         morph=gs.morphs.Box(pos=config.butter_center, size=config.butter_size),
         material=gs.materials.MPM.HerschelBulkleyButter(
-            **ButterParameters().model_dump(), dt=config.dt, sampler="regular", particle_size=config.particle_size
+            **material.model_dump(), dt=config.dt, sampler="regular", particle_size=config.particle_size
         ),
     )
     times = np.arange(steps + 1) * config.dt
@@ -121,10 +127,11 @@ def main():
             sdf_cell_size=0.0002,
         ),
     )
-    scene.build()
-    for entity, spacing in ((bread, config.bread_particle_size), (butter, config.particle_size)):
+    scene.build(cutting_tools=(blade,))
+    for entity, spacing, board_index in ((bread, config.bread_particle_size, 1), (butter, config.particle_size, 0)):
         initial = entity.get_particles_pos()
-        initial[:, 2] += spacing / 2 - initial[:, 2].min()
+        support_top = config.board_centers[board_index][2] + config.board_sizes[board_index][2] / 2
+        initial[:, 2] += support_top + spacing / 2 - initial[:, 2].min()
         entity.set_particles_pos(initial)
     initial = butter.get_particles_pos()
     jitter = np.random.default_rng(config.seed).uniform(-0.1, 0.1, size=tuple(initial.shape)) * config.particle_size

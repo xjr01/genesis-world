@@ -1,5 +1,7 @@
 """Bounded cohesive tool contact in the rotating blade's material coordinates."""
 
+import numpy as np
+
 import genesis as gs
 from examples.butter_cut_spread.geometry import convex_planes, tool_mesh
 from examples.butter_spreading.config import ContactParameters
@@ -10,7 +12,7 @@ qd = gs.qd
 
 
 class ToolContact:
-    def __init__(self, butter, config):
+    def __init__(self, butter, config, support=None):
         self.solver = butter.solver
         self.particles = butter.solver.particles
         self.start = butter.particle_start
@@ -38,6 +40,20 @@ class ToolContact:
         self.equilibrium_adhesion = wet.is_equilibrium_adhesion
         self.board_normal = config.board_normal_stress
         self.board_shear = config.board_shear_stress
+        self.cut_end_time = config.cut_end_time
+        self.spread_transition_time = config.spread_transition_time
+        if support is None:
+            center, size = config.board_centers[0], config.board_sizes[0]
+            origin = np.array(center[:2]) - np.array(size[:2]) / 2
+            spacing = np.array(size[:2])
+            heights = np.full((2, 2), center[2] + size[2] / 2)
+        else:
+            origin, spacing, heights = support
+        self.support_origin = qd.Vector(origin.tolist())
+        self.support_spacing = qd.Vector(spacing.tolist())
+        self.support_shape = qd.Vector(list(heights.shape))
+        self.support = qd.field(gs.qd_float, shape=heights.shape)
+        self.support.from_numpy(heights.astype(gs.np_float))
         self.anchors = qd.Vector.field(2, gs.qd_float, shape=self.count)
         self.age = qd.field(gs.qd_float, shape=self.count)
         self.side = qd.field(gs.qd_int, shape=self.count)
@@ -47,8 +63,8 @@ class ToolContact:
         self.side.fill(0)
         self.maximum_correction.fill(0)
 
-    def apply(self, center, velocity, angles, omega, time_s, project=False):
-        contact(self.solver.sim.cur_substep_local, *center, *velocity, *angles, *omega, time_s, project, self)
+    def apply(self, center, velocity, angles, omega, time_s, project=False, roll=0.0):
+        contact(self.solver.sim.cur_substep_local, *center, *velocity, *angles, roll, *omega, time_s, project, self)
 
     def faces(self):
         return qd_to_numpy(self.side, transpose=True, copy=True)
@@ -68,6 +84,7 @@ def contact(
     vz: float,
     theta: float,
     yaw: float,
+    roll: float,
     wx: float,
     wy: float,
     wz: float,
@@ -77,6 +94,8 @@ def contact(
 ):
     c, s, cyaw, syaw = qd.cos(theta), qd.sin(theta), qd.cos(yaw), qd.sin(yaw)
     R = qd.Matrix([[cyaw * c, -syaw, cyaw * s], [syaw * c, cyaw, syaw * s], [-s, 0.0, c]])
+    cr, sr = qd.cos(roll), qd.sin(roll)
+    R = qd.Matrix([[1.0, 0.0, 0.0], [0.0, cr, -sr], [0.0, sr, cr]]) @ R
     center, velocity = qd.Vector([cx, cy, cz]), qd.Vector([vx, vy, vz])
     for i in range(self.count):
         p = self.start + i
@@ -101,7 +120,7 @@ def contact(
                 qd.atomic_max(self.maximum_correction[0], -distance)
         else:
             initial_relative = relative
-            transition = qd.min(1.0, qd.max(0.0, (time_s - 3.6) / 0.4))
+            transition = qd.min(1.0, qd.max(0.0, (time_s - self.spread_transition_time) / 0.4))
             transition = transition**2 * (3 - 2 * transition)
             sign = qd.select(local[2] >= 0, 1, -1)
             gap = qd.abs(local[2]) - self.half[2] - self.spacing / 2
@@ -147,7 +166,7 @@ def contact(
                 impulse = -self.dt * weight * (stiffness * displacement + (damping + self.dt * stiffness) * tangent)
                 impulse /= self.rho * depth + weight * (self.dt * damping + self.dt**2 * stiffness)
                 limit = shear * self.dt * weight / (self.rho * depth)
-                if time_s < 0.95:
+                if time_s < self.cut_end_time:
                     limit = qd.min(limit, 50 * self.dt * weight / (self.rho * depth))
                     self.anchors[i] = qd.Vector([local[0], local[1]])
                 impulse *= qd.min(1.0, limit / qd.max(impulse.norm(), 1e-12))
@@ -175,9 +194,17 @@ def contact(
                 relative[2] += transition * sign * qd.max(0.0, target_speed - sign * relative[2])
             self.particles[f, p, 0].vel = surface_velocity + R @ relative
             # Finite stationary board adhesion acts only on the cutting board.
-            if -0.17 < world[0] < -0.06 and qd.abs(world[1]) < 0.07 and world[2] < 0.00115:
-                gap_board = world[2] - self.spacing / 2
-                if gap_board > 0:
+            uv = (qd.Vector([world[0], world[1]]) - self.support_origin) / self.support_spacing
+            if 0 <= uv[0] < self.support_shape[0] - 1 and 0 <= uv[1] < self.support_shape[1] - 1:
+                node = qd.cast(qd.floor(uv), qd.i32)
+                weight = uv - node
+                height = 0.0
+                for a, b in qd.static(qd.ndrange(2, 2)):
+                    w = qd.select(a == 0, 1 - weight[0], weight[0])
+                    w *= qd.select(b == 0, 1 - weight[1], weight[1])
+                    height += w * self.support[node[0] + a, node[1] + b]
+                gap_board = world[2] - height - self.spacing / 2
+                if 0 < gap_board < 0.0009:
                     u = qd.min(1.0, gap_board / 0.0009)
                     self.particles[f, p, 0].vel[2] -= (
                         self.board_normal * 4 * u * (1 - u) * self.dt / (self.rho * 0.0006)
