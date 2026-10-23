@@ -1487,6 +1487,16 @@ class DEMOptions(Options):
     surface_tension_coeff : float, optional
         Scale of the capillary (liquid-bridge) cohesion between wetted grains (the `surface_tensor_cof`
         constant of the reference's `ComputeDemCapillaryForces`). Defaults to 0.007 (the reference value).
+    sdf_obstacle_force_contact : bool, optional
+        Experimental. Mesh-SDF obstacles (the moving tool's grid and any added static convex colliders) push
+        grains with a linear spring-dashpot force (`k_norm * penetration` along the obstacle normal, tangential
+        velocity damping clamped by the Coulomb cone) instead of the reference's Collider::Enforce position
+        projection and velocity reflection. The force form removes the tangential ejection of grains squeezed
+        in a closing obstacle-floor gap; the projection form is the reference semantics and stays the default.
+        Defaults to False.
+    boundary_force_contact : bool, optional
+        Experimental. The domain box and cylinder walls use the same force contact as `sdf_obstacle_force_contact`.
+        Separate switch so the wall and the obstacle surfaces can be attributed independently. Defaults to False.
     cylinder_radius : float, optional
         If set, an additional static hollow-cylinder collider (axis along z through the domain center) confines
         the grains, following the reference's rotate-scene boundary. Defaults to None (box domain only).
@@ -1516,6 +1526,10 @@ class DEMOptions(Options):
     # c = 2*xi*sqrt(k_norm*m_eff) with xi from e = exp(-pi*xi/sqrt(1-xi^2)) (recorded deviation:
     # the reference's DEMForce::getForce has no damping; added on user request 2026-08-22 to calm
     # the scoop first-touch splash)
+
+    sdf_obstacle_force_contact: bool = False  # experimental force-based mesh-SDF obstacle contact
+
+    boundary_force_contact: bool = False  # experimental force-based domain box/cylinder contact
 
     cylinder_radius: PositiveFloat | None = None
 

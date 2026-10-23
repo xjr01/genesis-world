@@ -77,6 +77,15 @@ class DEMSolver(Solver):
         self._surface_tension_coeff = options.surface_tension_coeff
         # grain-grain normal restitution (1.0 = reference's strictly-elastic contact)
         self._restitution = options.restitution
+        # experimental force-based contacts (recorded deviation from the reference's
+        # Collider::Enforce position projection; see DEMOptions for the tradeoff)
+        self._boundary_force_contact = options.boundary_force_contact
+        self._sdf_obstacle_force_contact = options.sdf_obstacle_force_contact
+        # experimental soft projection (recorded deviation from the reference's 1.5x velocity
+        # reflection): restitution factor applied to the reflected normal velocity and a tangential
+        # decay applied after projection; 0.5 / 0.0 reproduce the reference exactly
+        self._enforce_project_restitution = 0.5
+        self._enforce_project_tangential_decay = 0.0
 
         # optional hollow-cylinder collider (axis along z through the domain center), C++ rotate scene
         self._cylinder_radius = options.cylinder_radius
@@ -988,7 +997,16 @@ class DEMSolver(Solver):
         return n
 
     @qd.kernel
-    def _kernel_enforce_boundary(self, f: qd.i32, particle_radius: qd.f32, tan_fric: qd.f32):
+    def _kernel_enforce_boundary(
+        self,
+        f: qd.i32,
+        particle_radius: qd.f32,
+        tan_fric: qd.f32,
+        inv_mass: qd.f32,
+        k_norm: qd.f32,
+        k_tang: qd.f32,
+        c_norm: qd.f32,
+    ):
         # C++ Collider::Enforce(DEMParticles, ddt, radius): domain box (static, phi positive inside) plus an
         # optional moving box obstacle (relative velocity delta_vel = v - v_obstacle, as in the C++ code)
         for i_p, i_b in qd.ndrange(self._n_particles, self._B):
@@ -1021,19 +1039,38 @@ class DEMSolver(Solver):
                             n[0] = -dx_ / rho
                             n[1] = -dy_ / rho
 
-                if phi < 0.5 * particle_radius:
-                    if phi < 0.0:
-                        pos = pos - n * phi
-                        vel_n = vel.dot(n)
-                        if vel_n < 0.0:
-                            vel = vel - 1.5 * vel_n * n
-                    acc_n = acc.dot(n)
-                    if acc_n < 0.0:
-                        vel_tangential = vel - vel.dot(n) * n
-                        vt_norm = vel_tangential.norm()
-                        # C++ normalizes the tangential velocity unconditionally; guard the zero-velocity case
-                        if vt_norm > gs.EPS:
-                            acc = acc + acc_n * tan_fric * vel_tangential / vt_norm
+                contact_gate = 0.5 * particle_radius
+                if qd.static(self._boundary_force_contact):
+                    contact_gate = particle_radius
+                if phi < contact_gate:
+                    if qd.static(self._boundary_force_contact):
+                        # experimental force-based contact (recorded deviation from the reference's
+                        # Collider::Enforce position projection): the wall pushes with the same linear
+                        # spring-dashpot as a grain-grain pair instead of projecting positions, so a
+                        # grain squeezed in a closing wall-gap escapes at the contact speed instead of
+                        # being ejected by alternating projection jumps
+                        pen = particle_radius - phi
+                        v_n = vel.dot(n)
+                        f_normal_mag = qd.max(k_norm * pen - c_norm * v_n, 0.0)
+                        f_shear = -k_tang * (vel - v_n * n)
+                        max_fs = k_norm * pen * tan_fric
+                        fs_norm = f_shear.norm()
+                        if fs_norm > max_fs:
+                            f_shear *= max_fs / fs_norm
+                        acc = acc + (f_normal_mag * n + f_shear) * inv_mass
+                    else:
+                        if phi < 0.0:
+                            pos = pos - n * phi
+                            vel_n = vel.dot(n)
+                            if vel_n < 0.0:
+                                vel = vel - (1.0 + qd.static(self._enforce_project_restitution)) * vel_n * n
+                        acc_n = acc.dot(n)
+                        if acc_n < 0.0:
+                            vel_tangential = vel - vel.dot(n) * n
+                            vt_norm = vel_tangential.norm()
+                            # C++ normalizes the tangential velocity unconditionally; guard the zero-velocity case
+                            if vt_norm > gs.EPS:
+                                acc = acc + acc_n * tan_fric * vel_tangential / vt_norm
 
                 # moving box obstacle
                 if self.obstacle_enabled[i_b] == 1:
@@ -1124,25 +1161,46 @@ class DEMSolver(Solver):
                         qy = max(bmin[1] - p_m[1], p_m[1] - bmax[1])
                         qz = max(bmin[2] - p_m[2], p_m[2] - bmax[2])
                         phi_bb = qd.Vector([max(qx, 0.0), max(qy, 0.0), max(qz, 0.0)]).norm()
-                        if phi_bb < 0.5 * particle_radius:
+                        contact_gate = 0.5 * particle_radius
+                        if qd.static(self._sdf_obstacle_force_contact):
+                            contact_gate = particle_radius
+                        if phi_bb < contact_gate:
                             phi_m = self._func_sdfo_sdf(pos, i_b, i_s)
-                            if phi_m < 0.5 * particle_radius:
+                            if phi_m < contact_gate:
                                 n_m = self._func_sdfo_normal(pos, i_b, i_s)
                                 v_col = self.sdfo_vel[i_s, i_b] + self.sdfo_omega[i_s, i_b].cross(
                                     pos - self.sdfo_pos[i_s, i_b]
                                 )
                                 delta_vel = vel - v_col
-                                if phi_m < 0.0:
-                                    pos = pos - n_m * phi_m
-                                    dv_n = delta_vel.dot(n_m)
-                                    if dv_n < 0.0:
-                                        vel = vel - 1.5 * dv_n * n_m
-                                acc_n = acc.dot(n_m)
-                                if acc_n < 0.0:
-                                    dv_tangential = delta_vel - delta_vel.dot(n_m) * n_m
-                                    vt_norm = dv_tangential.norm()
-                                    if vt_norm > gs.EPS:
-                                        acc = acc + acc_n * tan_fric * dv_tangential / vt_norm
+                                if qd.static(self._sdf_obstacle_force_contact):
+                                    # experimental force-based contact (recorded deviation from the
+                                    # reference's Collider::Enforce position projection): the obstacle
+                                    # surface pushes with the same linear spring-dashpot as a grain-grain
+                                    # pair (relative velocity against the feedforward obstacle velocity)
+                                    pen = particle_radius - phi_m
+                                    v_n = delta_vel.dot(n_m)
+                                    f_normal_mag = qd.max(k_norm * pen - c_norm * v_n, 0.0)
+                                    f_shear = -k_tang * (delta_vel - v_n * n_m)
+                                    max_fs = k_norm * pen * tan_fric
+                                    fs_norm = f_shear.norm()
+                                    if fs_norm > max_fs:
+                                        f_shear *= max_fs / fs_norm
+                                    acc = acc + (f_normal_mag * n_m + f_shear) * inv_mass
+                                else:
+                                    if phi_m < 0.0:
+                                        pos = pos - n_m * phi_m
+                                        dv_n = delta_vel.dot(n_m)
+                                        if dv_n < 0.0:
+                                            vel = vel - (1.0 + qd.static(self._enforce_project_restitution)) * dv_n * n_m
+                                        if qd.static(self._enforce_project_tangential_decay > 0.0):
+                                            dv_tangential = delta_vel - delta_vel.dot(n_m) * n_m
+                                            vel = vel - qd.static(self._enforce_project_tangential_decay) * dv_tangential
+                                    acc_n = acc.dot(n_m)
+                                    if acc_n < 0.0:
+                                        dv_tangential = delta_vel - delta_vel.dot(n_m) * n_m
+                                        vt_norm = dv_tangential.norm()
+                                        if vt_norm > gs.EPS:
+                                            acc = acc + acc_n * tan_fric * dv_tangential / vt_norm
 
                 self.particles[i_p, i_b].pos = pos
                 self.particles[i_p, i_b].vel = vel
@@ -1379,7 +1437,7 @@ class DEMSolver(Solver):
                                 qd.atomic_add(flip.vel_w[idx], -cf[2] * w * kick)
                 self.particles[i_p, i_b].coupling_force = qd.Vector.zero(gs.qd_float, 3)
 
-    def _dem_substep_coupled(self, f, ddt, dt_f, k_norm, k_tang, tan_fric, c_norm, gate2):
+    def _dem_substep_coupled(self, f, ddt, dt_f, inv_mass, k_norm, k_tang, tan_fric, c_norm, gate2):
         # C++ MoveDEMParticlesSplit (coupled): saturate rate, coupling force (reads the previous
         # sub-substep's acc), force assembly, contact, reaction scatter, collider, integrate
         self._kernel_update_saturate_rate(f)
@@ -1390,7 +1448,7 @@ class DEMSolver(Solver):
         self._kernel_copy_acc_from_reordered(f)
         self._kernel_transfer_coupling_forces(f, ddt, dt_f)
         self._kernel_move_obstacle(ddt)
-        self._kernel_enforce_boundary(f, self._particle_radius, tan_fric)
+        self._kernel_enforce_boundary(f, self._particle_radius, tan_fric, inv_mass, k_norm, k_tang, c_norm)
         self._kernel_integrate(f, ddt)
 
     def _dem_substep(self, f, ddt, inv_mass, k_norm, k_tang, tan_fric, c_norm, gate2):
@@ -1399,7 +1457,7 @@ class DEMSolver(Solver):
         self._kernel_contact_forces(f, self._particle_radius, k_norm, k_tang, tan_fric, c_norm, gate2)
         self._kernel_copy_acc_from_reordered(f)
         self._kernel_move_obstacle(ddt)
-        self._kernel_enforce_boundary(f, self._particle_radius, tan_fric)
+        self._kernel_enforce_boundary(f, self._particle_radius, tan_fric, inv_mass, k_norm, k_tang, c_norm)
         self._kernel_integrate(f, ddt)
 
     def substep_pre_coupling(self, f):
@@ -1457,10 +1515,10 @@ class DEMSolver(Solver):
         ddt = self._m_ddt * self._ddt_safety
         n_full = int(dt_f / ddt)
         for _ in range(n_full):
-            self._dem_substep_coupled(f, ddt, dt_f, k_norm, k_tang, tan_fric, c_norm, gate2)
+            self._dem_substep_coupled(f, ddt, dt_f, inv_mass, k_norm, k_tang, tan_fric, c_norm, gate2)
         remainder = dt_f - n_full * ddt
         if remainder > 0.0:
-            self._dem_substep_coupled(f, remainder, dt_f, k_norm, k_tang, tan_fric, c_norm, gate2)
+            self._dem_substep_coupled(f, remainder, dt_f, inv_mass, k_norm, k_tang, tan_fric, c_norm, gate2)
 
     def substep_pre_coupling_grad(self, f):
         pass
