@@ -1,4 +1,4 @@
-from . import DEM, FEM, FLIP, IPBF, IPBSTF, MPM, PBD, PBSTF, SF, SPH
+from . import DEM, FEM, FLIP, IPBF, IPBSTF, MPM, PBD, PBSTF, SF, SPH, VBD
 from .hybrid import Hybrid
 from .kinematic import Kinematic
 from .rigid import Rigid

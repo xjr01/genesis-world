@@ -1,0 +1,17 @@
+{
+  "asset": "genesis/assets/meshes/jelly/jelly.glb",
+  "precision": "32",
+  "youngs_modulus_pa": 10000.0,
+  "dt": 0.005,
+  "substeps": 2,
+  "iterations": 20,
+  "frames": 200,
+  "mass_weighted": true,
+  "first_contact_time_s": 0.055,
+  "first_compression_time_s": 0.075,
+  "first_rebound_peak_time_s": 0.115,
+  "first_rebound_height_m": 0.0021075889665375346,
+  "peak_upward_velocity_m_s": 0.10485544537698067,
+  "minimum_height_m": 2.435741862427676e-06,
+  "final_minimum_volume_ratio": 0.0038693470381014586
+}

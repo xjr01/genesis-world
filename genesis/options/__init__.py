@@ -27,6 +27,7 @@ from .solvers import (
     SimOptions,
     ToolOptions,
 )
+from .vbd import VBDOptions
 from .vis import ViewerOptions, VisOptions
 
 __all__ = [
@@ -58,6 +59,7 @@ __all__ = [
     "SimOptions",
     "SPHOptions",
     "ToolOptions",
+    "VBDOptions",
     "ViewerOptions",
     "VisOptions",
 ]

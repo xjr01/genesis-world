@@ -1,0 +1,20 @@
+{
+  "solver": "Genesis FEM/IPC",
+  "scenario": "jelly elastic drop",
+  "material_model": "stable_neohookean",
+  "simulated_seconds": 1.0,
+  "frames": 200,
+  "scene_dt": 0.0025,
+  "scene_steps_per_frame": 2,
+  "vertices": 22212,
+  "tetrahedra": 96745,
+  "public_precision": "float32",
+  "native_precision": "float64",
+  "reference": "Initial Genesis vertex positions, promoted to float64 for signed volume evaluation",
+  "negative_volume_tetrahedra_public": 232,
+  "negative_volume_tetrahedra_native": 232,
+  "minimum_signed_volume_ratio_public": -22.10672625365518,
+  "minimum_signed_volume_ratio_native": -22.10748163307801,
+  "minimum_initial_absolute_volume_m3": 1.6679532380255416e-13,
+  "maximum_public_native_position_difference_m": 3.7250944134870068e-09
+}

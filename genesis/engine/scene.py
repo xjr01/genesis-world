@@ -3,8 +3,8 @@ import os
 import pickle
 import sys
 import time
-from typing import Callable, Iterable, Literal, TYPE_CHECKING, overload
 import weakref
+from typing import TYPE_CHECKING, Callable, Iterable, Literal, overload
 
 import numpy as np
 import torch
@@ -14,14 +14,16 @@ import trimesh
 import quadrants as qd
 
 import genesis as gs
+import genesis.utils.geom as gu
+import genesis.utils.mesh as mu
 from genesis.engine.force_fields import ForceField
 from genesis.engine.materials.base import EntityT, Material
 from genesis.engine.states.solvers import SimState
 from genesis.options import (
     BaseCouplerOptions,
     DEMOptions,
-    FLIPOptions,
     FEMOptions,
+    FLIPOptions,
     IPBFOptions,
     IPBSTFOptions,
     KinematicOptions,
@@ -36,6 +38,7 @@ from genesis.options import (
     SPHOptions,
     SimOptions,
     ToolOptions,
+    VBDOptions,
     ViewerOptions,
     VisOptions,
 )
@@ -45,8 +48,6 @@ from genesis.options.renderers import Rasterizer, RendererOptions
 from genesis.options.surfaces import Surface
 from genesis.recorders import RecorderManager
 from genesis.repr_base import RBC
-import genesis.utils.geom as gu
-import genesis.utils.mesh as mu
 from genesis.utils.misc import sanitize_index, tensor_to_array
 from genesis.utils.tools import FPSTracker
 from genesis.utils.warnings import warn_once
@@ -82,6 +83,8 @@ class Scene(RBC):
         The options configuring the sph_solver (``scene.sim.SPHSolver``).
     fem_options : gs.options.FEMOptions
         The options configuring the fem_solver (``scene.sim.FEMSolver``).
+    vbd_options : gs.options.VBDOptions
+        The options configuring the vertex block descent solver (``scene.vbd_solver``).
     sf_options : gs.options.SFOptions
         The options configuring the sf_solver (``scene.sim.SFSolver``).
     pbd_options : gs.options.PBDOptions
@@ -118,6 +121,7 @@ class Scene(RBC):
         mpm_options: MPMOptions | None = None,
         sph_options: SPHOptions | None = None,
         fem_options: FEMOptions | None = None,
+        vbd_options: VBDOptions | None = None,
         sf_options: SFOptions | None = None,
         pbd_options: PBDOptions | PBDUnifiedOptions | None = None,
         dem_options: DEMOptions | None = None,
@@ -144,6 +148,7 @@ class Scene(RBC):
         mpm_options = mpm_options or MPMOptions()
         sph_options = sph_options or SPHOptions()
         fem_options = fem_options or FEMOptions()
+        vbd_options = vbd_options or VBDOptions()
         sf_options = sf_options or SFOptions()
         pbd_options = pbd_options or PBDOptions()
         dem_options = dem_options or DEMOptions()
@@ -170,6 +175,7 @@ class Scene(RBC):
             mpm_options,
             sph_options,
             fem_options,
+            vbd_options,
             sf_options,
             pbd_options,
             dem_options,
@@ -191,6 +197,11 @@ class Scene(RBC):
         self.mpm_options = mpm_options.model_copy_from(sim_options)
         self.sph_options = sph_options.model_copy_from(sim_options)
         self.fem_options = fem_options.model_copy_from(sim_options)
+        if vbd_options.dt is not None and vbd_options.dt != sim_options.dt:
+            gs.raise_exception("VBD uses SimOptions.dt; remove the conflicting VBDOptions.dt.")
+        if vbd_options.gravity is not None and vbd_options.gravity != sim_options.gravity:
+            gs.raise_exception("VBD uses SimOptions.gravity; remove the conflicting VBDOptions.gravity.")
+        self.vbd_options = vbd_options.model_copy_from(sim_options, override=True)
         self.sf_options = sf_options.model_copy_from(sim_options)
         self.pbd_options = pbd_options.model_copy_from(sim_options)
         self.dem_options = dem_options.model_copy_from(sim_options)
@@ -215,6 +226,7 @@ class Scene(RBC):
             mpm_options=self.mpm_options,
             sph_options=self.sph_options,
             fem_options=self.fem_options,
+            vbd_options=self.vbd_options,
             sf_options=self.sf_options,
             pbd_options=self.pbd_options,
             dem_options=self.dem_options,
@@ -262,6 +274,7 @@ class Scene(RBC):
         mpm_options: MPMOptions,
         sph_options: SPHOptions,
         fem_options: FEMOptions,
+        vbd_options: VBDOptions,
         sf_options: SFOptions,
         pbd_options: PBDOptions | PBDUnifiedOptions,
         dem_options: DEMOptions,
@@ -297,6 +310,9 @@ class Scene(RBC):
 
         if not isinstance(fem_options, FEMOptions):
             gs.raise_exception("`fem_options` should be an instance of `FEMOptions`.")
+
+        if not isinstance(vbd_options, VBDOptions):
+            gs.raise_exception("`vbd_options` should be an instance of `VBDOptions`.")
 
         if not isinstance(sf_options, SFOptions):
             gs.raise_exception("`sf_options` should be an instance of `SFOptions`.")
@@ -459,10 +475,10 @@ class Scene(RBC):
             morph_for_checks = morph
 
         if isinstance(morph_for_checks, gs.morphs.TetrahedralMesh) and (
-            not isinstance(material, (gs.materials.FEM.Base, gs.materials.PBD.Elastic))
+            not isinstance(material, (gs.materials.FEM.Base, gs.materials.PBD.Elastic, gs.materials.VBD.Elastic))
             or isinstance(material, gs.materials.FEM.Cloth)
         ):
-            gs.raise_exception("TetrahedralMesh morphs require a volumetric FEM or PBD elastic material.")
+            gs.raise_exception("TetrahedralMesh morphs require a volumetric FEM, PBD or VBD elastic material.")
 
         if isinstance(material, gs.materials.Rigid):
             # small sdf res is sufficient for primitives regardless of size
@@ -478,7 +494,7 @@ class Scene(RBC):
                 gs.raise_exception(f"Unsupported material for morph: {material} and {morph_for_checks}.")
 
         if surface.double_sided is None:
-            surface.double_sided = isinstance(material, (gs.materials.PBD.Cloth, gs.materials.FEM.Cloth))
+            surface.double_sided = isinstance(material, (gs.materials.PBD.Cloth, gs.materials.FEM.Cloth, gs.materials.VBD.Cloth))
 
         if vis_mode is not None:
             surface.vis_mode = vis_mode
@@ -558,7 +574,7 @@ class Scene(RBC):
                     f"Expected one of: {vis_modes}."
                 )
 
-        elif isinstance(material, gs.materials.FEM.Base):
+        elif isinstance(material, (gs.materials.FEM.Base, gs.materials.VBD.Base)):
             if surface.vis_mode is None:
                 surface.vis_mode = "visual"
 
@@ -1893,6 +1909,11 @@ class Scene(RBC):
     def sph_solver(self):
         """The scene's `sph_solver`, managing all the `SPHEntity` in the scene."""
         return self._sim.sph_solver
+
+    @property
+    def vbd_solver(self):
+        """The vertex block descent (VBD) solver managing deformable entities."""
+        return self._sim.vbd_solver
 
     @property
     def fem_solver(self):

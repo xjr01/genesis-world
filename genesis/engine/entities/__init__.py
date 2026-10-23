@@ -14,3 +14,4 @@ from .rigid_entity import KinematicEntity, RigidEntity
 from .sf_entity import SFParticleEntity
 from .sph_entity import SPHEntity
 from .tool_entity import ToolEntity
+from .vbd_entity import VBDEntity

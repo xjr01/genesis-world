@@ -1,0 +1,33 @@
+{
+  "date": "2026-10-23",
+  "cpu": "AMD Ryzen 9 7950X 16-Core Processor",
+  "gpu": "NVIDIA GeForce RTX 4090",
+  "platform": "Windows-10-10.0.26300-SP0",
+  "python": "3.11.15",
+  "genesis": "1.3.1",
+  "torch": "2.12.1+cu126",
+  "quadrants": "1.2.0",
+  "numpy": "2.4.6",
+  "tetgen": "0.8.2",
+  "libuipc": "0.0.25",
+  "tetgen_switches": "pq1.5/10Ya0.000000100000Q",
+  "warmup_frames": 20,
+  "frames_per_repeat": 200,
+  "benchmark_repeats": 5,
+  "ipc_native_defaults": {
+    "newton_max_iterations": 1024,
+    "newton_min_iterations": 1,
+    "newton_velocity_tolerance": 0.05,
+    "newton_translation_rate_tolerance": 0.1,
+    "newton_ccd_tolerance": 1.0,
+    "newton_use_adaptive_tolerance": false,
+    "line_search_max_iterations": 8,
+    "linear_system_solver": "fused_pcg",
+    "linear_system_tolerance": 0.001,
+    "collision_detection_method": "info_stackless_bvh",
+    "contact_constitution": "ipc"
+  },
+  "ipc_contact_resistance": 1000000000.0,
+  "tests_cpu_fp64": {"passed": 8, "failed": 0},
+  "tests_gpu_fp32": {"passed": 8, "failed": 0}
+}

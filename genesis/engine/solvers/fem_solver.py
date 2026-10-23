@@ -228,7 +228,7 @@ class FEMSolver(Solver):
         """Allocate the render geometry of every visual geom of every entity, laid out back-to-back.
 
         Several vverts may stand for a single simulated vertex, so each one carries its own UVs and gathers its
-        position through 'vert_idx' (see 'FEMVisGeom'). A contiguous layout lets a renderer consume positions, UVs and
+        position through 'vert_idx' (see 'DeformableVisGeom'). A contiguous layout lets a renderer consume positions, UVs and
         topology as three flat arrays.
         """
         struct_vvert_info = qd.types.struct(

@@ -1173,36 +1173,37 @@ class RasterizerContext:
                             self.jit.update_buffer(node, "model", tfs.transpose((0, 2, 1)))
 
     def on_fem(self):
-        if self.sim.fem_solver.is_active:
-            has_visual = any(entity.surface.vis_mode == "visual" for entity in self.sim.fem_solver.entities)
-            has_tetrahedral = any(entity.surface.vis_mode == "tetrahedral" for entity in self.sim.fem_solver.entities)
-            vverts_render = None
-            vertices_render = None
-            if has_visual:
-                vverts_pos, _, _ = self.sim.fem_solver.get_state_render(self.sim.cur_substep_local)
-                vverts_render = qd_to_numpy(vverts_pos, self.rendered_envs_idx, transpose=True)
-            if has_tetrahedral:
-                vertices_pos = self.sim.fem_solver.get_tetrahedral_state_render(self.sim.cur_substep_local)
-                vertices_render = qd_to_numpy(vertices_pos, self.rendered_envs_idx, transpose=True)
+        for solver in (self.sim.fem_solver, self.sim.vbd_solver):
+            if solver.is_active:
+                has_visual = any(entity.surface.vis_mode == "visual" for entity in solver.entities)
+                has_tetrahedral = any(entity.surface.vis_mode == "tetrahedral" for entity in solver.entities)
+                vverts_render = None
+                vertices_render = None
+                if has_visual:
+                    vverts_pos, _, _ = solver.get_state_render(self.sim.cur_substep_local)
+                    vverts_render = qd_to_numpy(vverts_pos, self.rendered_envs_idx, transpose=True)
+                if has_tetrahedral:
+                    vertices_pos = solver.get_tetrahedral_state_render(self.sim.cur_substep_local)
+                    vertices_render = qd_to_numpy(vertices_pos, self.rendered_envs_idx, transpose=True)
 
-            for fem_entity in self.sim.fem_solver.entities:
-                if fem_entity.surface.vis_mode == "visual":
-                    for i_g, vgeom in enumerate(fem_entity.vgeoms):
-                        visual = mu.surface_uvs_to_trimesh_visual(vgeom.surface, uvs=vgeom.uvs, n_verts=vgeom.n_vverts)
-                        seg_key = (fem_entity.idx, i_g) if self.segmentation_level == "geom" else fem_entity.idx
-                        vverts = vverts_render[:, vgeom.vvert_start : vgeom.vvert_end]
-                        for env_i, i_b in enumerate(self.rendered_envs_idx):
-                            mesh = trimesh.Trimesh(vverts[env_i], vgeom.vmesh.faces, process=False)
-                            mesh.visual = visual
-                            node = pyrender.Mesh.from_trimesh(
-                                mesh, smooth=vgeom.surface.smooth, double_sided=vgeom.surface.double_sided
-                            )
-                            static_node = self.add_node(node)
-                            self.static_nodes[(i_b, vgeom.uid)] = static_node
-                            self.create_node_seg(seg_key, static_node)
-                elif fem_entity.surface.vis_mode == "tetrahedral":
-                    vertices = vertices_render[:, fem_entity.v_start : fem_entity.v_start + fem_entity.n_vertices]
-                    self.add_tetrahedral_entity(fem_entity, vertices)
+                for entity in solver.entities:
+                    if entity.surface.vis_mode == "visual":
+                        for i_g, vgeom in enumerate(entity.vgeoms):
+                            visual = mu.surface_uvs_to_trimesh_visual(vgeom.surface, uvs=vgeom.uvs, n_verts=vgeom.n_vverts)
+                            seg_key = (entity.idx, i_g) if self.segmentation_level == "geom" else entity.idx
+                            vverts = vverts_render[:, vgeom.vvert_start : vgeom.vvert_end]
+                            for env_i, i_b in enumerate(self.rendered_envs_idx):
+                                mesh = trimesh.Trimesh(vverts[env_i], vgeom.vmesh.faces, process=False)
+                                mesh.visual = visual
+                                node = pyrender.Mesh.from_trimesh(
+                                    mesh, smooth=vgeom.surface.smooth, double_sided=vgeom.surface.double_sided
+                                )
+                                static_node = self.add_node(node)
+                                self.static_nodes[(i_b, vgeom.uid)] = static_node
+                                self.create_node_seg(seg_key, static_node)
+                    elif entity.surface.vis_mode == "tetrahedral":
+                        vertices = vertices_render[:, entity.v_start : entity.v_start + entity.n_vertices]
+                        self.add_tetrahedral_entity(entity, vertices)
 
     def add_tetrahedral_entity(self, entity, vertices):
         """Render tetrahedron edges with the entity's surface and environment segmentation."""
@@ -1237,37 +1238,38 @@ class RasterizerContext:
             self.create_node_seg(seg_key, static_node)
 
     def update_fem(self):
-        if self.sim.fem_solver.is_active:
-            has_visual = any(entity.surface.vis_mode == "visual" for entity in self.sim.fem_solver.entities)
-            has_tetrahedral = any(entity.surface.vis_mode == "tetrahedral" for entity in self.sim.fem_solver.entities)
-            vverts_render = None
-            vertices_render = None
-            if has_visual:
-                vverts_pos, _, _ = self.sim.fem_solver.get_state_render(self.sim.cur_substep_local)
-                vverts_render = qd_to_numpy(vverts_pos, self.rendered_envs_idx, transpose=True)
-            if has_tetrahedral:
-                vertices_pos = self.sim.fem_solver.get_tetrahedral_state_render(self.sim.cur_substep_local)
-                vertices_render = qd_to_numpy(vertices_pos, self.rendered_envs_idx, transpose=True)
+        for solver in (self.sim.fem_solver, self.sim.vbd_solver):
+            if solver.is_active:
+                has_visual = any(entity.surface.vis_mode == "visual" for entity in solver.entities)
+                has_tetrahedral = any(entity.surface.vis_mode == "tetrahedral" for entity in solver.entities)
+                vverts_render = None
+                vertices_render = None
+                if has_visual:
+                    vverts_pos, _, _ = solver.get_state_render(self.sim.cur_substep_local)
+                    vverts_render = qd_to_numpy(vverts_pos, self.rendered_envs_idx, transpose=True)
+                if has_tetrahedral:
+                    vertices_pos = solver.get_tetrahedral_state_render(self.sim.cur_substep_local)
+                    vertices_render = qd_to_numpy(vertices_pos, self.rendered_envs_idx, transpose=True)
 
-            for fem_entity in self.sim.fem_solver.entities:
-                if fem_entity.surface.vis_mode == "visual":
-                    for vgeom in fem_entity.vgeoms:
-                        vverts = vverts_render[:, vgeom.vvert_start : vgeom.vvert_end]
+                for entity in solver.entities:
+                    if entity.surface.vis_mode == "visual":
+                        for vgeom in entity.vgeoms:
+                            vverts = vverts_render[:, vgeom.vvert_start : vgeom.vvert_end]
+                            for env_i, i_b in enumerate(self.rendered_envs_idx):
+                                node = self.static_nodes[(i_b, vgeom.uid)]
+                                render_verts = vverts[env_i].astype(np.float32, copy=False)
+                                update_data = self._scene.reorder_vertices(node, render_verts)
+                                self.jit.update_buffer(node, "pos", update_data)
+                                normal_data = self.jit.update_normal(node, update_data)
+                                if normal_data is not None:
+                                    self.jit.update_buffer(node, "normal", normal_data)
+                    elif entity.surface.vis_mode == "tetrahedral":
+                        vertices = vertices_render[:, entity.v_start : entity.v_start + entity.n_vertices]
                         for env_i, i_b in enumerate(self.rendered_envs_idx):
-                            node = self.static_nodes[(i_b, vgeom.uid)]
-                            render_verts = vverts[env_i].astype(np.float32, copy=False)
+                            node = self.static_nodes[(i_b, entity.uid)]
+                            render_verts = vertices[env_i].astype(np.float32, copy=False)
                             update_data = self._scene.reorder_vertices(node, render_verts)
                             self.jit.update_buffer(node, "pos", update_data)
-                            normal_data = self.jit.update_normal(node, update_data)
-                            if normal_data is not None:
-                                self.jit.update_buffer(node, "normal", normal_data)
-                elif fem_entity.surface.vis_mode == "tetrahedral":
-                    vertices = vertices_render[:, fem_entity.v_start : fem_entity.v_start + fem_entity.n_vertices]
-                    for env_i, i_b in enumerate(self.rendered_envs_idx):
-                        node = self.static_nodes[(i_b, fem_entity.uid)]
-                        render_verts = vertices[env_i].astype(np.float32, copy=False)
-                        update_data = self._scene.reorder_vertices(node, render_verts)
-                        self.jit.update_buffer(node, "pos", update_data)
 
     def update_sensors(self):
         self.sim._sensor_manager.draw_debug(self)

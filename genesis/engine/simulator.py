@@ -7,8 +7,8 @@ from genesis.options.morphs import Morph
 from genesis.options.solvers import (
     BaseCouplerOptions,
     DEMOptions,
-    FLIPOptions,
     FEMOptions,
+    FLIPOptions,
     IPBFOptions,
     IPBSTFOptions,
     IPCCouplerOptions,
@@ -25,6 +25,7 @@ from genesis.options.solvers import (
     SimOptions,
     ToolOptions,
 )
+from genesis.options.vbd import VBDOptions
 from genesis.repr_base import RBC
 
 from .couplers import IPCCoupler, LegacyCoupler, SAPCoupler
@@ -46,6 +47,7 @@ from .solvers import (
     SFSolver,
     SPHSolver,
     ToolSolver,
+    VBDSolver,
 )
 from .states.cache import QueriedStates
 from .states.solvers import SimState
@@ -105,6 +107,7 @@ class Simulator(RBC):
         mpm_options: MPMOptions,
         sph_options: SPHOptions,
         fem_options: FEMOptions,
+        vbd_options: VBDOptions,
         sf_options: SFOptions,
         pbd_options: PBDOptions | PBDUnifiedOptions,
         dem_options: DEMOptions,
@@ -124,6 +127,7 @@ class Simulator(RBC):
         self.mpm_options = mpm_options
         self.sph_options = sph_options
         self.fem_options = fem_options
+        self.vbd_options = vbd_options
         self.sf_options = sf_options
         self.pbd_options = pbd_options
         self.dem_options = dem_options
@@ -157,6 +161,7 @@ class Simulator(RBC):
         self.ipbstf_solver = IPBSTFSolver(self.scene, self, self.ipbstf_options)
         self.pbstf_solver = PBSTFSolver(self.scene, self, self.pbstf_options)
         self.fem_solver = FEMSolver(self.scene, self, self.fem_options)
+        self.vbd_solver = VBDSolver(self.scene, self, self.vbd_options)
         self.sf_solver = SFSolver(self.scene, self, self.sf_options)
         self.dem_solver = DEMSolver(self.scene, self, self.dem_options)
         self.flip_solver = FLIPSolver(self.scene, self, self.flip_options)
@@ -173,6 +178,7 @@ class Simulator(RBC):
                 self.ipbstf_solver,
                 self.pbstf_solver,
                 self.fem_solver,
+                self.vbd_solver,
                 self.sf_solver,
                 self.dem_solver,
                 self.flip_solver,
@@ -232,6 +238,8 @@ class Simulator(RBC):
             entity = self.ipbstf_solver.add_entity(self.n_entities, material, morph, surface, name=name)
         elif isinstance(material, gs.materials.PBSTF.Base):
             entity = self.pbstf_solver.add_entity(self.n_entities, material, morph, surface, name=name)
+        elif isinstance(material, gs.materials.VBD.Base):
+            entity = self.vbd_solver.add_entity(self.n_entities, material, morph, surface, name=name)
         elif isinstance(material, gs.materials.FEM.Base):
             entity = self.fem_solver.add_entity(self.n_entities, material, morph, surface, name=name)
         elif isinstance(material, gs.materials.Hybrid):
@@ -374,6 +382,7 @@ class Simulator(RBC):
         if self.rigid_solver.is_active:
             self.rigid_solver.clear_external_force()
 
+        self.vbd_solver.check_errno()
         self._sensor_manager.step()
 
     def _step_grad(self):

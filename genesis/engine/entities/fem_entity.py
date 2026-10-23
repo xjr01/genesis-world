@@ -14,99 +14,13 @@ import genesis.utils.element as eu
 import genesis.utils.geom as gu
 import genesis.utils.mesh as mu
 from genesis.engine.couplers import IPCCoupler, SAPCoupler
+from genesis.engine.entities.deformable_geom import DeformableVisGeom
 from genesis.engine.entities.rigid_entity import RigidLink
 from genesis.engine.states.cache import QueriedStates
 from genesis.engine.states.entities import FEMEntityState
-from genesis.repr_base import RBC
 from genesis.utils.misc import broadcast_tensor, tensor_to_array, to_gs_tensor
 
 from .base_entity import Entity
-
-
-class FEMVisGeom(RBC):
-    """A visual geom of a FEM entity, the deformable counterpart of `RigidVisGeom`.
-
-    It carries the render mesh drawn by the visualizer, decoupled from the simulation mesh, and 'sim_verts_idx',
-    the map from each render-mesh vertex to the simulated vertex standing for it (vertices co-located across visual
-    geoms or duplicated by texture seams share a single simulated vertex).
-    """
-
-    def __init__(self, entity, vvert_start, vface_start, vmesh, sim_verts_idx):
-        self._uid = gs.UID()
-        self._entity = entity
-        self._vvert_start = vvert_start
-        self._vface_start = vface_start
-        self._vmesh = vmesh
-        self._sim_verts_idx = sim_verts_idx
-
-    def get_trimesh(self):
-        """The underlying `trimesh.Trimesh` of the render mesh."""
-        return self._vmesh.trimesh
-
-    @property
-    def uid(self):
-        """Unique ID of the vgeom."""
-        return self._uid
-
-    @property
-    def entity(self):
-        """The FEM entity the vgeom belongs to."""
-        return self._entity
-
-    @property
-    def vmesh(self):
-        """The render mesh."""
-        return self._vmesh
-
-    @property
-    def sim_verts_idx(self):
-        """Map from render-mesh vertex index to the entity's simulated vertex index."""
-        return self._sim_verts_idx
-
-    @property
-    def surface(self):
-        """Surface object of the vgeom."""
-        return self._vmesh.surface
-
-    @property
-    def uvs(self):
-        """UV coordinates of the vgeom."""
-        return self._vmesh.uvs
-
-    @property
-    def metadata(self):
-        """Metadata of the render mesh."""
-        return self._vmesh.metadata
-
-    @property
-    def n_vverts(self):
-        """Number of render vertices of the vgeom."""
-        return len(self._vmesh.verts)
-
-    @property
-    def n_vfaces(self):
-        """Number of render faces of the vgeom."""
-        return len(self._vmesh.faces)
-
-    @property
-    def vvert_start(self):
-        """Starting index of the vgeom's render vertices in the FEM solver."""
-        return self._vvert_start
-
-    @property
-    def vface_start(self):
-        """Starting index of the vgeom's render faces in the FEM solver."""
-        return self._vface_start
-
-    @property
-    def vvert_end(self):
-        """Ending index of the vgeom's render vertices in the FEM solver."""
-        return self._vvert_start + self.n_vverts
-
-    @property
-    def vface_end(self):
-        """Ending index of the vgeom's render faces in the FEM solver."""
-        return self._vface_start + self.n_vfaces
 
 
 def assert_muscle(method):
@@ -531,7 +445,7 @@ class FEMEntity(Entity):
         Build the entity's visual geoms and simulation mesh from its morph.
 
         Each morph sub-mesh becomes a visual geom with its own surface and UVs, while the simulation operates on a
-        single welded copy of their vertices, tracked through 'FEMVisGeom.sim_verts_idx'. Surface tetrahedralization
+        single welded copy of their vertices, tracked through 'DeformableVisGeom.sim_verts_idx'. Surface tetrahedralization
         keeps its input vertices first and in order. An explicit TetrahedralMesh supplies the simulation topology and
         retains the same vertex ordering in its boundary render mesh.
         """
@@ -543,7 +457,7 @@ class FEMEntity(Entity):
         vvert_start, vface_start = self._vvert_start, self._vface_start
         for mesh, verts_idx in zip(meshes, verts_maps):
             self._vgeoms.append(
-                FEMVisGeom(
+                DeformableVisGeom(
                     entity=self,
                     vvert_start=vvert_start,
                     vface_start=vface_start,
@@ -1195,7 +1109,7 @@ class FEMEntity(Entity):
 
     @property
     def vgeoms(self):
-        """The list of visual geoms (`FEMVisGeom`) in the entity, one per morph sub-mesh."""
+        """The list of visual geoms (`DeformableVisGeom`) in the entity, one per morph sub-mesh."""
         return self._vgeoms
 
     @property

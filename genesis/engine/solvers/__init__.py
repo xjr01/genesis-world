@@ -12,3 +12,4 @@ from .rigid.rigid_solver import RigidSolver
 from .sf_solver import SFSolver
 from .sph_solver import SPHSolver
 from .tool_solver import ToolSolver
+from .vbd import VBDSolver
