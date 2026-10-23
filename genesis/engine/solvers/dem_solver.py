@@ -17,6 +17,10 @@ SDFO_MAX_CELLS = 2**25
 # boundary meshes): every slot keeps its own pose/velocity/grid placement, and the contact kernel
 # resolves them sequentially like independent colliders
 SDFO_SLOTS = 4
+# A close-packed equal-radius grain has at most 12 touching neighbours. Two spare
+# entries cover the small 2.05r creation shell without silently dropping ordinary
+# surface disorder; overflow is still counted and exposed to the caller.
+BOND_MAX_SLOTS = 14
 
 
 @qd.data_oriented
@@ -25,10 +29,10 @@ class DEMSolver(Solver):
     DEM (Discrete Element Method) solver for granular materials (sand), ported from the reference
     implementation `sand-water-coupling-PIC-DEM-3d`. All formulas strictly follow the C++ code:
 
-    - Base sub-substep: `ddt = radius * pi * sqrt(density / young_modulus) / 2`, optionally scaled by
-      `DEMOptions.ddt_safety`. The reference's velocity-adaptive clamp `2 * radius / max_vel` is replaced
-      by a fixed step count per simulator substep (user decision: avoids a global max-velocity reduction
-      and GPU readback per sub-substep).
+    - Base sub-substep: `ddt = radius * pi * sqrt(density / young_modulus) / 2`.
+    - Velocity-adaptive clamp, re-evaluated before every sub-substep:
+      `ddt = min(2 * radius / (max_vel + sqrt(9.8 * 2 * radius)), m_ddt)`, optionally scaled by
+      `DEMOptions.ddt_safety` (1.0 is exact reference behavior).
     - Contact force on grain i from grain j (penetration `pen = 2 * radius - |dij|`):
       normal `K_norm * pen * n` with `K_norm = young * radius`;
       shear `-K_tang * v_tangential` with `K_tang = K_norm * poisson`,
@@ -75,6 +79,10 @@ class DEMSolver(Solver):
         self._ddt_safety = options.ddt_safety
         # capillary (liquid-bridge) cohesion scale (C++ surface_tensor_cof, default 0.007)
         self._surface_tension_coeff = options.surface_tension_coeff
+        # liquid-bridge rupture distance multiplier (the reference derives d_rupture from the bridge volume
+        # and a 30-degree contact angle); values above 1 keep capillary cohesion active across larger
+        # grain separations. 1.0 is the reference behavior.
+        self._capillary_range_scale = options.capillary_range_scale
         # grain-grain normal restitution (1.0 = reference's strictly-elastic contact)
         self._restitution = options.restitution
         # experimental force-based contacts (recorded deviation from the reference's
@@ -86,6 +94,19 @@ class DEMSolver(Solver):
         # decay applied after projection; 0.5 / 0.0 reproduce the reference exactly
         self._enforce_project_restitution = 0.5
         self._enforce_project_tangential_decay = 0.0
+        # Coulomb friction multiplier for the collider surfaces in _kernel_enforce_boundary; the
+        # grain-grain clamp keeps the material friction angle. 1.0 is the reference behavior.
+        self._boundary_tan_fric_scale = options.boundary_tan_fric_scale
+        # experimental unbreakable wet-grain bonds (debug/visualization extreme; beyond the C++
+        # reference, which has no bond mechanism). AGSIM_DEM_BOND_ENABLE switches it on; bonds are
+        # created only by an explicit create_wet_bonds() call (one-shot, e.g. after a state restore).
+        self._bond_enable = options.bond_enable
+        self._bond_breakable = options.bond_break_strain is not None
+        self._bond_break_strain = float(options.bond_break_strain or 0.0)
+        # The C++ reference has transient contacts but no persistent bond network.  Filled after
+        # create_wet_bonds() from a conservative graph-eigenvalue bound; None leaves the exact C++
+        # contact timestep untouched when bonds are disabled or no edges were created.
+        self._bond_ddt_limit = None
 
         # optional hollow-cylinder collider (axis along z through the domain center), C++ rotate scene
         self._cylinder_radius = options.cylinder_radius
@@ -104,6 +125,19 @@ class DEMSolver(Solver):
             self.init_particle_fields()
             for entity in self._entities:
                 entity._add_to_solver()
+
+            if self._bond_enable:
+                # Per-grain directed adjacency. Keep batch as the second dimension, matching every
+                # particle field in this solver; the previous (particle, slot, batch) allocation was
+                # indexed as (particle, batch, slot), so all slots except zero addressed out of bounds.
+                self.bond_other = qd.field(gs.qd_int, shape=(self._n_particles, self._B, BOND_MAX_SLOTS))
+                self.bond_rest = qd.field(dtype=gs.qd_float, shape=(self._n_particles, self._B, BOND_MAX_SLOTS))
+                self.bond_slot_n = qd.field(gs.qd_int, shape=(self._n_particles, self._B))
+                self.bond_candidate_n = qd.field(gs.qd_int, shape=(self._n_particles, self._B))
+                self.bond_reordered_to_canonical = qd.field(gs.qd_int, shape=(self._n_particles, self._B))
+                self.bond_other.fill(-1)
+                self.bond_slot_n.fill(0)
+                self.bond_candidate_n.fill(0)
 
             self._m_ddt = min(
                 self._particle_radius
@@ -688,6 +722,12 @@ class DEMSolver(Solver):
                 self.particles[i_p, i_b].acc = self._gravity[i_b]
 
     @qd.kernel
+    def _kernel_max_vel(self, max_vel: qd.types.ndarray()):
+        for i_p, i_b in qd.ndrange(self._n_particles, self._B):
+            if self.particles[i_p, i_b].active:
+                qd.atomic_max(max_vel[i_b], self.particles[i_p, i_b].vel.norm())
+
+    @qd.kernel
     def _kernel_reorder_particles(self, f: qd.i32):
         self.sh.compute_reordered_idx(
             self._n_particles, self.particles.pos, self.particles.active, self.particles_ng.reordered_idx
@@ -706,6 +746,8 @@ class DEMSolver(Solver):
                 self.particles_reordered[reordered_idx, i_b].active = self.particles[i_p, i_b].active
                 self.particles_reordered[reordered_idx, i_b].saturate_rate = self.particles[i_p, i_b].saturate_rate
                 self.particles_reordered[reordered_idx, i_b].inv_mass_eff = self.particles[i_p, i_b].inv_mass_eff
+                if qd.static(self._bond_enable):
+                    self.bond_reordered_to_canonical[reordered_idx, i_b] = i_p
 
     @qd.func
     def _func_bezier_G(self, sr: qd.f32):
@@ -740,7 +782,7 @@ class DEMSolver(Solver):
         contact_angle = 30.0 / 180.0 * 3.141592653589793
         r = particle_radius
         Vb = 4.0 / 3.0 * 3.141592653589793 * r * r * r * 1e-4
-        d_rupture = (1.0 + 0.5 * contact_angle) * (Vb ** (1.0 / 3.0) + 0.1 * Vb ** (2.0 / 3.0))
+        d_rupture = (1.0 + 0.5 * contact_angle) * (Vb ** (1.0 / 3.0) + 0.1 * Vb ** (2.0 / 3.0)) * self._capillary_range_scale
         surface_tensor_cof = self._surface_tension_coeff
 
         f = qd.Vector.zero(gs.qd_float, 3)
@@ -834,6 +876,85 @@ class DEMSolver(Solver):
                             self._func_contact_force(
                                 i_p, j, i_b, particle_radius, k_norm, k_tang, tan_fric, c_norm, gate2
                             )
+
+    @qd.kernel
+    def _kernel_create_wet_bonds(
+        self,
+        f: qd.i32,
+        particle_radius: qd.f32,
+        ratio_min: qd.f32,
+        max_slots: qd.i32,
+        radius_factor: qd.f32,
+    ):
+        # One-shot directed adjacency over wet grains. Each particle writes only its own row; the
+        # reverse direction is created by the neighbour's own traversal. This avoids the previous
+        # pair-doubling race (i->j inserted both directions, then j->i inserted both again), which
+        # consumed four slots per physical pair and made the result launch-order dependent.
+        for i_p, i_b in qd.ndrange(self._n_particles, self._B):
+            if self.particles[i_p, i_b].active and self.particles[i_p, i_b].ratio > ratio_min:
+                base = self.sh.pos_to_grid(self.particles[i_p, i_b].pos)
+                candidates = gs.qd_int(0)
+                for offset in qd.grouped(qd.ndrange((-1, 2), (-1, 2), (-1, 2))):
+                    slot_idx = self.sh.grid_to_slot(base + offset)
+                    for j_r in range(
+                        self.sh.slot_start[slot_idx, i_b],
+                        self.sh.slot_size[slot_idx, i_b] + self.sh.slot_start[slot_idx, i_b],
+                    ):
+                        # SpatialHasher ranges enumerate the reordered array, not canonical particle
+                        # ids. Convert explicitly before accessing persistent bond state.
+                        j = self.bond_reordered_to_canonical[j_r, i_b]
+                        if i_p != j and self.particles[j, i_b].active and self.particles[j, i_b].ratio > ratio_min:
+                            dij = self.particles[j, i_b].pos - self.particles[i_p, i_b].pos
+                            cap = (2.0 * particle_radius * radius_factor) ** 2
+                            if dij.dot(dij) < cap:
+                                if candidates < max_slots:
+                                    self.bond_other[i_p, i_b, candidates] = j
+                                    self.bond_rest[i_p, i_b, candidates] = dij.norm()
+                                candidates += 1
+                self.bond_candidate_n[i_p, i_b] = candidates
+                self.bond_slot_n[i_p, i_b] = qd.min(candidates, max_slots)
+
+    @qd.kernel
+    def _kernel_bond_forces(
+        self,
+        f: qd.i32,
+        particle_radius: qd.f32,
+        k_bond: qd.f32,
+        inv_mass: qd.f32,
+    ):
+        # Conservative axial spring to the creation-time rest length. The old implementation used
+        # (v_j-v_i) with the C++ contact formula's sign convention and therefore turned both normal
+        # and tangential "damping" into energy injection; k_tang also has stiffness, not dashpot,
+        # units. BDEM is outside the C++ reference, so do not invent a stabilizer here: use only the
+        # elastic term whose timestep is already bounded by the same k_norm used for contact.
+        for g_i, i_b in qd.ndrange(self._n_particles, self._B):
+            if self.particles[g_i, i_b].active and self.bond_slot_n[g_i, i_b] > 0:
+                i_r = self.particles_ng[g_i, i_b].reordered_idx
+                if self.particles_reordered[i_r, i_b].active:
+                    pos_i = self.particles[g_i, i_b].pos
+                    acc_i = self.particles_reordered[i_r, i_b].acc
+                    for s in range(BOND_MAX_SLOTS):
+                        j = self.bond_other[g_i, i_b, s]
+                        if j >= 0:
+                            j_r = self.particles_ng[j, i_b].reordered_idx
+                            if self.particles_reordered[j_r, i_b].active:
+                                rest = self.bond_rest[g_i, i_b, s]
+                                dij = self.particles[j, i_b].pos - pos_i
+                                dist = dij.norm()
+                                if dist > gs.EPS:
+                                    n = dij / dist
+                                    extension = dist - rest
+                                    if qd.static(self._bond_breakable):
+                                        if extension > rest * self._bond_break_strain:
+                                            # Each directed row owns its slot. The reciprocal row evaluates
+                                            # the same distance/rest pair and breaks independently, avoiding
+                                            # cross-row atomics while preserving symmetric failure.
+                                            self.bond_other[g_i, i_b, s] = -1
+                                        else:
+                                            acc_i += (k_bond * extension * n) * inv_mass
+                                    else:
+                                        acc_i += (k_bond * extension * n) * inv_mass
+                    self.particles_reordered[i_r, i_b].acc = acc_i
 
     @qd.kernel
     def _kernel_copy_acc_from_reordered(self, f: qd.i32):
@@ -1006,6 +1127,7 @@ class DEMSolver(Solver):
         k_norm: qd.f32,
         k_tang: qd.f32,
         c_norm: qd.f32,
+        tan_fric_b: qd.f32,
     ):
         # C++ Collider::Enforce(DEMParticles, ddt, radius): domain box (static, phi positive inside) plus an
         # optional moving box obstacle (relative velocity delta_vel = v - v_obstacle, as in the C++ code)
@@ -1053,7 +1175,7 @@ class DEMSolver(Solver):
                         v_n = vel.dot(n)
                         f_normal_mag = qd.max(k_norm * pen - c_norm * v_n, 0.0)
                         f_shear = -k_tang * (vel - v_n * n)
-                        max_fs = k_norm * pen * tan_fric
+                        max_fs = k_norm * pen * tan_fric_b
                         fs_norm = f_shear.norm()
                         if fs_norm > max_fs:
                             f_shear *= max_fs / fs_norm
@@ -1070,7 +1192,7 @@ class DEMSolver(Solver):
                             vt_norm = vel_tangential.norm()
                             # C++ normalizes the tangential velocity unconditionally; guard the zero-velocity case
                             if vt_norm > gs.EPS:
-                                acc = acc + acc_n * tan_fric * vel_tangential / vt_norm
+                                acc = acc + acc_n * tan_fric_b * vel_tangential / vt_norm
 
                 # moving box obstacle
                 if self.obstacle_enabled[i_b] == 1:
@@ -1105,7 +1227,7 @@ class DEMSolver(Solver):
                             dv_tangential = delta_vel - delta_vel.dot(n_obs) * n_obs
                             vt_norm = dv_tangential.norm()
                             if vt_norm > gs.EPS:
-                                acc = acc + acc_n * tan_fric * dv_tangential / vt_norm
+                                acc = acc + acc_n * tan_fric_b * dv_tangential / vt_norm
 
                 # moving sieve obstacle (same enforcement semantics)
                 if self.sieve_enabled[i_b] == 1:
@@ -1123,7 +1245,7 @@ class DEMSolver(Solver):
                             dv_tangential = delta_vel - delta_vel.dot(n_s) * n_s
                             vt_norm = dv_tangential.norm()
                             if vt_norm > gs.EPS:
-                                acc = acc + acc_n * tan_fric * dv_tangential / vt_norm
+                                acc = acc + acc_n * tan_fric_b * dv_tangential / vt_norm
 
                 # moving tilted box obstacle (same enforcement semantics; the obstacle velocity is evaluated
                 # at the contact point: v_col = v_center + omega x (pos - center))
@@ -1143,7 +1265,7 @@ class DEMSolver(Solver):
                             dv_tangential = delta_vel - delta_vel.dot(n_t) * n_t
                             vt_norm = dv_tangential.norm()
                             if vt_norm > gs.EPS:
-                                acc = acc + acc_n * tan_fric * dv_tangential / vt_norm
+                                acc = acc + acc_n * tan_fric_b * dv_tangential / vt_norm
 
                 # moving mesh-SDF obstacles (same enforcement semantics as the tilt box; the obstacle
                 # velocity is evaluated at the contact point: v_col = v_center + omega x (pos - center)).
@@ -1181,7 +1303,7 @@ class DEMSolver(Solver):
                                     v_n = delta_vel.dot(n_m)
                                     f_normal_mag = qd.max(k_norm * pen - c_norm * v_n, 0.0)
                                     f_shear = -k_tang * (delta_vel - v_n * n_m)
-                                    max_fs = k_norm * pen * tan_fric
+                                    max_fs = k_norm * pen * tan_fric_b
                                     fs_norm = f_shear.norm()
                                     if fs_norm > max_fs:
                                         f_shear *= max_fs / fs_norm
@@ -1200,7 +1322,7 @@ class DEMSolver(Solver):
                                         dv_tangential = delta_vel - delta_vel.dot(n_m) * n_m
                                         vt_norm = dv_tangential.norm()
                                         if vt_norm > gs.EPS:
-                                            acc = acc + acc_n * tan_fric * dv_tangential / vt_norm
+                                            acc = acc + acc_n * tan_fric_b * dv_tangential / vt_norm
 
                 self.particles[i_p, i_b].pos = pos
                 self.particles[i_p, i_b].vel = vel
@@ -1437,7 +1559,7 @@ class DEMSolver(Solver):
                                 qd.atomic_add(flip.vel_w[idx], -cf[2] * w * kick)
                 self.particles[i_p, i_b].coupling_force = qd.Vector.zero(gs.qd_float, 3)
 
-    def _dem_substep_coupled(self, f, ddt, dt_f, inv_mass, k_norm, k_tang, tan_fric, c_norm, gate2):
+    def _dem_substep_coupled(self, f, ddt, dt_f, inv_mass, k_norm, k_tang, tan_fric, c_norm, gate2, tan_fric_b):
         # C++ MoveDEMParticlesSplit (coupled): saturate rate, coupling force (reads the previous
         # sub-substep's acc), force assembly, contact, reaction scatter, collider, integrate
         self._kernel_update_saturate_rate(f)
@@ -1445,20 +1567,100 @@ class DEMSolver(Solver):
         self._kernel_reset_acc_coupled(f, dt_f)
         self._kernel_reorder_particles(f)
         self._kernel_contact_forces(f, self._particle_radius, k_norm, k_tang, tan_fric, c_norm, gate2)
+        if qd.static(self._bond_enable):
+            self._kernel_bond_forces(f, self._particle_radius, k_norm, inv_mass)
         self._kernel_copy_acc_from_reordered(f)
         self._kernel_transfer_coupling_forces(f, ddt, dt_f)
         self._kernel_move_obstacle(ddt)
-        self._kernel_enforce_boundary(f, self._particle_radius, tan_fric, inv_mass, k_norm, k_tang, c_norm)
+        self._kernel_enforce_boundary(f, self._particle_radius, tan_fric, inv_mass, k_norm, k_tang, c_norm, tan_fric_b)
         self._kernel_integrate(f, ddt)
 
-    def _dem_substep(self, f, ddt, inv_mass, k_norm, k_tang, tan_fric, c_norm, gate2):
+    def _dem_substep(self, f, ddt, inv_mass, k_norm, k_tang, tan_fric, c_norm, gate2, tan_fric_b):
         self._kernel_reset_acc(f)
         self._kernel_reorder_particles(f)
         self._kernel_contact_forces(f, self._particle_radius, k_norm, k_tang, tan_fric, c_norm, gate2)
+        if qd.static(self._bond_enable):
+            self._kernel_bond_forces(f, self._particle_radius, k_norm, inv_mass)
         self._kernel_copy_acc_from_reordered(f)
         self._kernel_move_obstacle(ddt)
-        self._kernel_enforce_boundary(f, self._particle_radius, tan_fric, inv_mass, k_norm, k_tang, c_norm)
+        self._kernel_enforce_boundary(f, self._particle_radius, tan_fric, inv_mass, k_norm, k_tang, c_norm, tan_fric_b)
         self._kernel_integrate(f, ddt)
+
+    def create_wet_bonds(self, ratio_min: float = 0.0, radius_factor: float = 1.025):
+        """One-shot unbreakable bond creation over wet grains (AGSIM_DEM_BOND_ENABLE debug extreme).
+
+        Scans the spatial hash for wet active neighbors within ``radius_factor * 2r`` and connects
+        each pair with an axial elastic spring at the current distance (no breakage criterion).
+        Rebuilding is idempotent: the previous adjacency is cleared first.
+        """
+        if not self._bond_enable:
+            print("BOND_CREATE skipped: AGSIM_DEM_BOND_ENABLE is off")
+            return
+        self.bond_other.fill(-1)
+        self.bond_rest.fill(0)
+        self.bond_slot_n.fill(0)
+        self.bond_candidate_n.fill(0)
+        # State-restore users call this immediately after set_particles_pos/vel. Rebuild the spatial
+        # hash and canonical<->reordered map from that new state before scanning neighbours.
+        self._kernel_reorder_particles(0)
+        self._kernel_create_wet_bonds(
+            0, self._particle_radius, float(ratio_min), BOND_MAX_SLOTS, float(radius_factor)
+        )
+        # Symplectic Euler is stable for dt < 2/sqrt(lambda_max).  For the equal-mass axial-spring
+        # graph, Gershgorin gives lambda_max <= 2 * degree_max * k_bond / mass, hence the bound
+        # sqrt(2*mass/(degree_max*k_bond)).  This is a timestep constraint, not a force/damping
+        # modification.  It is bond-only because the C++ reference has no persistent graph; the
+        # bond-off path retains its velocity-adaptive reference formula exactly.
+        max_degree = int(self.bond_candidate_n.to_numpy().max(initial=0))
+        if max_degree > 0:
+            material = self._entities[0].material
+            mass = float(material.rho * self._particle_volume)
+            k_bond = float(material.young_modulus * self._particle_radius)
+            self._bond_ddt_limit = math.sqrt(2.0 * mass / (max_degree * k_bond))
+        else:
+            self._bond_ddt_limit = None
+
+    def get_wet_bond_stats(self):
+        """Return auditable directed-edge counts for the last ``create_wet_bonds`` call."""
+        if not self._bond_enable:
+            return {"enabled": False, "directed_edges": 0, "unique_directed_edges": 0,
+                    "undirected_edges": 0, "duplicate_directed_edges": 0, "asymmetric_edges": 0,
+                    "overflow_particles": 0, "max_candidates": 0, "max_degree": 0,
+                    "mean_degree": 0.0, "max_rest_error_m": 0.0, "capacity": BOND_MAX_SLOTS,
+                    "bond_ddt_limit_s": None}
+        slots = self.bond_slot_n.to_numpy()
+        candidates = self.bond_candidate_n.to_numpy()
+        created_directed = int(slots.sum())
+        others = self.bond_other.to_numpy()
+        rest = self.bond_rest.to_numpy()
+        positions = self.particles.pos.to_numpy()
+        edges = []
+        max_rest_error = 0.0
+        for i_b in range(self._B):
+            for i_p in range(self._n_particles):
+                for slot in range(int(slots[i_p, i_b])):
+                    j_p = int(others[i_p, i_b, slot])
+                    if j_p < 0:
+                        continue
+                    edges.append((i_b, i_p, j_p))
+                    distance = float(np.linalg.norm(positions[j_p, i_b] - positions[i_p, i_b]))
+                    max_rest_error = max(max_rest_error, abs(distance - float(rest[i_p, i_b, slot])))
+        unique = set(edges)
+        asymmetric = sum((i_b, j_p, i_p) not in unique for i_b, i_p, j_p in unique)
+        degrees = slots[slots > 0]
+        directed = len(edges)
+        return {"enabled": True, "directed_edges": directed,
+                "created_directed_edges": created_directed,
+                "broken_directed_edges": created_directed - directed,
+                "unique_directed_edges": len(unique),
+                "undirected_edges": sum(i_p < j_p for _, i_p, j_p in unique),
+                "duplicate_directed_edges": directed - len(unique), "asymmetric_edges": asymmetric,
+                "overflow_particles": int((candidates > BOND_MAX_SLOTS).sum()),
+                "max_candidates": int(candidates.max(initial=0)),
+                "max_degree": int(slots.max(initial=0)),
+                "mean_degree": float(degrees.mean()) if degrees.size else 0.0,
+                "max_rest_error_m": max_rest_error, "capacity": BOND_MAX_SLOTS,
+                "bond_ddt_limit_s": self._bond_ddt_limit}
 
     def substep_pre_coupling(self, f):
         if not self.is_active or self._coupled:
@@ -1476,6 +1678,7 @@ class DEMSolver(Solver):
         k_norm = float(material.young_modulus * self._particle_radius)
         k_tang = float(k_norm * material.poisson_ratio)
         tan_fric = float(math.tan(material.friction_angle))
+        tan_fric_boundary = float(tan_fric * self._boundary_tan_fric_scale)
         # normal damping for the requested grain-grain restitution e (spring-dashpot, equal-mass
         # pair -> m_eff = m/2): e = exp(-pi*xi/sqrt(1-xi^2)), c = 2*xi*sqrt(k*m_eff)
         e = self._restitution
@@ -1491,34 +1694,45 @@ class DEMSolver(Solver):
         # gate on the safe side of the capillary branch's own H < d_rupture comparison
         contact_angle = 30.0 / 180.0 * 3.141592653589793
         bridge_vol = 4.0 / 3.0 * 3.141592653589793 * self._particle_radius**3 * 1e-4
-        d_rupture = (1.0 + 0.5 * contact_angle) * (bridge_vol ** (1.0 / 3.0) + 0.1 * bridge_vol ** (2.0 / 3.0))
+        d_rupture = (1.0 + 0.5 * contact_angle) * (bridge_vol ** (1.0 / 3.0) + 0.1 * bridge_vol ** (2.0 / 3.0)) * self._capillary_range_scale
         contact_gate2 = (2.0 * self._particle_radius + d_rupture) ** 2 * (1.0 + 1e-6)
-        return inv_mass, k_norm, k_tang, tan_fric, c_norm, contact_gate2
+        return inv_mass, k_norm, k_tang, tan_fric, c_norm, contact_gate2, tan_fric_boundary
+
+    def _adaptive_ddt(self):
+        max_vel = np.zeros((self._B,), dtype=gs.np_float)
+        self._kernel_max_vel(max_vel)
+        speed = float(max_vel.max()) + math.sqrt(9.8 * self._particle_radius * 2.0)
+        ddt = min(2.0 * self._particle_radius / speed, self._m_ddt) * self._ddt_safety
+        if self._bond_ddt_limit is not None:
+            ddt = min(ddt, self._bond_ddt_limit)
+        return ddt
 
     def _advance(self, dt_total, f):
-        # fixed sub-substep (the reference's velocity-adaptive clamp is removed by user decision):
-        # as many full `ddt` steps as fit into dt_total, plus one remainder step
-        inv_mass, k_norm, k_tang, tan_fric, c_norm, gate2 = self._material_constants()
-        ddt = self._m_ddt * self._ddt_safety
-        n_full = int(dt_total / ddt)
-        for _ in range(n_full):
-            self._dem_substep(f, ddt, inv_mass, k_norm, k_tang, tan_fric, c_norm, gate2)
-        remainder = dt_total - n_full * ddt
-        if remainder > 0.0:
-            self._dem_substep(f, remainder, inv_mass, k_norm, k_tang, tan_fric, c_norm, gate2)
+        inv_mass, k_norm, k_tang, tan_fric, c_norm, gate2, tan_fric_b = self._material_constants()
+        dt = float(dt_total)
+        while True:
+            ddt = self._adaptive_ddt()
+            if dt < ddt:
+                break
+            dt -= ddt
+            self._dem_substep(f, ddt, inv_mass, k_norm, k_tang, tan_fric, c_norm, gate2, tan_fric_b)
+        if dt > 0.0:
+            self._dem_substep(f, dt, inv_mass, k_norm, k_tang, tan_fric, c_norm, gate2, tan_fric_b)
 
     def advance_coupled(self, f, dt_f):
         # C++ MoveDEMParticles(dt_f): fresh fluid density, then the ddt sub-substep loop whose
         # total duration is exactly dt_f (called by the FLIP solver before each water step)
         self._sim.flip_solver._kernel_cal_density(f)
-        inv_mass, k_norm, k_tang, tan_fric, c_norm, gate2 = self._material_constants()
-        ddt = self._m_ddt * self._ddt_safety
-        n_full = int(dt_f / ddt)
-        for _ in range(n_full):
-            self._dem_substep_coupled(f, ddt, dt_f, inv_mass, k_norm, k_tang, tan_fric, c_norm, gate2)
-        remainder = dt_f - n_full * ddt
-        if remainder > 0.0:
-            self._dem_substep_coupled(f, remainder, dt_f, inv_mass, k_norm, k_tang, tan_fric, c_norm, gate2)
+        inv_mass, k_norm, k_tang, tan_fric, c_norm, gate2, tan_fric_b = self._material_constants()
+        dt = float(dt_f)
+        while True:
+            ddt = self._adaptive_ddt()
+            if dt < ddt:
+                break
+            dt -= ddt
+            self._dem_substep_coupled(f, ddt, dt_f, inv_mass, k_norm, k_tang, tan_fric, c_norm, gate2, tan_fric_b)
+        if dt > 0.0:
+            self._dem_substep_coupled(f, dt, dt_f, inv_mass, k_norm, k_tang, tan_fric, c_norm, gate2, tan_fric_b)
 
     def substep_pre_coupling_grad(self, f):
         pass

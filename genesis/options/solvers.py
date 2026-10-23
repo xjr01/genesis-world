@@ -1467,8 +1467,9 @@ class DEMOptions(Options):
     ----
     DEM (Discrete Element Method) solver for simulating granular materials (sand) as spherical particles,
     following the contact model and time-stepping of the reference implementation. The solver runs its own
-    sub-substeps inside each simulator substep, with a fixed step
-    `ddt = radius * pi * sqrt(density / young) / 2 * ddt_safety`.
+    velocity-adaptive sub-substeps inside each simulator substep:
+    `ddt = min(2r / (max_vel + sqrt(9.8 * 2r)), m_ddt) * ddt_safety`, where
+    `m_ddt = radius * pi * sqrt(density / young) / 2`.
 
     If spatial hashing parameters are not given, they are computed automatically from `particle_size` and bounds.
 
@@ -1481,9 +1482,8 @@ class DEMOptions(Options):
     particle_size : float, optional
         Particle diameter in meters. Defaults to 1e-2.
     ddt_safety : float, optional
-        Safety factor applied to the fixed DEM sub-substep `ddt = m_ddt * ddt_safety`. Values below 1.0
-        deviate from the reference implementation but improve stability when many simultaneous contacts raise the
-        effective stiffness beyond what the base step `m_ddt` was derived for. Defaults to 1.0.
+        Safety factor applied after the C++ velocity-adaptive DEM substep calculation. Values below 1.0
+        deviate conservatively from the reference implementation at the cost of more solver work. Defaults to 1.0.
     surface_tension_coeff : float, optional
         Scale of the capillary (liquid-bridge) cohesion between wetted grains (the `surface_tensor_cof`
         constant of the reference's `ComputeDemCapillaryForces`). Defaults to 0.007 (the reference value).
@@ -1497,6 +1497,23 @@ class DEMOptions(Options):
     boundary_force_contact : bool, optional
         Experimental. The domain box and cylinder walls use the same force contact as `sdf_obstacle_force_contact`.
         Separate switch so the wall and the obstacle surfaces can be attributed independently. Defaults to False.
+    boundary_tan_fric_scale : float, optional
+        Coulomb friction multiplier for the collider surfaces (domain box, cylinder, sieve, moving box and
+        mesh-SDF obstacles) relative to the grain-grain friction angle. Values below 1 let loads slide off tool
+        and wall surfaces more readily; grain-grain friction is unaffected. Defaults to 1.0.
+    capillary_range_scale : float, optional
+        Multiplier on the liquid-bridge rupture distance (the reference derives it from the bridge volume and a
+        30-degree contact angle). Values above 1 keep capillary cohesion active across larger grain separations,
+        stiffening wet clumps; the neighbor search covers the scaled range and grain-grain contact stiffness is
+        unaffected. Defaults to 1.0.
+    bond_enable : bool, optional
+        Experimental debug extreme: wetted grains can be connected by unbreakable axial elastic
+        bonds through an explicit ``create_wet_bonds`` call (no breakage criterion or bending moment).
+        Beyond the reference, which has no bond mechanism; intended for probing clump-release limits, not as
+        a product configuration. Defaults to False.
+    bond_break_strain : float, optional
+        Tensile strain at which an experimental wet-grain bond irreversibly breaks. ``None`` keeps
+        bonds unbreakable. Beyond the C++ reference and disabled by default. Defaults to None.
     cylinder_radius : float, optional
         If set, an additional static hollow-cylinder collider (axis along z through the domain center) confines
         the grains, following the reference's rotate-scene boundary. Defaults to None (box domain only).
@@ -1530,6 +1547,14 @@ class DEMOptions(Options):
     sdf_obstacle_force_contact: bool = False  # experimental force-based mesh-SDF obstacle contact
 
     boundary_force_contact: bool = False  # experimental force-based domain box/cylinder contact
+
+    boundary_tan_fric_scale: PositiveFloat = 1.0  # Coulomb friction scale of the collider surfaces
+
+    capillary_range_scale: PositiveFloat = 1.0  # liquid-bridge rupture distance multiplier
+
+    bond_enable: bool = False  # experimental unbreakable wet-grain bonds (debug extreme)
+
+    bond_break_strain: PositiveFloat | None = None  # optional brittle tensile failure threshold
 
     cylinder_radius: PositiveFloat | None = None
 
