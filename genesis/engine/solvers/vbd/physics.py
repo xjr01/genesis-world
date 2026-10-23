@@ -266,6 +266,7 @@ def apply_prediction(scale: qd.Tensor, mean_displacement: qd.Tensor, vertices: V
 def local_response(
     i_v,
     i_b,
+    i_t,
     trial,
     dt,
     vertices: V_ANNOTATION,
@@ -276,18 +277,25 @@ def local_response(
 ):
     mass = vertices.mass[i_v] / dt**2
     delta = trial - vertices.target[i_v, i_b]
-    energy = 0.5 * mass * delta.norm_sqr()
-    gradient = mass * delta
-    hessian = mass * qd.Matrix.identity(gs.qd_float, 3)
-    for entry_idx in range(vertices.elem_offsets[i_v], vertices.elem_offsets[i_v + 1]):
-        entry = vertices.elem_entries[entry_idx]
+    energy = qd.cast(0.0, gs.qd_float)
+    gradient = qd.Vector.zero(gs.qd_float, 3)
+    hessian = qd.Matrix.zero(gs.qd_float, 3, 3)
+    if i_t == 0:
+        energy = 0.5 * mass * delta.norm_sqr()
+        gradient = mass * delta
+        hessian = mass * qd.Matrix.identity(gs.qd_float, 3)
+    i_a = vertices.elem_offsets[i_v] + i_t
+    while i_a < vertices.elem_offsets[i_v + 1]:
+        entry = vertices.elem_entries[i_a]
         value, force, matrix = element_response(entry // 4, entry % 4, i_b, trial, vertices, elements)
         energy += value
         gradient += force
         hessian += matrix
+        i_a += options.n_vertex_threads
     if qd.static(hinges.n_hinges > 0):
-        for entry_idx in range(vertices.hinge_offsets[i_v], vertices.hinge_offsets[i_v + 1]):
-            entry = vertices.hinge_entries[entry_idx]
+        i_a = vertices.hinge_offsets[i_v] + i_t
+        while i_a < vertices.hinge_offsets[i_v + 1]:
+            entry = vertices.hinge_entries[i_a]
             i_h, i_local = entry // 4, entry % 4
             positions = qd.Matrix.zero(gs.qd_float, 4, 3)
             for corner in qd.static(range(4)):
@@ -300,8 +308,10 @@ def local_response(
             energy += 0.5 * stiffness * residual**2
             gradient += stiffness * residual * q
             hessian += stiffness * q.outer_product(q)
+            i_a += options.n_vertex_threads
     if qd.static(planes.n_planes > 0):
-        for i_p in range(planes.n_planes):
+        i_p = i_t
+        while i_p < planes.n_planes:
             normal = planes.normal[i_p]
             gap = trial.dot(normal) - planes.offset[i_p] - vertices.radius[i_v]
             initial_gap = vertices.prev[i_v, i_b].dot(normal) - planes.offset[i_p] - vertices.radius[i_v]
@@ -320,13 +330,23 @@ def local_response(
             energy += value
             gradient += force
             hessian += matrix
+            i_p += options.n_vertex_threads
     return energy, gradient, hessian
 
 
 @qd.kernel
-def finish(dt: float, vertices: V_ANNOTATION, elements: V_ANNOTATION, hinges: V_ANNOTATION, errno: qd.Tensor):
+def finish(
+    dt: float,
+    gravity: qd.Tensor,
+    vertices: V_ANNOTATION,
+    elements: V_ANNOTATION,
+    hinges: V_ANNOTATION,
+    errno: qd.Tensor,
+):
     for i_v, i_b in vertices.pos:
-        vertices.vel[i_v, i_b] = (vertices.pos[i_v, i_b] - vertices.prev[i_v, i_b]) / dt
+        # Updating the predicted velocity with the solve correction avoids amplifying position rounding by 1 / dt.
+        vertices.vel[i_v, i_b] += dt * (gravity[i_b] + vertices.forces[i_v, i_b] / vertices.mass[i_v])
+        vertices.vel[i_v, i_b] += (vertices.pos[i_v, i_b] - vertices.target[i_v, i_b]) / dt
         if vertices.is_fixed[i_v, i_b]:
             vertices.vel[i_v, i_b] = qd.Vector.zero(gs.qd_float, 3)
         if qd.math.isnan(vertices.pos[i_v, i_b]).any() or qd.math.isinf(vertices.pos[i_v, i_b]).any():

@@ -104,12 +104,16 @@ def test_vertex_controls_and_state(n_envs, show_viewer):
 
 
 @pytest.mark.parametrize("n_envs", [0, 2])
-def test_ground_and_self_contact(n_envs, show_viewer):
+@pytest.mark.parametrize("is_line_search_enabled", [False, True])
+def test_ground_and_self_contact(n_envs, is_line_search_enabled, show_viewer):
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
             dt=0.005,
             substeps=4,
             gravity=(0, 0, -9.81),
+        ),
+        vbd_options=gs.options.VBDOptions(
+            is_line_search_enabled=is_line_search_enabled,
         ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(1.3, -1.5, 1.2),
@@ -357,12 +361,16 @@ def test_plastic_unloading_and_bending_switch(n_envs, show_viewer):
 
 
 @pytest.mark.parametrize("n_envs", [0, 2])
-def test_material_response(n_envs, show_viewer):
+@pytest.mark.parametrize("is_line_search_enabled", [False, True])
+def test_material_response(n_envs, is_line_search_enabled, show_viewer):
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
             dt=0.005,
             substeps=2,
             gravity=(0, 0, 0),
+        ),
+        vbd_options=gs.options.VBDOptions(
+            is_line_search_enabled=is_line_search_enabled,
         ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(1.2, -1.0, 0.9),

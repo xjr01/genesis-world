@@ -12,7 +12,14 @@ class VBDConfig(metaclass=AutoInitMeta):
     contact_d_hat: float
     friction_epsilon: float
     contact_stiffness: float
+    is_line_search_enabled: bool
     line_search_iterations: int
+    n_vertex_threads: int
+
+
+class ColorData(metaclass=AutoInitMeta):
+    indices: qd.Tensor
+    offsets: tuple[int, ...]
 
 
 def array_to_field(values, dtype, element_shape=()):

@@ -34,6 +34,7 @@ class Benchmark:
     scene_dt: float
     scene_substeps: int
     iterations: int | None
+    is_line_search_enabled: bool | None
     contact_d_hat: float
     contact_stiffness: float | None
     friction_epsilon: float
@@ -72,6 +73,12 @@ def main():
         "--substeps", type=int, default=2, help="More substeps reduce integration damping at extra cost."
     )
     parser.add_argument("--iterations", type=int, default=20)
+    parser.add_argument(
+        "--line-search",
+        dest="is_line_search_enabled",
+        action="store_true",
+        help="Enable local energy backtracking at extra cost.",
+    )
     parser.add_argument("--tolerance", type=float, default=1e-7)
     parser.add_argument("--plastic", action="store_true")
     parser.add_argument("--yield-strain", type=float, default=10.0)
@@ -92,6 +99,8 @@ def main():
         parser.error("--steps, --substeps and --tet-max-volume must be positive; --load-force must be finite")
     if args.solver == "ipc" and (not args.gpu or args.plastic or args.scenario != "drop"):
         parser.error("The FEM/IPC baseline uses --gpu, elastic material and --scenario drop.")
+    if args.solver == "ipc" and args.is_line_search_enabled:
+        parser.error("--line-search controls VBD; the FEM/IPC baseline uses its own line search settings.")
     youngs_modulus = args.youngs_modulus
     if youngs_modulus is None:
         youngs_modulus = 10000.0 if args.scenario == "drop" else 100000.0
@@ -139,6 +148,7 @@ def main():
             iterations=args.iterations,
             convergence_tolerance=args.tolerance,
             contact_d_hat=args.contact_distance,
+            is_line_search_enabled=args.is_line_search_enabled,
         ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(0.22, -0.28, 0.2),
@@ -219,6 +229,7 @@ def main():
         scene.dt,
         scene.sim.substeps,
         args.iterations if args.solver == "vbd" else None,
+        args.is_line_search_enabled if args.solver == "vbd" else None,
         args.contact_distance,
         scene.vbd_options.contact_stiffness if args.solver == "vbd" else None,
         scene.vbd_options.friction_epsilon if args.solver == "vbd" else scene.sim.coupler_options.contact_eps_velocity,

@@ -1,0 +1,290 @@
+{
+  "mode": "kernels",
+  "revision": "8c75b61aa24dd6c372be4596e69e3ecbdb033f1b",
+  "genesis_path": "D:\\DavidX\\genesis-world-demos\\genesis\\__init__.py",
+  "platform": "Windows-10-10.0.26300-SP0",
+  "python": "3.11.15 | packaged by Anaconda, Inc. | (main, Jun 11 2026, 15:12:53) [MSC v.1942 64 bit (AMD64)]",
+  "torch": "2.12.1+cu126",
+  "device": "NVIDIA GeForce RTX 4090",
+  "asset": "meshes/jelly/remeshed.obj",
+  "asset_sha256": "d5b2a11cdc686a4af8922879b2303c0b19bbb3ec2ced7eca82ca2b97cb0a0827",
+  "vertices": 20119,
+  "tetrahedra": 82373,
+  "surface_triangles": 25476,
+  "color_sizes": [
+    3819,
+    3622,
+    3522,
+    2854,
+    1865,
+    1238,
+    1108,
+    1035,
+    730,
+    286,
+    39,
+    1
+  ],
+  "frame_dt": 0.005,
+  "substeps": 2,
+  "iteration_limit": 20,
+  "convergence_tolerance": 1e-07,
+  "precision": "32",
+  "material_model": "log_neohookean",
+  "youngs_modulus": 10000.0,
+  "poisson_ratio": 0.25,
+  "density": 360.0,
+  "friction": 0.4,
+  "contact_distance": 0.0005,
+  "is_line_search_enabled": false,
+  "line_search_iterations": 12,
+  "warmup_frames": 15,
+  "measured_frames_per_repeat": 30,
+  "repeats": 1,
+  "mean_frame_ms": 325.4430166639698,
+  "median_frame_ms": 435.74034998891875,
+  "p95_frame_ms": 537.5490449965581,
+  "total_device_ms": 2138.951327376999,
+  "final_minimum_height": 8.303093636641279e-05,
+  "final_minimum_volume_ratio": 0.9142675353277726,
+  "timings": [
+    {
+      "repeat": 1,
+      "frame": 1,
+      "milliseconds": 54.05950002023019
+    },
+    {
+      "repeat": 1,
+      "frame": 2,
+      "milliseconds": 54.64550000033341
+    },
+    {
+      "repeat": 1,
+      "frame": 3,
+      "milliseconds": 52.8749999939464
+    },
+    {
+      "repeat": 1,
+      "frame": 4,
+      "milliseconds": 58.0389000242576
+    },
+    {
+      "repeat": 1,
+      "frame": 5,
+      "milliseconds": 54.17069999384694
+    },
+    {
+      "repeat": 1,
+      "frame": 6,
+      "milliseconds": 61.77530001150444
+    },
+    {
+      "repeat": 1,
+      "frame": 7,
+      "milliseconds": 51.907399989431724
+    },
+    {
+      "repeat": 1,
+      "frame": 8,
+      "milliseconds": 53.90790000092238
+    },
+    {
+      "repeat": 1,
+      "frame": 9,
+      "milliseconds": 51.46809999132529
+    },
+    {
+      "repeat": 1,
+      "frame": 10,
+      "milliseconds": 49.30059998878278
+    },
+    {
+      "repeat": 1,
+      "frame": 11,
+      "milliseconds": 249.30750002386048
+    },
+    {
+      "repeat": 1,
+      "frame": 12,
+      "milliseconds": 500.7861999911256
+    },
+    {
+      "repeat": 1,
+      "frame": 13,
+      "milliseconds": 501.51129998266697
+    },
+    {
+      "repeat": 1,
+      "frame": 14,
+      "milliseconds": 498.90639999648556
+    },
+    {
+      "repeat": 1,
+      "frame": 15,
+      "milliseconds": 522.6803999976255
+    },
+    {
+      "repeat": 1,
+      "frame": 16,
+      "milliseconds": 573.5274000035133
+    },
+    {
+      "repeat": 1,
+      "frame": 17,
+      "milliseconds": 452.0990999881178
+    },
+    {
+      "repeat": 1,
+      "frame": 18,
+      "milliseconds": 434.17749999207444
+    },
+    {
+      "repeat": 1,
+      "frame": 19,
+      "milliseconds": 437.30319998576306
+    },
+    {
+      "repeat": 1,
+      "frame": 20,
+      "milliseconds": 407.12399999029003
+    },
+    {
+      "repeat": 1,
+      "frame": 21,
+      "milliseconds": 446.49719999870285
+    },
+    {
+      "repeat": 1,
+      "frame": 22,
+      "milliseconds": 460.9518999932334
+    },
+    {
+      "repeat": 1,
+      "frame": 23,
+      "milliseconds": 549.714299995685
+    },
+    {
+      "repeat": 1,
+      "frame": 24,
+      "milliseconds": 513.6091999884229
+    },
+    {
+      "repeat": 1,
+      "frame": 25,
+      "milliseconds": 459.1750999970827
+    },
+    {
+      "repeat": 1,
+      "frame": 26,
+      "milliseconds": 454.9377000075765
+    },
+    {
+      "repeat": 1,
+      "frame": 27,
+      "milliseconds": 431.3274000014644
+    },
+    {
+      "repeat": 1,
+      "frame": 28,
+      "milliseconds": 427.24140000063926
+    },
+    {
+      "repeat": 1,
+      "frame": 29,
+      "milliseconds": 444.5848999894224
+    },
+    {
+      "repeat": 1,
+      "frame": 30,
+      "milliseconds": 455.67949998076074
+    }
+  ],
+  "kernels": [
+    {
+      "name": "solve_color",
+      "device_tasks": 19224,
+      "total_ms": 1270.9315501514357,
+      "mean_ms": 0.06611171193047419
+    },
+    {
+      "name": "apply_color",
+      "device_tasks": 19224,
+      "total_ms": 316.1171212857589,
+      "mean_ms": 0.016443878552109808
+    },
+    {
+      "name": "find_contacts",
+      "device_tasks": 316,
+      "total_ms": 345.14691097289324,
+      "mean_ms": 1.0922370600408013
+    },
+    {
+      "name": "kernel_refit_bvh",
+      "device_tasks": 2826,
+      "total_ms": 38.42537626763806,
+      "mean_ms": 0.013597089974394218
+    },
+    {
+      "name": "refresh_contacts",
+      "device_tasks": 3204,
+      "total_ms": 48.14387220866047,
+      "mean_ms": 0.015026177343526988
+    },
+    {
+      "name": "update_bounds",
+      "device_tasks": 628,
+      "total_ms": 10.219839976169169,
+      "mean_ms": 0.016273630535301224
+    },
+    {
+      "name": "update_translation",
+      "device_tasks": 1085,
+      "total_ms": 33.79334430163726,
+      "mean_ms": 0.031145939448513606
+    },
+    {
+      "name": "predict",
+      "device_tasks": 120,
+      "total_ms": 2.6430399999953806,
+      "mean_ms": 0.022025333333294837
+    },
+    {
+      "name": "prepare_prediction",
+      "device_tasks": 120,
+      "total_ms": 1.9653119929134846,
+      "mean_ms": 0.016377599940945706
+    },
+    {
+      "name": "limit_prediction",
+      "device_tasks": 375,
+      "total_ms": 7.3574719983153045,
+      "mean_ms": 0.019619925328840812
+    },
+    {
+      "name": "limit_initialization",
+      "device_tasks": 240,
+      "total_ms": 15.154880084563047,
+      "mean_ms": 0.06314533368567936
+    },
+    {
+      "name": "apply_prediction",
+      "device_tasks": 120,
+      "total_ms": 1.8765120063908398,
+      "mean_ms": 0.015637600053256998
+    },
+    {
+      "name": "finish",
+      "device_tasks": 240,
+      "total_ms": 5.223487999755889,
+      "mean_ms": 0.021764533332316205
+    },
+    {
+      "name": "validate_state",
+      "device_tasks": 240,
+      "total_ms": 6.1892800512723625,
+      "mean_ms": 0.02578866688030151
+    }
+  ],
+  "lines": [],
+  "substep_counts": []
+}

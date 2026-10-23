@@ -1,4 +1,4 @@
-from itertools import combinations, pairwise
+from itertools import combinations
 
 import numpy as np
 import torch
@@ -14,8 +14,18 @@ from genesis.engine.states.vbd import VBDState
 from genesis.utils.array_class import ErrorCode, V, V_ANNOTATION
 from genesis.utils.misc import qd_to_numpy, qd_to_torch, tensor_to_array
 
-from .contact import apply_color, find_contacts, propagate_initialization, refresh_contacts, solve_color, update_bounds
-from .data import ElementData, HingeData, PlaneData, VBDConfig, VertexData, array_to_field, color_vertices, incidence
+from .contact import find_contacts, propagate_initialization, solve_colors, update_bounds
+from .data import (
+    ColorData,
+    ElementData,
+    HingeData,
+    PlaneData,
+    VBDConfig,
+    VertexData,
+    array_to_field,
+    color_vertices,
+    incidence,
+)
 from .physics import (
     apply_prediction,
     finish,
@@ -76,12 +86,18 @@ class VBDSolver(Solver):
         super().__init__(scene, sim, options)
         self.options = options
         self.config = VBDConfig(
-            options.contact_d_hat, options.friction_epsilon, options.contact_stiffness, options.line_search_iterations
+            options.contact_d_hat,
+            options.friction_epsilon,
+            options.contact_stiffness,
+            options.is_line_search_enabled,
+            options.line_search_iterations,
+            n_vertex_threads=8 if gs.backend == gs.cuda else 1,
         )
         self.vertices = None
         self.elements = None
         self.hinges = None
         self.planes = None
+        self.colors = None
         self.errno = None
 
     def add_entity(self, idx, material, morph, surface, name=None):
@@ -211,8 +227,10 @@ class VBDSolver(Solver):
             edge_length, pairs[:, 0], np.linalg.norm(positions[pairs[:, 1]] - positions[pairs[:, 0]], axis=-1)
         )
         colors = color_vertices(neighbor_offsets, neighbors)
-        self.color_offsets = tuple(int(value) for value in np.concatenate(([0], np.cumsum(np.bincount(colors)))))
-        self.color_indices = array_to_field(np.argsort(colors, kind="stable"), gs.qd_int)
+        self.colors = ColorData(
+            array_to_field(np.argsort(colors, kind="stable"), gs.qd_int),
+            tuple(int(value) for value in np.concatenate(([0], np.cumsum(np.bincount(colors))))),
+        )
         elem_offsets, elem_entries = incidence(indices, n_vertices)
         # The fourth triangle slot is padding in the element layout; it has no incidence or energy.
         elem_entries = elem_entries[is_volume[elem_entries // 4] | (elem_entries % 4 != 3)]
@@ -343,7 +361,8 @@ class VBDSolver(Solver):
         self.envs_offset = array_to_field(self.scene.envs_offset, gs.qd_float, element_shape=(3,))
         gs.logger.info(
             f"VBD: {n_vertices} vertices, {n_elements} elements, "
-            f"{len(hinges)} hinges, {len(self.color_offsets) - 1} colors."
+            f"{len(hinges)} hinges, {len(self.colors.offsets) - 1} colors, "
+            f"{self.config.n_vertex_threads} threads per vertex."
         )
 
     def process_input(self, in_backward=False):
@@ -461,29 +480,25 @@ class VBDSolver(Solver):
                         if not qd_to_numpy(self.prediction_correction, transpose=True).item():
                             break
                 apply_prediction(self.initial_scale, self.mean_displacement, self.vertices, self.errno)
-            refresh_contacts(pairs, batches, kinds, weights, normals, self.vertices, self.errno)
-            self.iteration_stats.fill(0)
-            for start, end in pairwise(self.color_offsets):
-                solve_color(
-                    self.color_indices,
-                    start,
-                    end,
-                    vertex_offsets,
-                    entries,
-                    pairs,
-                    self.substep_dt,
-                    weights,
-                    normals,
-                    rest_gaps,
-                    self.iteration_stats,
-                    self.vertices,
-                    self.elements,
-                    self.hinges,
-                    self.planes,
-                    self.config,
-                    self.errno,
-                )
-                apply_color(self.color_indices, start, end, self.vertices)
+            solve_colors(
+                vertex_offsets,
+                entries,
+                pairs,
+                batches,
+                kinds,
+                self.substep_dt,
+                weights,
+                normals,
+                rest_gaps,
+                self.iteration_stats,
+                self.vertices,
+                self.elements,
+                self.hinges,
+                self.planes,
+                self.colors,
+                self.config,
+                self.errno,
+            )
             iteration_stats = qd_to_numpy(self.iteration_stats, transpose=True)
             is_rebuild_required = bool(iteration_stats[0])
             if (
@@ -492,7 +507,7 @@ class VBDSolver(Solver):
                 and iteration_stats[1] <= self.options.convergence_tolerance
             ):
                 break
-        finish(self.substep_dt, self.vertices, self.elements, self.hinges, self.errno)
+        finish(self.substep_dt, self._gravity, self.vertices, self.elements, self.hinges, self.errno)
         validate_state(self.vertices, self.elements, self.hinges, self.errno)
 
     def substep_post_coupling(self, f):

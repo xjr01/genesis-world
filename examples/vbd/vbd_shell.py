@@ -28,6 +28,7 @@ class Benchmark:
     dt: float
     substeps: int
     iterations: int
+    is_line_search_enabled: bool
     contact_d_hat: float
     contact_stiffness: float
     friction_epsilon: float
@@ -59,6 +60,12 @@ def main():
     parser.add_argument("--scenario", choices=("jelly", "fold"), default="jelly")
     parser.add_argument("--precision", choices=("32", "64"), default="32")
     parser.add_argument("--iterations", type=int, default=20)
+    parser.add_argument(
+        "--line-search",
+        dest="is_line_search_enabled",
+        action="store_true",
+        help="Enable local energy backtracking at extra cost.",
+    )
     parser.add_argument("--tolerance", type=float, default=1e-7)
     parser.add_argument("--plastic", action="store_true")
     parser.add_argument("--yield-angle", type=float, default=10.0)
@@ -103,6 +110,7 @@ def main():
             iterations=args.iterations,
             convergence_tolerance=args.tolerance,
             contact_d_hat=args.contact_distance,
+            is_line_search_enabled=args.is_line_search_enabled,
         ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(0.22, -0.28, 0.2),
@@ -185,6 +193,7 @@ def main():
         scene.dt,
         scene.sim.substeps,
         args.iterations,
+        args.is_line_search_enabled,
         args.contact_distance,
         scene.vbd_options.contact_stiffness,
         scene.vbd_options.friction_epsilon,

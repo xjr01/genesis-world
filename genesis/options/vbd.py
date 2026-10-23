@@ -1,3 +1,5 @@
+from pydantic import StrictBool
+
 from genesis.typing import NonNegativeFloat, PositiveFloat, PositiveInt, Vec3FType
 
 from .options import Options
@@ -15,7 +17,9 @@ class VBDOptions(Options):
     friction_epsilon is the regularization speed in m/s: smaller values approximate sticking more
     closely, while larger values make small sliding motions smoother.
     contact_stiffness scales the automatic inertia-based contact resistance; larger values reduce compression
-    of the contact gap but require more iterations. line_search_iterations bounds local descent backtracking.
+    of the contact gap but require more iterations. is_line_search_enabled enables local energy backtracking for
+    difficult deformations at the cost of extra energy evaluations. False accepts each contact-limited Newton step
+    for faster iteration. line_search_iterations limits the backtracking attempts when enabled.
     """
 
     dt: PositiveFloat | None = None
@@ -25,4 +29,5 @@ class VBDOptions(Options):
     contact_d_hat: PositiveFloat = 0.0005
     friction_epsilon: PositiveFloat = 0.001
     contact_stiffness: PositiveFloat = 10.0
+    is_line_search_enabled: StrictBool = False
     line_search_iterations: PositiveInt = 12

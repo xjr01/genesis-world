@@ -1,0 +1,146 @@
+         17534994 function calls (17050465 primitive calls) in 17.723 seconds
+
+   Ordered by: cumulative time
+   List reduced from 211 to 80 due to restriction <80>
+
+   ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+   120/60    0.000    0.000   17.730    0.295 misc.py:141(wrapper)
+       60    0.001    0.000   17.730    0.295 scene.py:1226(step)
+       60    0.001    0.000   17.729    0.295 simulator.py:349(step)
+      120    0.001    0.000   17.708    0.148 simulator.py:410(substep)
+      120    0.003    0.000   17.704    0.148 simulator.py:428(substep_pre_coupling)
+      120    0.106    0.001   17.421    0.145 solver.py:352(substep_pre_coupling)
+    52798    0.054    0.000   16.779    0.000 _quadrants_callable.py:96(__call__)
+    52798    0.050    0.000   16.724    0.000 kernel_impl.py:177(wrapped_func)
+    52798    0.592    0.000   16.675    0.000 kernel.py:876(__call__)
+    52798    8.579    0.000   15.274    0.000 kernel.py:576(launch_kernel)
+   376113    2.684    0.000    4.833    0.000 _func_base.py:562(_recursive_set_args)
+    50757    1.180    0.000    1.521    0.000 kernel.py:808(_set_struct_ndarray_args)
+  1625178    0.568    0.000    1.281    0.000 _device.py:118(__torch_function__)
+     2442    0.012    0.000    0.679    0.000 misc.py:744(qd_to_numpy)
+     2442    0.004    0.000    0.661    0.000 misc.py:412(tensor_to_array)
+    52798    0.064    0.000    0.608    0.000 kernel.py:865(ensure_compiled)
+     2442    0.006    0.000    0.574    0.000 misc.py:406(tensor_to_cpu)
+4884/2442    0.537    0.000    0.538    0.000 {method 'cpu' of 'torch._C.TensorBase' objects}
+    52798    0.160    0.000    0.525    0.000 _template_mapper.py:80(lookup)
+   170099    0.131    0.000    0.450    0.000 util.py:39(has_pytorch)
+      293    0.001    0.000    0.359    0.001 solver.py:507(check_errno)
+   170159    0.075    0.000    0.318    0.000 <frozen _collections_abc>:771(get)
+      120    0.000    0.000    0.276    0.002 rigid_solver.py:1683(substep_pre_coupling)
+      120    0.001    0.000    0.275    0.002 rigid_solver.py:1346(substep)
+     2403    0.003    0.000    0.254    0.000 _template_mapper.py:72(extract)
+     2403    0.015    0.000    0.252    0.000 _template_mapper.py:74(<listcomp>)
+   170159    0.122    0.000    0.243    0.000 <frozen os>:674(__getitem__)
+311092/155546    0.179    0.000    0.237    0.000 {method 'is_contiguous' of 'torch._C.TensorBase' objects}
+46138/39121    0.094    0.000    0.236    0.000 _template_mapper_hotpath.py:217(_extract_arg)
+   210601    0.197    0.000    0.236    0.000 impl.py:1376(current_cfg)
+  2164646    0.207    0.000    0.219    0.000 {built-in method builtins.getattr}
+311092/155546    0.145    0.000    0.200    0.000 {method 'data_ptr' of 'torch._C.TensorBase' objects}
+   155546    0.121    0.000    0.195    0.000 {method 'nelement' of 'torch._C.TensorBase' objects}
+311092/155546    0.136    0.000    0.187    0.000 {method 'element_size' of 'torch._C.TensorBase' objects}
+   155546    0.185    0.000    0.185    0.000 getlimits.py:412(__init__)
+      120    0.001    0.000    0.150    0.001 rigid_solver.py:1462(_func_constraint_force)
+  2497889    0.126    0.000    0.126    0.000 {built-in method builtins.isinstance}
+   170159    0.058    0.000    0.121    0.000 <frozen os>:748(encodekey)
+    96270    0.076    0.000    0.108    0.000 util.py:272(cook_dtype)
+    52798    0.106    0.000    0.106    0.000 kernel.py:165(populate_launch_ctx_from_cache)
+  1483845    0.105    0.000    0.105    0.000 _tensor_wrapper.py:128(_unwrap)
+    52798    0.068    0.000    0.100    0.000 _template_mapper.py:100(<listcomp>)
+  1604282    0.090    0.000    0.090    0.000 {built-in method builtins.id}
+      120    0.001    0.000    0.084    0.001 solver.py:293(resolve)
+     2442    0.009    0.000    0.083    0.000 {built-in method numpy.asarray}
+    52798    0.057    0.000    0.079    0.000 kernel.py:590(<listcomp>)
+  1701970    0.078    0.000    0.078    0.000 {method 'append' of 'list' objects}
+    52798    0.064    0.000    0.076    0.000 _func_base.py:431(fuse_args)
+4884/2442    0.008    0.000    0.074    0.000 _tensor.py:1249(__array__)
+     2442    0.014    0.000    0.067    0.000 overrides.py:1723(handle_torch_function)
+    14553    0.020    0.000    0.060    0.000 util.py:179(to_quadrants_type)
+      120    0.001    0.000    0.057    0.000 _perf_dispatch.py:235(__call__)
+      120    0.000    0.000    0.055    0.000 _perf_dispatch.py:59(__call__)
+      120    0.000    0.000    0.055    0.000 solver.py:7023(func_solve_body_monolith)
+     2257    0.003    0.000    0.053    0.000 _tensor_wrapper.py:213(fill)
+     2257    0.003    0.000    0.050    0.000 util.py:322(wrapped)
+   170159    0.037    0.000    0.045    0.000 <frozen os>:742(check_str)
+    50757    0.037    0.000    0.043    0.000 kernel.py:686(<dictcomp>)
+     2257    0.037    0.000    0.043    0.000 _ndarray.py:192(fill)
+   414724    0.034    0.000    0.034    0.000 impl.py:620(get_runtime)
+   155546    0.030    0.000    0.030    0.000 getlimits.py:436(max)
+   425679    0.029    0.000    0.029    0.000 {built-in method builtins.len}
+   265656    0.029    0.000    0.029    0.000 impl.py:443(prog)
+   360633    0.029    0.000    0.029    0.000 {method 'get' of 'dict' objects}
+4884/2442    0.026    0.000    0.029    0.000 {method 'detach' of 'torch._C.TensorBase' objects}
+   236448    0.029    0.000    0.029    0.000 {built-in method builtins.issubclass}
+      120    0.000    0.000    0.027    0.000 solver.py:282(add_inequality_constraints)
+      120    0.001    0.000    0.026    0.000 solver.py:270(add_equality_constraints)
+   155546    0.026    0.000    0.026    0.000 {built-in method math.prod}
+   155546    0.021    0.000    0.021    0.000 {method 'numel' of 'torch._C.TensorBase' objects}
+    52798    0.019    0.000    0.019    0.000 kernel.py:468(materialize)
+   170159    0.017    0.000    0.017    0.000 {method 'upper' of 'str' objects}
+  692/346    0.014    0.000    0.015    0.000 {method 'cumsum' of 'torch._C.TensorBase' objects}
+     2442    0.014    0.000    0.014    0.000 {method 'numpy' of 'torch._C.TensorBase' objects}
+    19771    0.010    0.000    0.013    0.000 util.py:352(is_data_oriented)
+  692/346    0.012    0.000    0.012    0.000 {method 'new_zeros' of 'torch._C.TensorBase' objects}
+      120    0.000    0.000    0.012    0.000 collider.py:861(detection)
+    50757    0.011    0.000    0.011    0.000 {method 'update' of 'dict' objects}
+  346/173    0.011    0.000    0.011    0.000 {built-in method torch.bincount}
+      374    0.003    0.000    0.011    0.000 kernel.py:611(<listcomp>)
+
+
+         17534994 function calls (17050465 primitive calls) in 17.723 seconds
+
+   Ordered by: internal time
+   List reduced from 211 to 50 due to restriction <50>
+
+   ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+    52798    8.579    0.000   15.274    0.000 kernel.py:576(launch_kernel)
+   376113    2.684    0.000    4.833    0.000 _func_base.py:562(_recursive_set_args)
+    50757    1.180    0.000    1.521    0.000 kernel.py:808(_set_struct_ndarray_args)
+    52798    0.592    0.000   16.675    0.000 kernel.py:876(__call__)
+  1625178    0.568    0.000    1.281    0.000 _device.py:118(__torch_function__)
+4884/2442    0.537    0.000    0.538    0.000 {method 'cpu' of 'torch._C.TensorBase' objects}
+  2164646    0.207    0.000    0.219    0.000 {built-in method builtins.getattr}
+   210601    0.197    0.000    0.236    0.000 impl.py:1376(current_cfg)
+   155546    0.185    0.000    0.185    0.000 getlimits.py:412(__init__)
+311092/155546    0.179    0.000    0.237    0.000 {method 'is_contiguous' of 'torch._C.TensorBase' objects}
+    52798    0.160    0.000    0.525    0.000 _template_mapper.py:80(lookup)
+311092/155546    0.145    0.000    0.200    0.000 {method 'data_ptr' of 'torch._C.TensorBase' objects}
+311092/155546    0.136    0.000    0.187    0.000 {method 'element_size' of 'torch._C.TensorBase' objects}
+   170099    0.131    0.000    0.450    0.000 util.py:39(has_pytorch)
+  2497889    0.126    0.000    0.126    0.000 {built-in method builtins.isinstance}
+   170159    0.122    0.000    0.243    0.000 <frozen os>:674(__getitem__)
+   155546    0.121    0.000    0.195    0.000 {method 'nelement' of 'torch._C.TensorBase' objects}
+    52798    0.106    0.000    0.106    0.000 kernel.py:165(populate_launch_ctx_from_cache)
+      120    0.106    0.001   17.421    0.145 solver.py:352(substep_pre_coupling)
+  1483845    0.105    0.000    0.105    0.000 _tensor_wrapper.py:128(_unwrap)
+46138/39121    0.094    0.000    0.236    0.000 _template_mapper_hotpath.py:217(_extract_arg)
+  1604282    0.090    0.000    0.090    0.000 {built-in method builtins.id}
+  1701970    0.078    0.000    0.078    0.000 {method 'append' of 'list' objects}
+    96270    0.076    0.000    0.108    0.000 util.py:272(cook_dtype)
+   170159    0.075    0.000    0.318    0.000 <frozen _collections_abc>:771(get)
+    52798    0.068    0.000    0.100    0.000 _template_mapper.py:100(<listcomp>)
+    52798    0.064    0.000    0.076    0.000 _func_base.py:431(fuse_args)
+    52798    0.064    0.000    0.608    0.000 kernel.py:865(ensure_compiled)
+   170159    0.058    0.000    0.121    0.000 <frozen os>:748(encodekey)
+    52798    0.057    0.000    0.079    0.000 kernel.py:590(<listcomp>)
+    52798    0.054    0.000   16.779    0.000 _quadrants_callable.py:96(__call__)
+    52798    0.050    0.000   16.724    0.000 kernel_impl.py:177(wrapped_func)
+     2257    0.037    0.000    0.043    0.000 _ndarray.py:192(fill)
+   170159    0.037    0.000    0.045    0.000 <frozen os>:742(check_str)
+    50757    0.037    0.000    0.043    0.000 kernel.py:686(<dictcomp>)
+   414724    0.034    0.000    0.034    0.000 impl.py:620(get_runtime)
+   155546    0.030    0.000    0.030    0.000 getlimits.py:436(max)
+   425679    0.029    0.000    0.029    0.000 {built-in method builtins.len}
+   265656    0.029    0.000    0.029    0.000 impl.py:443(prog)
+   360633    0.029    0.000    0.029    0.000 {method 'get' of 'dict' objects}
+   236448    0.029    0.000    0.029    0.000 {built-in method builtins.issubclass}
+4884/2442    0.026    0.000    0.029    0.000 {method 'detach' of 'torch._C.TensorBase' objects}
+   155546    0.026    0.000    0.026    0.000 {built-in method math.prod}
+   155546    0.021    0.000    0.021    0.000 {method 'numel' of 'torch._C.TensorBase' objects}
+    14553    0.020    0.000    0.060    0.000 util.py:179(to_quadrants_type)
+    52798    0.019    0.000    0.019    0.000 kernel.py:468(materialize)
+   170159    0.017    0.000    0.017    0.000 {method 'upper' of 'str' objects}
+     2403    0.015    0.000    0.252    0.000 _template_mapper.py:74(<listcomp>)
+     2442    0.014    0.000    0.014    0.000 {method 'numpy' of 'torch._C.TensorBase' objects}
+  692/346    0.014    0.000    0.015    0.000 {method 'cumsum' of 'torch._C.TensorBase' objects}
+
+

@@ -1,5 +1,16 @@
 # Genesis VBD Solver
 
+Profiling: [original bottleneck analysis](results/profile/README.md) and
+[graph scheduling and cooperative vertex results](results/scheduling/README.md).
+
+CUDA runs replay each color sweep through a Quadrants graph and use eight cooperating threads per vertex.
+Coloring is computed during scene construction. CPU runs use one thread per vertex.
+
+Local energy line search is disabled by default. Add `--line-search` to `vbd_elastic.py`, `vbd_shell.py`, or
+`vbd_profile.py` to enable backtracking for difficult deformations at extra computational cost. The corresponding
+solver option is `VBDOptions(is_line_search_enabled=True)`; `line_search_iterations` limits its backtracking attempts.
+Contact displacement limits and invalid-state checks remain active in both modes. This flag applies to the VBD solver.
+
 ## 运行示例
 
 在仓库根目录、安装了当前 checkout 的 Python 环境中运行：

@@ -277,7 +277,7 @@ def propagate_initialization(
                 has_change[None] = 1
 
 
-@qd.kernel
+@qd.func(requires_top_level=True)
 def refresh_contacts(
     pairs: qd.types.ndarray(),
     batches: qd.types.ndarray(),
@@ -320,6 +320,7 @@ def refresh_contacts(
 def self_response(
     i_v,
     i_b,
+    i_t,
     offsets: qd.template(),
     entries: qd.template(),
     pairs: qd.template(),
@@ -335,8 +336,9 @@ def self_response(
     gradient = qd.Vector.zero(gs.qd_float, 3)
     hessian = qd.Matrix.zero(gs.qd_float, 3, 3)
     vertex_slot = i_v * vertices.pos.shape[1] + i_b
-    for adjacent in range(offsets[vertex_slot], offsets[vertex_slot + 1]):
-        entry = entries[adjacent]
+    i_a = offsets[vertex_slot] + i_t
+    while i_a < offsets[vertex_slot + 1]:
+        entry = entries[i_a]
         index, local_idx = entry // 4, entry % 4
         separation = qd.Vector.zero(gs.qd_float, 3)
         displacement = separation
@@ -373,10 +375,58 @@ def self_response(
         energy += value
         gradient += weight * force
         hessian += weight**2 * matrix
+        i_a += options.n_vertex_threads
     return energy, gradient, hessian
 
 
-@qd.kernel
+@qd.func
+def vertex_response(
+    i_v,
+    i_b,
+    i_t,
+    offsets: qd.template(),
+    entries: qd.template(),
+    pairs: qd.template(),
+    trial,
+    dt,
+    is_active,
+    weights: qd.template(),
+    normals: qd.template(),
+    rest_gaps: qd.template(),
+    vertices: V_ANNOTATION,
+    elements: V_ANNOTATION,
+    hinges: V_ANNOTATION,
+    planes: V_ANNOTATION,
+    options: V_ANNOTATION,
+):
+    energy = qd.cast(0.0, gs.qd_float)
+    gradient = qd.Vector.zero(gs.qd_float, 3)
+    hessian = qd.Matrix.zero(gs.qd_float, 3, 3)
+    if is_active:
+        energy, gradient, hessian = local_response(
+            i_v, i_b, i_t, trial, dt, vertices, elements, hinges, planes, options
+        )
+        value, force, matrix = self_response(
+            i_v, i_b, i_t, offsets, entries, pairs, trial, dt, weights, normals, rest_gaps, vertices, options
+        )
+        energy += value
+        gradient += force
+        hessian += matrix
+    if qd.static(options.n_vertex_threads > 1):
+        # Broadcasting the leader's sums gives every lane identical backtracking decisions.
+        log2_size = qd.static(options.n_vertex_threads.bit_length() - 1)
+        i_l = qd.u32(qd.simt.subgroup.invocation_id() // options.n_vertex_threads * options.n_vertex_threads)
+        energy = qd.simt.subgroup.shuffle(qd.simt.subgroup.reduce_add_tiled(energy, log2_size), i_l)
+        for i_d in qd.static(range(3)):
+            gradient[i_d] = qd.simt.subgroup.shuffle(qd.simt.subgroup.reduce_add_tiled(gradient[i_d], log2_size), i_l)
+        for i_d, j_d in qd.static(qd.ndrange(3, 3)):
+            hessian[i_d, j_d] = qd.simt.subgroup.shuffle(
+                qd.simt.subgroup.reduce_add_tiled(hessian[i_d, j_d], log2_size), i_l
+            )
+    return energy, gradient, hessian
+
+
+@qd.func(requires_top_level=True)
 def solve_color(
     color_indices: qd.Tensor,
     color_start: int,
@@ -396,71 +446,160 @@ def solve_color(
     options: V_ANNOTATION,
     errno: qd.Tensor,
 ):
-    for slot, i_b in qd.ndrange((color_start, color_end), vertices.pos.shape[1]):
-        i_v = color_indices[slot]
+    n_threads = qd.static(options.n_vertex_threads)
+    n_lanes = qd.static(32 if n_threads > 1 else 1)
+    n_slots = (color_end - color_start) * vertices.pos.shape[1]
+    qd.loop_config(name="vbd_local_solve", block_dim=128)
+    for i_s in range((n_slots * n_threads + n_lanes - 1) // n_lanes * n_lanes):
+        i_t = i_s % n_threads
+        i_s_ = qd.min(i_s // n_threads, n_slots - 1)
+        i_b = i_s_ % vertices.pos.shape[1]
+        i_v = color_indices[color_start + i_s_ // vertices.pos.shape[1]]
+        is_in_range = i_s // n_threads < n_slots
+        is_valid = is_in_range and errno[None] == 0
+        is_free = is_valid and not vertices.is_fixed[i_v, i_b]
         pos = vertices.pos[i_v, i_b]
         next_pos = pos
-        if errno[None] == 0:
-            budget = qd.max(
-                0.0, 0.9 * vertices.motion_budget[i_v, i_b] - (pos - vertices.collision_origin[i_v, i_b]).norm()
-            )
-            direction = qd.Vector.zero(gs.qd_float, 3)
+        budget = qd.max(
+            0.0, 0.9 * vertices.motion_budget[i_v, i_b] - (pos - vertices.collision_origin[i_v, i_b]).norm()
+        )
+        direction = qd.Vector.zero(gs.qd_float, 3)
+        scale = qd.cast(1.0, gs.qd_float)
+        is_searching = False
+        # Fixed vertices and padding keep their lanes active for every subgroup collective.
+        energy, gradient, hessian = vertex_response(
+            i_v,
+            i_b,
+            i_t,
+            offsets,
+            entries,
+            pairs,
+            pos,
+            dt,
+            is_free,
+            weights,
+            normals,
+            rest_gaps,
+            vertices,
+            elements,
+            hinges,
+            planes,
+            options,
+        )
+        if is_valid:
             if vertices.is_fixed[i_v, i_b]:
                 direction = vertices.fixed_pos[i_v, i_b] - pos
-                fraction = qd.min(1.0, vertices.bound[i_v, i_b] / qd.max(direction.norm(), 1e-30))
+            else:
+                direction = -(hessian / hessian.trace()).inverse() @ (gradient / hessian.trace())
+                if qd.math.isnan(direction).any() or qd.math.isinf(direction).any():
+                    if i_t == 0:
+                        qd.atomic_or(errno[None], ErrorCode.INVALID_VBD_STATE)
+                else:
+                    is_searching = True
+            if vertices.is_fixed[i_v, i_b] or is_searching:
+                scale = qd.min(1.0, vertices.bound[i_v, i_b] / qd.max(direction.norm(), 1e-30))
                 if qd.static(planes.n_planes > 0):
                     for i_p in range(planes.n_planes):
                         normal = planes.normal[i_p]
                         gap = pos.dot(normal) - planes.offset[i_p] - vertices.radius[i_v]
                         if direction.dot(normal) < 0.0:
-                            fraction = qd.min(fraction, 0.9 * qd.max(gap, 0.0) / -direction.dot(normal))
-                next_pos = pos + fraction * direction
-            else:
-                energy, gradient, hessian = local_response(
-                    i_v, i_b, pos, dt, vertices, elements, hinges, planes, options
+                            scale = qd.min(scale, 0.9 * qd.max(gap, 0.0) / -direction.dot(normal))
+                if vertices.is_fixed[i_v, i_b] or qd.static(not options.is_line_search_enabled):
+                    next_pos = pos + scale * direction
+        if qd.static(options.is_line_search_enabled):
+            for iteration in range(options.line_search_iterations):
+                has_searching = is_searching
+                if qd.static(n_threads > 1):
+                    has_searching = qd.simt.subgroup.any_true(is_searching)
+                if not has_searching:
+                    break
+                trial = pos + scale * direction
+                trial_energy, _trial_gradient, _trial_hessian = vertex_response(
+                    i_v,
+                    i_b,
+                    i_t,
+                    offsets,
+                    entries,
+                    pairs,
+                    trial,
+                    dt,
+                    is_searching,
+                    weights,
+                    normals,
+                    rest_gaps,
+                    vertices,
+                    elements,
+                    hinges,
+                    planes,
+                    options,
                 )
-                value, force, matrix = self_response(
-                    i_v, i_b, offsets, entries, pairs, pos, dt, weights, normals, rest_gaps, vertices, options
-                )
-                energy += value
-                gradient += force
-                hessian += matrix
-                direction = -(hessian / hessian.trace()).inverse() @ (gradient / hessian.trace())
-                if qd.math.isnan(direction).any() or qd.math.isinf(direction).any():
-                    qd.atomic_or(errno[None], ErrorCode.INVALID_VBD_STATE)
-                else:
-                    length = direction.norm()
-                    scale = qd.min(1.0, vertices.bound[i_v, i_b] / qd.max(length, 1e-30))
-                    if qd.static(planes.n_planes > 0):
-                        for i_p in range(planes.n_planes):
-                            normal = planes.normal[i_p]
-                            gap = pos.dot(normal) - planes.offset[i_p] - vertices.radius[i_v]
-                            if direction.dot(normal) < 0.0:
-                                scale = qd.min(scale, 0.9 * qd.max(gap, 0.0) / -direction.dot(normal))
-                    for iteration in range(options.line_search_iterations):
-                        trial = pos + scale * direction
-                        trial_energy, _trial_gradient, _trial_hessian = local_response(
-                            i_v, i_b, trial, dt, vertices, elements, hinges, planes, options
-                        )
-                        value, _contact_gradient, _contact_hessian = self_response(
-                            i_v, i_b, offsets, entries, pairs, trial, dt, weights, normals, rest_gaps, vertices, options
-                        )
-                        if trial_energy + value <= energy + 1e-4 * scale * gradient.dot(direction):
-                            next_pos = trial
-                            break
+                if is_searching:
+                    if trial_energy <= energy + 1e-4 * scale * gradient.dot(direction):
+                        next_pos = trial
+                        is_searching = False
+                    else:
                         scale *= 0.5
+        if is_in_range and i_t == 0:
             if (
                 direction.norm() > budget
                 and vertices.bound[i_v, i_b] >= budget
                 and budget < 0.2 * vertices.motion_budget[i_v, i_b]
             ):
                 qd.atomic_max(iteration_stats[0], 1.0)
-        vertices.next_pos[i_v, i_b] = next_pos
-        qd.atomic_max(iteration_stats[1], (next_pos - pos).norm())
+            vertices.next_pos[i_v, i_b] = next_pos
+            qd.atomic_max(iteration_stats[1], (next_pos - pos).norm())
 
 
-@qd.kernel
+@qd.func(requires_top_level=True)
 def apply_color(color_indices: qd.Tensor, color_start: int, color_end: int, vertices: V_ANNOTATION):
     for slot, i_b in qd.ndrange((color_start, color_end), vertices.pos.shape[1]):
         i_v = color_indices[slot]
         vertices.pos[i_v, i_b] = vertices.next_pos[i_v, i_b]
+
+
+@qd.kernel(graph=True)
+def solve_colors(
+    offsets: qd.types.ndarray(),
+    entries: qd.types.ndarray(),
+    pairs: qd.types.ndarray(),
+    batches: qd.types.ndarray(),
+    kinds: qd.types.ndarray(),
+    dt: float,
+    weights: qd.types.ndarray(),
+    normals: qd.types.ndarray(),
+    rest_gaps: qd.types.ndarray(),
+    iteration_stats: qd.Tensor,
+    vertices: V_ANNOTATION,
+    elements: V_ANNOTATION,
+    hinges: V_ANNOTATION,
+    planes: V_ANNOTATION,
+    colors: V_ANNOTATION,
+    options: V_ANNOTATION,
+    errno: qd.Tensor,
+):
+    """Replay an ordered color sweep with contact geometry frozen for the sweep."""
+    refresh_contacts(pairs, batches, kinds, weights, normals, vertices, errno)
+    for i in range(2):
+        iteration_stats[i] = 0.0
+    # Each phase retains its global barrier before subsequent colors read the updated positions.
+    for i_c in qd.static(range(len(colors.offsets) - 1)):
+        solve_color(
+            colors.indices,
+            colors.offsets[i_c],
+            colors.offsets[i_c + 1],
+            offsets,
+            entries,
+            pairs,
+            dt,
+            weights,
+            normals,
+            rest_gaps,
+            iteration_stats,
+            vertices,
+            elements,
+            hinges,
+            planes,
+            options,
+            errno,
+        )
+        apply_color(colors.indices, colors.offsets[i_c], colors.offsets[i_c + 1], vertices)

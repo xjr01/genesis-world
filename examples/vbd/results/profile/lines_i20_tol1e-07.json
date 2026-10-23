@@ -1,0 +1,1584 @@
+{
+  "mode": "lines",
+  "revision": "8c75b61aa24dd6c372be4596e69e3ecbdb033f1b",
+  "genesis_path": "D:\\DavidX\\genesis-world-demos\\genesis\\__init__.py",
+  "platform": "Windows-10-10.0.26300-SP0",
+  "python": "3.11.15 | packaged by Anaconda, Inc. | (main, Jun 11 2026, 15:12:53) [MSC v.1942 64 bit (AMD64)]",
+  "torch": "2.12.1+cu126",
+  "device": "NVIDIA GeForce RTX 4090",
+  "asset": "meshes/jelly/remeshed.obj",
+  "asset_sha256": "d5b2a11cdc686a4af8922879b2303c0b19bbb3ec2ced7eca82ca2b97cb0a0827",
+  "vertices": 20119,
+  "tetrahedra": 82373,
+  "surface_triangles": 25476,
+  "color_sizes": [
+    3819,
+    3622,
+    3522,
+    2854,
+    1865,
+    1238,
+    1108,
+    1035,
+    730,
+    286,
+    39,
+    1
+  ],
+  "frame_dt": 0.005,
+  "substeps": 2,
+  "iteration_limit": 20,
+  "convergence_tolerance": 1e-07,
+  "warmup_frames": 30,
+  "measured_frames_per_repeat": 60,
+  "repeats": 1,
+  "mean_frame_ms": 319.3617800003267,
+  "median_frame_ms": 367.57820000639185,
+  "p95_frame_ms": 416.0991799857583,
+  "total_device_ms": null,
+  "final_minimum_height": 0.0002024022105615586,
+  "final_minimum_volume_ratio": 0.9585029709189323,
+  "timings": [
+    {
+      "repeat": 1,
+      "frame": 1,
+      "milliseconds": 38.20190002443269
+    },
+    {
+      "repeat": 1,
+      "frame": 2,
+      "milliseconds": 35.41079998831265
+    },
+    {
+      "repeat": 1,
+      "frame": 3,
+      "milliseconds": 36.23669999069534
+    },
+    {
+      "repeat": 1,
+      "frame": 4,
+      "milliseconds": 36.84559999965131
+    },
+    {
+      "repeat": 1,
+      "frame": 5,
+      "milliseconds": 36.88190001412295
+    },
+    {
+      "repeat": 1,
+      "frame": 6,
+      "milliseconds": 37.4459000013303
+    },
+    {
+      "repeat": 1,
+      "frame": 7,
+      "milliseconds": 46.320199995534495
+    },
+    {
+      "repeat": 1,
+      "frame": 8,
+      "milliseconds": 47.80699999537319
+    },
+    {
+      "repeat": 1,
+      "frame": 9,
+      "milliseconds": 37.268999993102625
+    },
+    {
+      "repeat": 1,
+      "frame": 10,
+      "milliseconds": 40.429099986795336
+    },
+    {
+      "repeat": 1,
+      "frame": 11,
+      "milliseconds": 229.02100000646897
+    },
+    {
+      "repeat": 1,
+      "frame": 12,
+      "milliseconds": 413.6194000020623
+    },
+    {
+      "repeat": 1,
+      "frame": 13,
+      "milliseconds": 386.71120000071824
+    },
+    {
+      "repeat": 1,
+      "frame": 14,
+      "milliseconds": 383.05899998522364
+    },
+    {
+      "repeat": 1,
+      "frame": 15,
+      "milliseconds": 389.59939999040216
+    },
+    {
+      "repeat": 1,
+      "frame": 16,
+      "milliseconds": 390.3182999929413
+    },
+    {
+      "repeat": 1,
+      "frame": 17,
+      "milliseconds": 373.0904000112787
+    },
+    {
+      "repeat": 1,
+      "frame": 18,
+      "milliseconds": 374.58869998226874
+    },
+    {
+      "repeat": 1,
+      "frame": 19,
+      "milliseconds": 372.07529999432154
+    },
+    {
+      "repeat": 1,
+      "frame": 20,
+      "milliseconds": 381.18120000581257
+    },
+    {
+      "repeat": 1,
+      "frame": 21,
+      "milliseconds": 388.92359999590553
+    },
+    {
+      "repeat": 1,
+      "frame": 22,
+      "milliseconds": 381.3496000075247
+    },
+    {
+      "repeat": 1,
+      "frame": 23,
+      "milliseconds": 369.6357000153512
+    },
+    {
+      "repeat": 1,
+      "frame": 24,
+      "milliseconds": 392.92839998961426
+    },
+    {
+      "repeat": 1,
+      "frame": 25,
+      "milliseconds": 360.1162999984808
+    },
+    {
+      "repeat": 1,
+      "frame": 26,
+      "milliseconds": 384.2098999884911
+    },
+    {
+      "repeat": 1,
+      "frame": 27,
+      "milliseconds": 382.0496000116691
+    },
+    {
+      "repeat": 1,
+      "frame": 28,
+      "milliseconds": 375.9641000069678
+    },
+    {
+      "repeat": 1,
+      "frame": 29,
+      "milliseconds": 369.37380000017583
+    },
+    {
+      "repeat": 1,
+      "frame": 30,
+      "milliseconds": 372.3353999957908
+    },
+    {
+      "repeat": 1,
+      "frame": 31,
+      "milliseconds": 367.1119000064209
+    },
+    {
+      "repeat": 1,
+      "frame": 32,
+      "milliseconds": 368.0445000063628
+    },
+    {
+      "repeat": 1,
+      "frame": 33,
+      "milliseconds": 378.3046000171453
+    },
+    {
+      "repeat": 1,
+      "frame": 34,
+      "milliseconds": 361.5818999824114
+    },
+    {
+      "repeat": 1,
+      "frame": 35,
+      "milliseconds": 352.9770000022836
+    },
+    {
+      "repeat": 1,
+      "frame": 36,
+      "milliseconds": 357.1108000178356
+    },
+    {
+      "repeat": 1,
+      "frame": 37,
+      "milliseconds": 367.108799982816
+    },
+    {
+      "repeat": 1,
+      "frame": 38,
+      "milliseconds": 366.85300001408905
+    },
+    {
+      "repeat": 1,
+      "frame": 39,
+      "milliseconds": 368.91170000308193
+    },
+    {
+      "repeat": 1,
+      "frame": 40,
+      "milliseconds": 359.6460999979172
+    },
+    {
+      "repeat": 1,
+      "frame": 41,
+      "milliseconds": 358.41960000107065
+    },
+    {
+      "repeat": 1,
+      "frame": 42,
+      "milliseconds": 360.2415000204928
+    },
+    {
+      "repeat": 1,
+      "frame": 43,
+      "milliseconds": 414.7752999851946
+    },
+    {
+      "repeat": 1,
+      "frame": 44,
+      "milliseconds": 358.70620000059716
+    },
+    {
+      "repeat": 1,
+      "frame": 45,
+      "milliseconds": 362.47310001635924
+    },
+    {
+      "repeat": 1,
+      "frame": 46,
+      "milliseconds": 362.9038000071887
+    },
+    {
+      "repeat": 1,
+      "frame": 47,
+      "milliseconds": 365.73910000151955
+    },
+    {
+      "repeat": 1,
+      "frame": 48,
+      "milliseconds": 370.6264999927953
+    },
+    {
+      "repeat": 1,
+      "frame": 49,
+      "milliseconds": 357.11989999981597
+    },
+    {
+      "repeat": 1,
+      "frame": 50,
+      "milliseconds": 366.109199996572
+    },
+    {
+      "repeat": 1,
+      "frame": 51,
+      "milliseconds": 360.26730001321994
+    },
+    {
+      "repeat": 1,
+      "frame": 52,
+      "milliseconds": 359.92829999304377
+    },
+    {
+      "repeat": 1,
+      "frame": 53,
+      "milliseconds": 395.69289999781176
+    },
+    {
+      "repeat": 1,
+      "frame": 54,
+      "milliseconds": 444.47889999719337
+    },
+    {
+      "repeat": 1,
+      "frame": 55,
+      "milliseconds": 413.8233999838121
+    },
+    {
+      "repeat": 1,
+      "frame": 56,
+      "milliseconds": 448.8337000075262
+    },
+    {
+      "repeat": 1,
+      "frame": 57,
+      "milliseconds": 441.25289999647066
+    },
+    {
+      "repeat": 1,
+      "frame": 58,
+      "milliseconds": 375.1101999951061
+    },
+    {
+      "repeat": 1,
+      "frame": 59,
+      "milliseconds": 369.65500001679175
+    },
+    {
+      "repeat": 1,
+      "frame": 60,
+      "milliseconds": 364.90129999583587
+    }
+  ],
+  "kernels": [],
+  "lines": [
+    {
+      "line": 353,
+      "source": "if not self.is_active:",
+      "hits": 120,
+      "host_ms": 0.3565
+    },
+    {
+      "line": 355,
+      "source": "predict(self.substep_dt, self._gravity, self.vertices, self.errno)",
+      "hits": 120,
+      "host_ms": 27.5602
+    },
+    {
+      "line": 356,
+      "source": "update_translation(self.mean_displacement, self.fixed_translation, self.vertices, is_prediction=False)",
+      "hits": 120,
+      "host_ms": 25.3444
+    },
+    {
+      "line": 357,
+      "source": "prepare_prediction(",
+      "hits": 240,
+      "host_ms": 27.1514
+    },
+    {
+      "line": 358,
+      "source": "self.mean_displacement,",
+      "hits": 120,
+      "host_ms": 0.0477
+    },
+    {
+      "line": 359,
+      "source": "self.vertices,",
+      "hits": 120,
+      "host_ms": 0.039
+    },
+    {
+      "line": 360,
+      "source": "self.planes,",
+      "hits": 120,
+      "host_ms": 0.0687
+    },
+    {
+      "line": 361,
+      "source": "self.options.contact_d_hat,",
+      "hits": 120,
+      "host_ms": 0.2718
+    },
+    {
+      "line": 362,
+      "source": "self.errno,",
+      "hits": 120,
+      "host_ms": 0.0308
+    },
+    {
+      "line": 365,
+      "source": "for _ in range(32):",
+      "hits": 135,
+      "host_ms": 0.1707
+    },
+    {
+      "line": 366,
+      "source": "self.prediction_correction.fill(0)",
+      "hits": 135,
+      "host_ms": 4.0065
+    },
+    {
+      "line": 367,
+      "source": "limit_prediction(",
+      "hits": 270,
+      "host_ms": 30.3386
+    },
+    {
+      "line": 368,
+      "source": "self.prediction_scale, self.prediction_correction, self.vertices, self.elements, self.errno",
+      "hits": 135,
+      "host_ms": 0.0966
+    },
+    {
+      "line": 370,
+      "source": "if not qd_to_numpy(self.prediction_correction, transpose=True).item():",
+      "hits": 135,
+      "host_ms": 18.979
+    },
+    {
+      "line": 371,
+      "source": "break",
+      "hits": 120,
+      "host_ms": 0.047
+    },
+    {
+      "line": 372,
+      "source": "self.initial_scale.fill(1.0)",
+      "hits": 120,
+      "host_ms": 3.0004
+    },
+    {
+      "line": 373,
+      "source": "empty_indices = torch.empty((0, 4), dtype=gs.tc_int, device=gs.device)",
+      "hits": 120,
+      "host_ms": 3.1718
+    },
+    {
+      "line": 374,
+      "source": "empty_weights = torch.empty((0, 4), dtype=gs.tc_float, device=gs.device)",
+      "hits": 120,
+      "host_ms": 0.7733
+    },
+    {
+      "line": 375,
+      "source": "empty_normals = torch.empty((0, 3), dtype=gs.tc_float, device=gs.device)",
+      "hits": 120,
+      "host_ms": 0.6422
+    },
+    {
+      "line": 376,
+      "source": "empty_gaps = torch.empty(0, dtype=gs.tc_float, device=gs.device)",
+      "hits": 120,
+      "host_ms": 0.5138
+    },
+    {
+      "line": 377,
+      "source": "empty_batches = torch.empty(0, dtype=gs.tc_int, device=gs.device)",
+      "hits": 120,
+      "host_ms": 0.4339
+    },
+    {
+      "line": 378,
+      "source": "is_rebuild_required = True",
+      "hits": 120,
+      "host_ms": 0.0271
+    },
+    {
+      "line": 379,
+      "source": "for iteration in range(self.options.iterations):",
+      "hits": 2101,
+      "host_ms": 0.8774
+    },
+    {
+      "line": 380,
+      "source": "if is_rebuild_required:",
+      "hits": 2002,
+      "host_ms": 0.602
+    },
+    {
+      "line": 381,
+      "source": "update_translation(",
+      "hits": 344,
+      "host_ms": 39.861
+    },
+    {
+      "line": 382,
+      "source": "self.mean_displacement, self.fixed_translation, self.vertices, is_prediction=iteration == 0",
+      "hits": 172,
+      "host_ms": 0.1237
+    },
+    {
+      "line": 384,
+      "source": "update_bounds(",
+      "hits": 344,
+      "host_ms": 44.5044
+    },
+    {
+      "line": 385,
+      "source": "self.primitives,",
+      "hits": 172,
+      "host_ms": 0.0869
+    },
+    {
+      "line": 386,
+      "source": "self.mean_displacement,",
+      "hits": 172,
+      "host_ms": 0.048
+    },
+    {
+      "line": 387,
+      "source": "self.vertices,",
+      "hits": 172,
+      "host_ms": 0.0401
+    },
+    {
+      "line": 388,
+      "source": "self.bvh,",
+      "hits": 172,
+      "host_ms": 0.0811
+    },
+    {
+      "line": 389,
+      "source": "self.options.contact_d_hat,",
+      "hits": 172,
+      "host_ms": 0.1433
+    },
+    {
+      "line": 390,
+      "source": "is_initial=iteration == 0,",
+      "hits": 172,
+      "host_ms": 0.0515
+    },
+    {
+      "line": 391,
+      "source": "has_multiple_entities=len(self.entities) > 1,",
+      "hits": 172,
+      "host_ms": 0.3526
+    },
+    {
+      "line": 393,
+      "source": "kernel_refit_bvh(self.bvh)",
+      "hits": 172,
+      "host_ms": 45.0531
+    },
+    {
+      "line": 394,
+      "source": "find_contacts(",
+      "hits": 344,
+      "host_ms": 112.5143
+    },
+    {
+      "line": 395,
+      "source": "self.surface_indices,",
+      "hits": 172,
+      "host_ms": 0.3403
+    },
+    {
+      "line": 396,
+      "source": "self.primitives,",
+      "hits": 172,
+      "host_ms": 0.052
+    },
+    {
+      "line": 397,
+      "source": "self.contact_counts,",
+      "hits": 172,
+      "host_ms": 0.0636
+    },
+    {
+      "line": 398,
+      "source": "empty_indices,",
+      "hits": 172,
+      "host_ms": 0.0387
+    },
+    {
+      "line": 399,
+      "source": "empty_batches,",
+      "hits": 172,
+      "host_ms": 0.0345
+    },
+    {
+      "line": 400,
+      "source": "empty_batches,",
+      "hits": 172,
+      "host_ms": 0.0297
+    },
+    {
+      "line": 401,
+      "source": "empty_weights,",
+      "hits": 172,
+      "host_ms": 0.0326
+    },
+    {
+      "line": 402,
+      "source": "empty_normals,",
+      "hits": 172,
+      "host_ms": 0.0368
+    },
+    {
+      "line": 403,
+      "source": "empty_gaps,",
+      "hits": 172,
+      "host_ms": 0.0359
+    },
+    {
+      "line": 404,
+      "source": "self.contact_counts,",
+      "hits": 172,
+      "host_ms": 0.0486
+    },
+    {
+      "line": 405,
+      "source": "self.initial_scale,",
+      "hits": 172,
+      "host_ms": 0.0477
+    },
+    {
+      "line": 406,
+      "source": "self.vertices,",
+      "hits": 172,
+      "host_ms": 0.0385
+    },
+    {
+      "line": 407,
+      "source": "self.bvh,",
+      "hits": 172,
+      "host_ms": 0.0375
+    },
+    {
+      "line": 408,
+      "source": "self.n_faces,",
+      "hits": 172,
+      "host_ms": 0.0672
+    },
+    {
+      "line": 409,
+      "source": "is_fill=False,",
+      "hits": 172,
+      "host_ms": 0.0321
+    },
+    {
+      "line": 410,
+      "source": "is_initial=iteration == 0,",
+      "hits": 172,
+      "host_ms": 0.0468
+    },
+    {
+      "line": 411,
+      "source": "errno=self.errno,",
+      "hits": 172,
+      "host_ms": 0.0388
+    },
+    {
+      "line": 413,
+      "source": "self.check_errno()",
+      "hits": 172,
+      "host_ms": 357.0578
+    },
+    {
+      "line": 414,
+      "source": "offsets = torch.cat((self.contact_counts.new_zeros(1), self.contact_counts.cumsum(0, dtype=gs.tc_int)))",
+      "hits": 172,
+      "host_ms": 23.7835
+    },
+    {
+      "line": 415,
+      "source": "n_contacts = int(offsets[-1].item())",
+      "hits": 172,
+      "host_ms": 13.7272
+    },
+    {
+      "line": 416,
+      "source": "pairs = torch.empty((n_contacts, 4), dtype=gs.tc_int, device=gs.device)",
+      "hits": 172,
+      "host_ms": 4.5039
+    },
+    {
+      "line": 417,
+      "source": "weights = torch.empty((n_contacts, 4), dtype=gs.tc_float, device=gs.device)",
+      "hits": 172,
+      "host_ms": 1.078
+    },
+    {
+      "line": 418,
+      "source": "normals = torch.empty((n_contacts, 3), dtype=gs.tc_float, device=gs.device)",
+      "hits": 172,
+      "host_ms": 0.9433
+    },
+    {
+      "line": 419,
+      "source": "rest_gaps = torch.empty(n_contacts, dtype=gs.tc_float, device=gs.device)",
+      "hits": 172,
+      "host_ms": 0.7011
+    },
+    {
+      "line": 420,
+      "source": "batches = torch.empty(n_contacts, dtype=gs.tc_int, device=gs.device)",
+      "hits": 172,
+      "host_ms": 0.6335
+    },
+    {
+      "line": 421,
+      "source": "kinds = torch.empty(n_contacts, dtype=gs.tc_int, device=gs.device)",
+      "hits": 172,
+      "host_ms": 0.6228
+    },
+    {
+      "line": 422,
+      "source": "if n_contacts:",
+      "hits": 172,
+      "host_ms": 0.0803
+    },
+    {
+      "line": 423,
+      "source": "find_contacts(",
+      "hits": 2,
+      "host_ms": 0.7173
+    },
+    {
+      "line": 424,
+      "source": "self.surface_indices,",
+      "hits": 1,
+      "host_ms": 0.0004
+    },
+    {
+      "line": 425,
+      "source": "self.primitives,",
+      "hits": 1,
+      "host_ms": 0.0002
+    },
+    {
+      "line": 426,
+      "source": "offsets,",
+      "hits": 1,
+      "host_ms": 0.0002
+    },
+    {
+      "line": 427,
+      "source": "pairs,",
+      "hits": 1,
+      "host_ms": 0.0002
+    },
+    {
+      "line": 428,
+      "source": "batches,",
+      "hits": 1,
+      "host_ms": 0.0002
+    },
+    {
+      "line": 429,
+      "source": "kinds,",
+      "hits": 1,
+      "host_ms": 0.0002
+    },
+    {
+      "line": 430,
+      "source": "weights,",
+      "hits": 1,
+      "host_ms": 0.0002
+    },
+    {
+      "line": 431,
+      "source": "normals,",
+      "hits": 1,
+      "host_ms": 0.0002
+    },
+    {
+      "line": 432,
+      "source": "rest_gaps,",
+      "hits": 1,
+      "host_ms": 0.0002
+    },
+    {
+      "line": 433,
+      "source": "self.contact_counts,",
+      "hits": 1,
+      "host_ms": 0.0002
+    },
+    {
+      "line": 434,
+      "source": "self.initial_scale,",
+      "hits": 1,
+      "host_ms": 0.0003
+    },
+    {
+      "line": 435,
+      "source": "self.vertices,",
+      "hits": 1,
+      "host_ms": 0.0006
+    },
+    {
+      "line": 436,
+      "source": "self.bvh,",
+      "hits": 1,
+      "host_ms": 0.0003
+    },
+    {
+      "line": 437,
+      "source": "self.n_faces,",
+      "hits": 1,
+      "host_ms": 0.0005
+    },
+    {
+      "line": 438,
+      "source": "is_fill=True,",
+      "hits": 1,
+      "host_ms": 0.0002
+    },
+    {
+      "line": 439,
+      "source": "is_initial=False,",
+      "hits": 1,
+      "host_ms": 0.0003
+    },
+    {
+      "line": 440,
+      "source": "errno=self.errno,",
+      "hits": 1,
+      "host_ms": 0.0002
+    },
+    {
+      "line": 442,
+      "source": "slots = (pairs * self._B + batches[:, None]).reshape(n_contacts * 4)",
+      "hits": 172,
+      "host_ms": 9.0967
+    },
+    {
+      "line": 443,
+      "source": "entries = torch.argsort(slots, stable=True)",
+      "hits": 172,
+      "host_ms": 2.7662
+    },
+    {
+      "line": 444,
+      "source": "counts = torch.bincount(slots, minlength=self.n_vertices * self._B)",
+      "hits": 172,
+      "host_ms": 12.0924
+    },
+    {
+      "line": 445,
+      "source": "vertex_offsets = torch.cat((self.contact_counts.new_zeros(1), counts.cumsum(0, dtype=gs.tc_int)))",
+      "hits": 172,
+      "host_ms": 15.3817
+    },
+    {
+      "line": 446,
+      "source": "if iteration == 0:",
+      "hits": 2002,
+      "host_ms": 0.7328
+    },
+    {
+      "line": 447,
+      "source": "limit_initialization(",
+      "hits": 240,
+      "host_ms": 30.978
+    },
+    {
+      "line": 448,
+      "source": "self.initial_scale,",
+      "hits": 120,
+      "host_ms": 0.0443
+    },
+    {
+      "line": 449,
+      "source": "self.mean_displacement,",
+      "hits": 120,
+      "host_ms": 0.0412
+    },
+    {
+      "line": 450,
+      "source": "self.vertices,",
+      "hits": 120,
+      "host_ms": 0.0563
+    },
+    {
+      "line": 451,
+      "source": "self.elements,",
+      "hits": 120,
+      "host_ms": 0.0417
+    },
+    {
+      "line": 452,
+      "source": "self.planes,",
+      "hits": 120,
+      "host_ms": 0.0415
+    },
+    {
+      "line": 453,
+      "source": "self.errno,",
+      "hits": 120,
+      "host_ms": 0.0316
+    },
+    {
+      "line": 455,
+      "source": "if len(self.entities) > 1 and n_contacts:",
+      "hits": 120,
+      "host_ms": 0.2032
+    },
+    {
+      "line": 463,
+      "source": "apply_prediction(self.initial_scale, self.mean_displacement, self.vertices, self.errno)",
+      "hits": 120,
+      "host_ms": 16.5974
+    },
+    {
+      "line": 464,
+      "source": "refresh_contacts(pairs, batches, kinds, weights, normals, self.vertices, self.errno)",
+      "hits": 2002,
+      "host_ms": 812.5363
+    },
+    {
+      "line": 465,
+      "source": "self.iteration_stats.fill(0)",
+      "hits": 2002,
+      "host_ms": 55.9025
+    },
+    {
+      "line": 466,
+      "source": "for start, end in pairwise(self.color_offsets):",
+      "hits": 26026,
+      "host_ms": 22.6239
+    },
+    {
+      "line": 467,
+      "source": "solve_color(",
+      "hits": 48048,
+      "host_ms": 11641.0714
+    },
+    {
+      "line": 468,
+      "source": "self.color_indices,",
+      "hits": 24024,
+      "host_ms": 7.3049
+    },
+    {
+      "line": 469,
+      "source": "start,",
+      "hits": 24024,
+      "host_ms": 4.7988
+    },
+    {
+      "line": 470,
+      "source": "end,",
+      "hits": 24024,
+      "host_ms": 4.4115
+    },
+    {
+      "line": 471,
+      "source": "vertex_offsets,",
+      "hits": 24024,
+      "host_ms": 4.5166
+    },
+    {
+      "line": 472,
+      "source": "entries,",
+      "hits": 24024,
+      "host_ms": 4.5424
+    },
+    {
+      "line": 473,
+      "source": "pairs,",
+      "hits": 24024,
+      "host_ms": 4.4647
+    },
+    {
+      "line": 474,
+      "source": "self.substep_dt,",
+      "hits": 24024,
+      "host_ms": 17.8854
+    },
+    {
+      "line": 475,
+      "source": "weights,",
+      "hits": 24024,
+      "host_ms": 4.5802
+    },
+    {
+      "line": 476,
+      "source": "normals,",
+      "hits": 24024,
+      "host_ms": 4.4734
+    },
+    {
+      "line": 477,
+      "source": "rest_gaps,",
+      "hits": 24024,
+      "host_ms": 4.154
+    },
+    {
+      "line": 478,
+      "source": "self.iteration_stats,",
+      "hits": 24024,
+      "host_ms": 5.5977
+    },
+    {
+      "line": 479,
+      "source": "self.vertices,",
+      "hits": 24024,
+      "host_ms": 5.6849
+    },
+    {
+      "line": 480,
+      "source": "self.elements,",
+      "hits": 24024,
+      "host_ms": 8.6169
+    },
+    {
+      "line": 481,
+      "source": "self.hinges,",
+      "hits": 24024,
+      "host_ms": 5.8033
+    },
+    {
+      "line": 482,
+      "source": "self.planes,",
+      "hits": 24024,
+      "host_ms": 5.63
+    },
+    {
+      "line": 483,
+      "source": "self.config,",
+      "hits": 24024,
+      "host_ms": 5.4326
+    },
+    {
+      "line": 484,
+      "source": "self.errno,",
+      "hits": 24024,
+      "host_ms": 5.1034
+    },
+    {
+      "line": 486,
+      "source": "apply_color(self.color_indices, start, end, self.vertices)",
+      "hits": 24024,
+      "host_ms": 4588.3818
+    },
+    {
+      "line": 487,
+      "source": "iteration_stats = qd_to_numpy(self.iteration_stats, transpose=True)",
+      "hits": 2002,
+      "host_ms": 323.9888
+    },
+    {
+      "line": 488,
+      "source": "is_rebuild_required = bool(iteration_stats[0])",
+      "hits": 2002,
+      "host_ms": 2.3457
+    },
+    {
+      "line": 489,
+      "source": "if (",
+      "hits": 3949,
+      "host_ms": 1.299
+    },
+    {
+      "line": 490,
+      "source": "not is_rebuild_required",
+      "hits": 2002,
+      "host_ms": 0.4587
+    },
+    {
+      "line": 491,
+      "source": "and self.options.convergence_tolerance",
+      "hits": 1947,
+      "host_ms": 2.4099
+    },
+    {
+      "line": 492,
+      "source": "and iteration_stats[1] <= self.options.convergence_tolerance",
+      "hits": 1947,
+      "host_ms": 2.5515
+    },
+    {
+      "line": 494,
+      "source": "break",
+      "hits": 21,
+      "host_ms": 0.0083
+    },
+    {
+      "line": 495,
+      "source": "finish(self.substep_dt, self.vertices, self.elements, self.hinges, self.errno)",
+      "hits": 120,
+      "host_ms": 38.1333
+    },
+    {
+      "line": 496,
+      "source": "validate_state(self.vertices, self.elements, self.hinges, self.errno)",
+      "hits": 120,
+      "host_ms": 27.2491
+    }
+  ],
+  "substep_counts": [
+    {
+      "iterations": 1,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 1,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 1,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 1,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 1,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 1,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 1,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 1,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 1,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 1,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 1,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 1,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 1,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 1,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 1,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 1,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 1,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 1,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 1,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 1,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 2,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 20,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 20,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 20,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 20,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 20,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 20,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 20,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 20,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 20,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 20,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 20,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 20,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 20,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 20,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 20,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 20,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 20,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 20,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 20,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 20,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 20,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 20,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 20,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 20,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 20,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 20,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 20,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 20,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 20,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 20,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 20,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 20,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 20,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 20,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 20,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 20,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 20,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 20,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 20,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 20,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 20,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 20,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 20,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 20,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 20,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 20,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 20,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 20,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 20,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 20,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 20,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 20,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 20,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 20,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 20,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 20,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 20,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 20,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 20,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 20,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 20,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 20,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 20,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 20,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 20,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 20,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 20,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 20,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 20,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 20,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 20,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 20,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 20,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 20,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 20,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 20,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 20,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 20,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 20,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 20,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 20,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 20,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 20,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 20,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 20,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 20,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 20,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 20,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 20,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 20,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 20,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 20,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 20,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 20,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 20,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 20,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 20,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 20,
+      "final_candidate_pairs": 0
+    },
+    {
+      "iterations": 20,
+      "final_candidate_pairs": 0
+    }
+  ]
+}
