@@ -19,6 +19,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run", type=Path, required=True, help="New output directory for the complete operation.")
     parser.add_argument("--config", type=Path, help="Partial JSON configuration; defaults to the end-slice scenario.")
+    parser.add_argument("--material", type=Path, help="ButterParameters JSON for the simulation stage.")
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[2]
     run = args.run.resolve()
@@ -30,6 +31,8 @@ def main():
         command = [sys.executable, "-u", "-m", f"examples.butter_cut_spread.{name}", "--run", str(run)]
         if name == "demo" and args.config is not None:
             command.extend(["--config", str(args.config.resolve())])
+        if name == "demo" and args.material is not None:
+            command.extend(["--material", str(args.material.resolve())])
         started = time.perf_counter()
         log = run.parent / f"{run.name}-{name}.log"
         print(f"Starting {name}: {log}", flush=True)

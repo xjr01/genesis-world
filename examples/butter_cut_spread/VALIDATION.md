@@ -1,81 +1,137 @@
-# End-slice validation
+# Butter cutting and spreading validation
 
-The example was checked on the `merge` base `d57c09f4`, using an independent
-worktree and virtual environment. Runtime imports resolved to that worktree's
-Genesis and example sources. The package dependency check passed. No source files
-from another project, external asset files or proprietary renderer were required.
+## Scope and reproduction
 
-The environment used Windows, Python 3.11.15, an NVIDIA RTX 5090 D v2,
-PyTorch 2.11.0+cu128, Quadrants 1.2.0, NumPy 2.4.6, SciPy 1.17.1,
-Matplotlib 3.11.0, PyAV 18.0.0 and trimesh 4.12.2. Hardware and compilation-cache
-state affect timings; these are one-run measurements, not performance guarantees.
+The example contains a procedural cut-and-spread scene and an optional authored-
+asset cut-and-lift scene. The authored asset measurements below use supplied
+123.24 x 25.94 x 39.17 mm butter, porcelain support and palette-knife geometry.
+These meshes are user inputs and are not distributed in this repository.
+The simulation and particle-video tools require the repository dependencies;
+Blender is used only for export. Isaac rendering is a separate local validation
+step whose code and dependencies are outside this solver submission.
 
-## Complete operation
+The asset preset is yield stress 160 Pa and consistency 15 Pa s^0.5. The primitive
+scene retains the standard material unless a preset is supplied. See
+[MATERIAL_CALIBRATION.md](MATERIAL_CALIBRATION.md) for self-support, flow fitting
+and the distinction between an engineering fit and measured material properties.
 
-The end-slice configuration completed 230,000 integration steps, 5.75 seconds of
-physical motion, and 139 output frames. All 720,000 butter particles and 325,404
-bread particles remained active. The decoded particle video passed frame-count,
-frame-rate, dimensions, nonempty-frame and changing-frame checks.
+```shell
+python -m pytest -n 0 --backend gpu tests/particles/test_butter_cut_spread.py -x -v
+python -m examples.butter_cut_spread.pipeline --run out/spread-check --material examples/butter_cut_spread/asset_material.json
+python -m examples.butter_cut_spread.asset_demo --assets out/initialized --run out/asset-cut
+python -m examples.butter_cut_spread.asset_particles --run out/asset-cut
+python -m examples.butter_cut_spread.asset_audit --run out/asset-cut
+python -m examples.butter_cut_spread.material_audit --run out/asset-cut
+```
+
+Prepare `out/initialized` using the authored-asset commands in the README. Use a
+new output directory for each run. First-time high-resolution mesh distance-field
+construction can take much longer than a cached build.
+
+## Focused regression checks
+
+Seven cases pass on the clean integration branch based on `merge` commit
+`1f97655a`, on Windows with Python 3.11.15, Quadrants 1.2.0 and an RTX 5090 D v2.
+They cover:
+
+- Short-side swept coverage with an asymmetric knife and offset butter center.
+- Ordinary concave-support free fall, support contact and friction, together with
+  blade-only CPIC separation, in unbatched and two-environment scenes and after reset.
+- Prescribed motion, blade geometry and angular-velocity consistency.
+- Two-sided wet contact, bounded adhesion, release and unilateral correction.
+- Authored asymmetric tool poses matching native collision geometry.
+- Detection of intermediate-frame particle-ID changes in trajectory comparisons.
+
+The support regression fails its free-fall assertion when all rigid geometries
+are allowed to participate in CPIC separation. The trajectory coverage regression
+rejects the off-side entry and incomplete sweep that left the upper section untouched.
+The checks assert physical or geometric observables, not only successful execution.
+
+## Complete authored-asset cut and lift
+
+The tool-only CPIC adapter retains ordinary dish and countertop contact. Imported
+steel uses its authored frame (`align=False`), and the post-step correction reads
+that steel mesh's native signed distance field. The fixed tool orientation is an
+assumption of this correction; rotating trajectories need separate previous and
+current contact frames.
+
+Entry is positioned over the full short side. The lowest point of the actual
+steel section starts 1 mm beyond the far boundary and traverses to 1 mm beyond
+the near boundary, then the blade returns to the short-side center for pickup.
+For the measured geometry, entry and draw-end Y are +0.0183 and -27.9201 mm.
+The purely vertical press-and-lift alternative has not been validated.
+
+The geometric sweep covers all 6,135 sampled cutting-section points at 0.4 mm
+spacing. The unswept continuous-mesh area is 0.0207%, confined below the first
+particle-center layer where support clearance is retained. All 71,350 vertices
+of the five tool meshes were checked at 25 near-support poses; minimum vertical
+clearance above the dish is 0.2000 mm. Replacement assets need their own coverage
+and clearance checks.
+
+The complete run uses 160,000 steps at 25 microseconds, 1,883,802 butter particles
+and 97 saved frames over four seconds. Initial particles, assets, material, grid,
+step size, X/Z tool motion and orientation match the material-calibration control;
+only the short-side tool path changes.
 
 | Measurement | Result |
 | --- | ---: |
-| Slice pickup | 99.8546% |
-| Slice particles in the final coating zone | 93.3042% |
-| Maximum bread particle displacement | 0.965 mm |
-| Maximum prescribed blade pose error | 0.0000103 mm |
-| Maximum sampled interior blade penetration | 0.00000813 mm |
-| Sampled interior side switches | 0 |
-| Maximum post-step contact correction | 0.00366 mm |
-| Initialization | 36.74 s |
-| Integration, including sampling | 722.26 s |
-| Complete simulation, including export | 822.04 s |
-| Particle-video encoding and input checks | 10.47 s |
+| Final core height loss | 0.5061% |
+| Initial slice particles above the original butter top | 97.7955% |
+| Corresponding material-control pickup | 88.1880% |
+| Active and finite particles | All |
+| Particles reaching domain boundary | 0 |
+| Dish penetration in 5,011 fixed sampled IDs | 0 mm |
+| Maximum blade penetration among all saved-frame AABB candidates | 0.02872 mm |
+| Countertop/dish CPIC-separated transfers at checked phase boundaries | 0 |
 
-The coating zone is the bread footprint within +/-4 mm of its nominal top.
-Interior crossing checks exclude flow around blade edges. Sampled-frame results
-do not prove continuous-time nonpenetration. No surface-reconstruction or
-photorealistic-rendering acceptance is claimed by this solver-only example.
+A small near-side residue remains on the end face. Geometric cutting coverage
+and adhesive pickup are different measures. These checks at saved times do not
+prove continuous-time nonpenetration or complete removal of every slice particle.
 
-The three focused tests passed: prescribed motion/geometry and angular-velocity
-consistency; two-sided wet adhesion, release and unilateral correction on the GPU;
-and detection of intermediate-frame particle-ID changes by the comparison tool.
-The repository's pre-commit checks also passed. The complete repository test suite
-was not run; changes are confined to this new example and its dedicated test.
-
-## Cross-run numerical comparison
-
-The independently generated particle trajectory was compared against a prior
-end-slice run with identical effective settings. Initial particles, knife geometry,
-sample times and prescribed tool poses matched. The contact executable body was
-unchanged when moved into the self-contained example.
-
-| Comparison over all 139 frames | Difference |
+| Stage | Wall time (s) |
 | --- | ---: |
-| Butter aggregate RMS position error | 0.221 mm |
-| Largest per-frame butter RMS | 0.338 mm |
-| Largest per-frame butter 99th-percentile error | 0.0386 mm |
-| Largest individual butter error | 110.17 mm |
-| Largest individual bread error | 0.105 mm |
-| Blade position / quaternion difference | 0 / 0 |
-| Mean decoded-video pixel absolute difference, 0-255 | 0.137 |
+| Initialization/build | 21.03 |
+| Settle | 126.53 |
+| Press | 191.46 |
+| Draw cut | 237.34 |
+| Separate | 64.72 |
+| Lift | 170.85 |
+| Hold | 63.06 |
+| All physical steps | 853.95 |
+| Simulation including initialization and export | 946.83 |
+| Offline exact-mesh audit | 279.63 |
+| Surface reconstruction | 361.56 |
+| Optional Isaac rendering, 128 samples, including startup | 532.03 |
 
-The strict particle-ID comparison **did not pass** its 0.1 mm per-frame butter
-RMS limit. Its other position limits passed. At the final frame, 11 of 720,000
-butter particles differed by more than 10 mm; their initial positions lay near
-the cut plane. Different retention decisions send these few particles toward
-different boards. The threshold and failed result were retained.
+Audit and reconstruction ran concurrently; their times are not a serial pipeline
+benchmark. The particle and Isaac videos each decoded to 97 frames at 1280 x 720,
+24 fps. Their simulation, audit, reconstruction and rendering reports identify
+this particle archive SHA-256:
+`b1d8c11f18f9fa7ede63d832b1276af4400ac35d816e439cd2a989fcdde22483`.
+The renderer's appearance profile was fixed and uploaded meshes matched the
+recorded surfaces. Entry, cutting, separation and lifted-slice frames were inspected.
 
-Pickup differed by 0.00265 percentage points and coating-zone deposition by
-0.01058 percentage points. Frame-by-frame video review showed matching bulk
-cutting, transport and spreading behavior. This supports reproduction of the
-demonstrated effect, **not exact reproduction of every individual particle path**.
-Particle-ID-sensitive datasets must use the actual exported state of each run.
+## Complete spreading compatibility check
 
-An additional full run of the unchanged reference code and configuration also
-failed the same strict comparison. Its aggregate butter RMS was 0.256 mm, maximum
-per-frame RMS 0.370 mm, maximum per-frame p99 0.0399 mm, and maximum individual
-error 110.17 mm. Its maximum bread error was 0.145 mm. These measured repeat
-differences were larger than the corresponding clean-worktree differences above.
-This control supports ordinary repeat-run sensitivity near attachment boundaries
-as the explanation in this case; it does not establish a universal tolerance or
-deterministic behavior on other hardware. No comparison limit was loosened.
+With the fitted asset preset explicitly selected, the procedural example completed
+230,000 steps over 5.75 seconds, with 720,000 butter and 325,404 bread particles
+and 139 recorded frames. Its existing audit passed:
+
+| Measurement | Result |
+| --- | ---: |
+| Initial slice pickup | 99.857% |
+| Initial slice in the final bread coating zone | 97.726% |
+| Maximum bread displacement | 1.069 mm |
+| Sampled interior blade-side switches | 0 |
+| Maximum sampled interior blade penetration | 0.00000813 mm |
+
+The coating zone is the bread footprint within +/-4 mm of its nominal top;
+its population does not establish uniform film coverage. Edge flow is excluded
+from the interior side-switch check. The authored-asset scene itself ends after
+lifting and does not include bread.
+
+The full trajectories were generated before integration onto `1f97655a` using
+these example physics sources. The intervening remote changes affect the DEM
+solver and its options; the MPM and rigid coupling sources used here are unchanged.
+Clean-branch regression tests and entry-point smoke checks supplement those full
+runs; they are not presented as a second full-trajectory benchmark.
