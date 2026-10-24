@@ -1,111 +1,106 @@
-# 黄油涂抹的 Isaac 离线渲染
+# 花纹餐盘场景的 Isaac 渲染
 
-本目录提供从 Genesis 粒子轨迹到 Isaac 视频的完整参考流程：黄油表面、随粒子变形的面包表面、刀具、支撑板、桌面、材质、灯光、相机和视频编码。场景几何均由代码生成，不需要其他项目、外部纹理、购买资产或本地私有文件。
+这是完整的三维餐桌场景：灰色石质台面、两只深蓝波纹餐盘、叠放面包、糖碗、打开的黄油盒，以及操作面包和银色抹刀。使用真实孔隙几何、纹理和灯光渲染，不使用参考照片作背景，也不把照片中的黄油涂层贴到面包上。
 
-Genesis 完成物理仿真并导出轨迹；Isaac Sim 只回放几何和渲染，不再积分物理，也不修改接触、本构、粒子或刀具轨迹。此功能可选，原有 `demo` 和 `pipeline` 无需安装或导入 Isaac。
+![餐桌场景渲染预览](render_assets/scene-preview.jpg)
 
-## 环境
+Genesis 负责物理仿真；Isaac 只回放已有的黄油表面、面包形变和刀具轨迹。所有渲染代码及必要资产位于本目录，不依赖其他示例或私有工程。渲染依赖为可选项，原有 Genesis 仿真入口无需安装 Isaac。
 
-使用两个独立 Python 环境，所有命令从仓库根目录运行：
+## 安装
 
-| 环境 | 用途 | 安装 |
-| --- | --- | --- |
-| Genesis | 仿真、审计、黄油重建、面包表面准备和视频验收 | 按 [README](README.md) 安装本仓库；视频验收使用随项目安装的 `av` |
-| Isaac | 场景、材质、路径追踪和 MP4 编码 | Python 3.11、Isaac Sim 5.1.0、兼容的 NVIDIA RTX GPU 和驱动 |
+使用独立的 Genesis 和 Isaac Python 环境，命令均在仓库根目录执行。
 
-渲染参考环境为 Windows、Isaac Sim 5.1.0、NumPy 1.26.0、Pillow 11.3.0、imageio-ffmpeg 0.6.0。版本固定用于复现此参考，并非推荐使用的最新版本；其他版本需要重新验证。Isaac 官方提供 [Python 安装说明](https://docs.isaacsim.omniverse.nvidia.com/5.1.0/installation/install_python.html)。
+- **Genesis 环境**：按 [README](README.md) 安装本仓库，用于仿真、审计、表面重建、资产准备和视频验收。
+- **Isaac 环境**：使用 Python 3.11、Isaac Sim 5.1.0 和兼容的 NVIDIA RTX GPU／驱动。版本固定用于复现参考，不代表最新推荐版本。安装方法见 [NVIDIA 官方说明](https://docs.isaacsim.omniverse.nvidia.com/5.1.0/installation/install_python.html)。
 
-在独立 Python 3.11 环境中安装：
+在独立的 Python 3.11 环境中运行：
 
 ```shell
 python -m pip install --upgrade pip
 python -m pip install -r examples/butter_spreading/requirements-isaac.txt
 ```
 
-已有 Isaac 安装时，也可使用其 `python.bat`（Windows）或 `python.sh`（Linux），安装清单中的 Pillow 和 imageio-ffmpeg 后运行。不要在该环境中安装 Genesis 的整套依赖。`carb`、`omni`、`pxr` 和 `OmniSurface.mdl` 由 Isaac 提供，必须在 `SimulationApp` 启动后使用；不要另外安装同名包。首次启动可能需要下载扩展和编译着色器。
+已有 Isaac 安装时，也可使用其 `python.bat` 或 `python.sh`，并安装清单中的 NumPy、SciPy、Numba、Pillow 和 imageio-ffmpeg。`carb`、`omni`、`pxr` 与 MDL 材质由 Isaac 提供，需在 `SimulationApp` 启动后使用。不要往 Isaac 环境安装整套 Genesis 依赖。
 
-使用者需自行接受 [NVIDIA Omniverse 许可协议](https://docs.omniverse.nvidia.com/platform/latest/common/NVIDIA_Omniverse_License_Agreement.html)。入口不自动接受协议；已接受者可按官方说明为渲染进程设置 `OMNI_KIT_ACCEPT_EULA=YES`，例如 PowerShell 中使用 `$env:OMNI_KIT_ACCEPT_EULA='YES'`。
+使用者需要自行接受 [NVIDIA Omniverse 许可协议](https://docs.omniverse.nvidia.com/platform/latest/common/NVIDIA_Omniverse_License_Agreement.html)。入口不会自动接受；已接受者可为当前渲染进程设置 `OMNI_KIT_ACCEPT_EULA=YES`，例如 PowerShell 中 `$env:OMNI_KIT_ACCEPT_EULA='YES'`。
+
+面包原始网格、MIT 许可和所需纹理已随仓库提供，不需要 Blender、联网下载模型或运行其他项目。资产来源见 [render_assets/NOTICE.md](render_assets/NOTICE.md)。
 
 ## 完整运行
 
-下面 `python` 指当前步骤对应环境的解释器。每次实验使用新的输出目录。
-
-**1. Genesis 环境：生成并验收四秒轨迹。** 已有合格的完整流水线结果可跳过此步。
+**1. 在 Genesis 环境中生成完整轨迹。** 已有合格的完整流水线结果可跳过。
 
 ```shell
 python -m examples.butter_spreading.pipeline --config examples/butter_spreading/configs/dataset.json --output-dir out/spreading
 ```
 
-**2. Genesis 环境：准备可独立传输的渲染输入。**
+**2. 在 Genesis 环境中准备渲染目录。**
 
 ```shell
-python -m examples.butter_spreading.prepare_isaac --source out/spreading --output-dir out/spreading-isaac
+python -m examples.butter_spreading.prepare_isaac --source out/spreading --output-dir out/spreading-kitchen
 ```
 
-该步骤检查流水线完成状态、物理审计和轨迹／黄油表面哈希，复制输入，并从面包粒子生成逐帧形变网格。目标目录必须为空。不要只复制 `mpm-state.npz`：准备后的整个目录才是一份完整渲染输入，可发给另一台具有本仓库和 Isaac 环境的机器。
+准备程序要求完整轨迹和物理审计通过，核对轨迹与表面哈希。它复制物理结果和纹理，从自带的原始网格生成约 302 万顶点的多孔面包外观，并记录全部输入哈希。输出目录必须为空。准备后的整个目录可传输到另一台安装了本仓库和 Isaac 的机器运行。
 
-**3. Isaac 环境：渲染完整正面和背面视频。**
+**3. 在 Isaac 环境中渲染。**
 
 ```shell
-python -m examples.butter_spreading.render_isaac --run out/spreading-isaac
-python -m examples.butter_spreading.render_isaac --run out/spreading-isaac --back-view
+# 完整餐桌视角，默认 1280×720、24 fps、64 samples。
+python -m examples.butter_spreading.render_isaac --run out/spreading-kitchen
+
+# 可选：操作面包近景。
+python -m examples.butter_spreading.render_isaac --run out/spreading-kitchen --camera bread
 ```
 
-如需先检查单帧外观：
+如需先检查一帧：
 
 ```shell
-python -m examples.butter_spreading.render_isaac --run out/spreading-isaac --frozen-frame 48
+python -m examples.butter_spreading.render_isaac --run out/spreading-kitchen --frames 1
 ```
 
-预览重复同一源帧八次，不代表完整轨迹。完整渲染默认使用 128 samples、1280×720、24 fps，导出 97 帧，包括 4.00001 s 的离散终点。入口拒绝覆盖同名 MP4、报告或场景文件；更改参数做对照时，重新准备一个输出目录。
+短预览不能替代完整视频验收。完整基准输出 97 帧，覆盖四秒动作，包括 4.00001 s 的离散终点。渲染拒绝覆盖同名输出；重新调参时准备新目录。可通过 `--samples` 调节采样数，增大可减少噪声但更慢；`--width`、`--height` 必须为正偶数。`--start-frame` 和 `--frames` 可选取片段，`--gui` 打开窗口。默认使用 PathTracing，参考效果以该模式为准。
 
-**4. Genesis 环境：核验视频和几何回放。**
+**4. 在 Genesis 环境中验收。**
 
 ```shell
-python -m examples.butter_spreading.validate_isaac --run out/spreading-isaac
+python -m examples.butter_spreading.validate_isaac --run out/spreading-kitchen
+python -m examples.butter_spreading.validate_isaac --run out/spreading-kitchen --camera bread
 ```
 
-验收要求完整正面视频；若存在背面报告，也会验收背面视频，并要求两侧材质和光照设置一致。检查输入哈希、源帧顺序、源时间、USD 几何坐标读回误差、材质配置、视频帧数／尺寸／帧率及连续编码时间。它不能替代画面质量人工检查，也不是重新运行物理审计。可通过 `--reference path/to/render-report.json` 与另一份完整渲染报告比较材质、灯光和采样参数。
+第二条只用于已渲染完整近景视频的情况。验收检查输入哈希、完整帧数、源时间、视频时间戳、尺寸、帧率、黑帧，以及刀具／黄油读回误差、面包变形雅可比和背景实例状态。人工仍需检查画面质量。默认物理参数和轨迹在渲染阶段不会修改。
 
-## 文件和坐标
+## 输出
 
 | 文件 | 内容 |
 | --- | --- |
-| `mpm-state.npz`、`mpm-state.json` | 原始粒子、面包粒子、刀具世界坐标、时间和采样间距 |
-| `mpm-surface.npz`、`mpm-surface.json` | 原样复制的黄油重建表面 |
-| `bread-surface.npz` | 各帧面包顶点、法线、固定三角形和顶点颜色 |
-| `isaac-inputs.json` | 输入哈希、几何参数、接触检查和准备耗时 |
-| `isaac-spreading.mp4`、`isaac-spreading-back.mp4` | 完整正面／背面视频 |
-| `isaac-spreading*.json` | 材质、灯光、相机、输入哈希、逐帧误差和耗时 |
-| `isaac-spreading*.usdc` | 最后一帧静态场景，供检查材质和构图；不是动画缓存 |
-| `isaac-spreading*-NNN.png` | 代表帧截图，实际命名由渲染入口生成 |
-| `isaac-validation.json` | 验收结果和渲染源码哈希 |
+| `mpm-state.*`、`mpm-surface.*` 及审计文件 | 复制的 Genesis 轨迹和黄油表面 |
+| `render-assets/` | 可移植纹理、生成的面包外观网格及许可 |
+| `isaac-inputs.json` | 准备耗时和所有渲染输入的哈希 |
+| `isaac-scene.mp4` | 完整餐桌视角视频 |
+| `isaac-bread.mp4` | 可选的操作面包近景视频 |
+| `isaac-scene-frame-*.png` | 首、中、末代表帧 |
+| `isaac-scene.json` | 源轨迹、采样参数、场景检查与面包形变记录 |
+| `isaac-scene.timing.json` | 初始化、形变、几何更新、绘制、编码和场景导出的分段耗时 |
+| `isaac-scene.usdc` | 最后一帧静态场景，不是动画缓存；检查材质时需保留纹理目录 |
+| `isaac-scene-validation.json` | 视频验收结果 |
 
-单位为米，Z 向上。`knife_positions` 是世界坐标中的工具参考位置；实际刀具中心还要加 `knife_collider_xy_offset_m`，不能重复叠加面包高度。刀具尺寸来自轨迹文件，不为画面效果缩放。该参考适配本示例的轴对齐、平移刀具；接入旋转刀具时需扩展轨迹格式及变换，不能仅替换位置。
+近景文件使用 `isaac-bread` 前缀；片段名称带起始帧和请求帧数。USD 中的纹理路径对应生成场景时的位置；跨机器传输后，重新运行渲染以重建路径。Isaac 关闭可能直接终止解释器，因此计时文件在关闭前写入，并通过 `shutdown_included` 标明是否包含关闭耗时。
 
-面包初始粒子必须是完整的规则三维格点。表面通过三线性位移插值和半格外推跟随粒子，形变增益为 1，刚体运动和均匀压缩均保持一致。面包颜色固定在材料坐标中；细小色差为程序纹理，没有额外制造孔隙几何。支撑板沿用本示例固定尺寸 0.18×0.14×0.02 m、顶高 0.01 m；改动物理场景支撑几何时需同步修改准备入口。
+## 几何和外观约定
 
-## 外观与调节位置
+- 单位米、Z 向上。操作面包、黄油和刀具放在同一个绕 Z 轴旋转 −24° 的任务组内；源轨迹本身不旋转或重新积分。场景旋转只用于视觉布局。
+- 操作面包使用固定的多孔外观网格，通过材料坐标的三线性粒子位移插值逐帧变形，位移增益为 1，边界允许半格外推。法线使用变形梯度的逆转置更新；非有限值或翻转会报错。网格细孔不代表求解器独立求解了每个孔洞。
+- 操作面包解除共享实例，背景四片面包保持共享静态原型，避免全部跟着变形。几何归一化尺寸为 0.14×0.114×0.016 m，顶面位于任务坐标 Z=0.026 m；接入不同尺寸的物理面包时必须同步适配归一化和位置。
+- 可见抹刀是 1.2 mm 薄刀面和带柄外观，其下表面对齐记录的物理刀具代理下表面。外观轮廓不等于轴对齐碰撞盒；没有重新计算接触。接入任意刀具旋转或替换刀具资产时，应扩展位姿映射和检查。
+- 动态黄油使用原样重建表面，UsdPreviewSurface 颜色 `(0.83, 0.73, 0.34)`、粗糙度 `0.40`；不追加人造刀面薄膜。面包使用 OmniSurface 透光／散射和真实孔隙表面，餐盘、台面、刀面使用对应纹理。黄油盒里的黄油是静态背景道具。
+- 环境光强度 260，主面积光 1850，窗口反射光 1400；相机焦距 59、横向孔径 36。参数是该场景的外观设置，不是实测黄油光学常数。场景构图与灯光在 `render_isaac.py`，布局在 `kitchen_scene.py`，面包与刀具外观在 `bread_knife_assets.py`。
 
-| 位置 | 作用及取舍 |
-| --- | --- |
-| `materials/appearance.json` | 黄油 OmniSurface 参数：暖黄色、粗糙度 0.4、折射率 1.46、次表面权重 0.2、散射尺度 0.0001 m；增大散射会改变薄处透光和整体观感 |
-| `isaac_materials.py` | 金属／板／桌面材质、面积光、环境光和路径追踪设置 |
-| `isaac_scene.py` | 面包材质、相机位置、焦距、画面尺寸与几何回放 |
-| `--samples` | 默认 128；提高可减小噪声，但增加耗时 |
-| `--background-fill off/on` | 默认 off 仍有基础环境光和主光；on 仅把环境光 650 提高至 750、前补光 900 提高至 1050；其他参数相同 |
-| `--back-view` | 使用另一侧固定相机，材质和灯光不变 |
+更改几何、相机、材质或轨迹后，应重新准备独立目录并保存一套对应的验收结果。所需渲染依赖独立列在本示例中，不加入仓库全局依赖。
 
-外观 JSON 中的颜色是视觉拟合参数，不能直接当作实测黄油反照率。散射、透光和粗糙度是明确标注的近似。材质数据按线性 shader 输入使用，不要把显示器截图中的 sRGB 数值直接替换进去。光照、色调映射和相机响应共同影响最终画面；对照实验一次只改变一组参数。
-
-此示例的合格基准轨迹没有需要独立处理的刀面薄膜粒子，使用黄油体积表面渲染。准备入口检测刀具内部的重建顶点，以及距离两侧宽面小于一粒子间距的候选粒子；若出现这类未适配的薄膜候选，会报错，避免伪造附着层。它不包含粒子薄膜 hack、切割场景或薄膜混合渲染。如果外部轨迹包含刀面薄膜，需要另行定义捕获粒子编号、刀面局部坐标和厚薄分区。
-
-## 维护验证
-
-在 Genesis 环境中运行面包表面回归测试：
+## 回归测试
 
 ```shell
 python -m pytest -n 0 tests/particles/test_butter_spreading_render.py
 ```
 
-测试验证静止尺寸、刚体平移、剪切／压缩、法线变换和粒子编号重排下的几何一致性；不启动 Isaac。修改材质、相机或 Isaac 接口后，还需运行上面的完整渲染和验收流程。渲染报告分别记录启动、场景准备、逐帧绘制及总体耗时，不与 Genesis 物理步进耗时混算。
+该测试不启动 Isaac，检查材料坐标插值、压缩／剪切、法线变换、无逐帧累积漂移和翻转拒绝。修改渲染路径还需运行完整视频并验收。
