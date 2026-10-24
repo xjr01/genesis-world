@@ -113,6 +113,8 @@ def test_ground_and_self_contact(n_envs, is_line_search_enabled, show_viewer):
             gravity=(0, 0, -9.81),
         ),
         vbd_options=gs.options.VBDOptions(
+            # Resolve force balance at the activation scale with the full iteration budget.
+            convergence_tolerance=0.0,
             is_line_search_enabled=is_line_search_enabled,
         ),
         viewer_options=gs.options.ViewerOptions(
@@ -212,13 +214,60 @@ def test_ground_and_self_contact(n_envs, is_line_search_enabled, show_viewer):
             E=10000.0,
         ),
     )
+    obstacle = scene.add_entity(
+        morph=gs.morphs.TetrahedralMesh(
+            vertices=((1.0, 0.0, 0.15), (1.2, 0.0, 0.15), (1.0, 0.2, 0.15), (1.0, 0.0, 0.149)),
+            elements=((0, 2, 1, 3),),
+        ),
+        material=gs.materials.VBD.Elastic(),
+    )
+    obstacle.set_vertex_constraints([0, 1, 2, 3])
+    crossing = scene.add_entity(
+        morph=gs.morphs.TetrahedralMesh(
+            vertices=((1.03, 0.03, 0.153), (1.032, 0.03, 0.153), (1.03, 0.032, 0.153), (1.03, 0.03, 0.155)),
+            elements=((0, 1, 2, 3),),
+        ),
+        material=gs.materials.VBD.Elastic(
+            E=1000000.0,
+        ),
+    )
+    penetrating = scene.add_entity(
+        morph=gs.morphs.TetrahedralMesh(
+            vertices=(
+                (1.07, 0.03, 0.14995),
+                (1.072, 0.03, 0.14995),
+                (1.07, 0.032, 0.14995),
+                (1.07, 0.03, 0.15195),
+            ),
+            elements=((0, 1, 2, 3),),
+        ),
+        material=gs.materials.VBD.Elastic(
+            E=1000000.0,
+        ),
+    )
+    near_entities = []
+    for index, gap_factor in enumerate((0.5, 2.0)):
+        entity = scene.add_entity(
+            morph=gs.morphs.TetrahedralMesh(
+                pos=(1.11 + index * 0.03, 0.03, 0.15 + gap_factor * scene.vbd_options.contact_d_hat),
+                vertices=((0.0, 0.0, 0.0), (0.002, 0.0, 0.0), (0.0, 0.002, 0.0), (0.0, 0.0, 0.002)),
+                elements=((0, 1, 2, 3),),
+            ),
+            material=gs.materials.VBD.Elastic(
+                E=1000000.0,
+            ),
+        )
+        entity.set_vertex_forces([0.0, 0.0, entity.material.rho * 0.002**3 / 24 * 9.81], [0, 1, 2, 3])
+        near_entities.append(entity)
     scene.build(n_envs=n_envs)
     initial_velocity = -2.0
     state = scene.vbd_solver.get_state(0)
     state.vel[:, falling.v_start : falling.v_start + falling.n_vertices, 2] = initial_velocity
+    state.vel[:, crossing.v_start : crossing.v_start + crossing.n_vertices, 2] = -8.0
     scene.vbd_solver.set_state(0, state)
     initial_falling = falling.get_state().pos
     initial_dense = dense.get_state().pos
+    initial_near = [entity.get_state().pos for entity in near_entities]
     for _ in range(2):
         scene.step()
     n_substeps = 2 * scene.sim.substeps
@@ -229,6 +278,13 @@ def test_ground_and_self_contact(n_envs, is_line_search_enabled, show_viewer):
         atol=2e-6,
     )
     assert_allclose(dense.get_state().pos - initial_dense, [0.0, 0.0, displacement], atol=2e-7)
+    assert (penetrating.get_state().pos[..., 2] > 0.14999).all()
+    assert (crossing.get_state().pos[..., 2] > 0.1499).all()
+    assert (
+        near_entities[0].get_state().pos[..., 2].amin(dim=-1)
+        > initial_near[0][..., 2].amin(dim=-1) + 0.1 * scene.vbd_options.contact_d_hat
+    ).all()
+    assert_allclose(near_entities[1].get_state().pos, initial_near[1], atol=2e-7)
     heights, velocities = [], []
     for _ in range(28):
         scene.step()
@@ -241,8 +297,10 @@ def test_ground_and_self_contact(n_envs, is_line_search_enabled, show_viewer):
     assert (heights[8:].amax(dim=0) - heights.amin(dim=0) > 0.001).all()
     lower = entities[0].get_state()
     upper = entities[1].get_state()
-    assert (lower.pos[..., 2] > entities[0].material.thickness / 2).all()
-    assert (upper.pos[..., 2] - lower.pos[..., 2] > entities[0].material.thickness).all()
+    compression = entities[0].material.thickness / 2 + scene.vbd_options.contact_d_hat - lower.pos[..., 2]
+    weight = 2 * 0.08**2 * entities[0].material.thickness * entities[0].material.rho * 9.81
+    support = compression.clamp_min(0).sum(dim=-1) * scene.vbd_options.shell_contact_stiffness
+    assert_allclose(support, weight, atol=2e-5)
     assert (upper.pos[..., 2] < 0.0015).all()
     assert_allclose(lower.vel[..., 2], 0.0, atol=0.002)
     assert_allclose(upper.vel[..., 2], 0.0, atol=0.002)
@@ -259,8 +317,10 @@ def test_ground_and_self_contact(n_envs, is_line_search_enabled, show_viewer):
     upper_indices = slice(entities[1].v_start, entities[1].v_start + entities[1].n_vertices)
     state.pos[:, upper_indices] = state.pos[:, lower_indices]
     scene.vbd_solver.set_state(0, state)
-    with pytest.raises(gs.GenesisException, match="intersecting contact"):
+    falling_pos = falling.get_state().pos
+    for _ in range(2):
         scene.step()
+    assert (falling.get_state().pos[..., 2] < falling_pos[..., 2]).all()
     scene.reset()
     assert_allclose(entities[1].get_state().pos[..., 2], 0.0015, atol=1e-7)
 
@@ -362,7 +422,8 @@ def test_plastic_unloading_and_bending_switch(n_envs, show_viewer):
 
 @pytest.mark.parametrize("n_envs", [0, 2])
 @pytest.mark.parametrize("is_line_search_enabled", [False, True])
-def test_material_response(n_envs, is_line_search_enabled, show_viewer):
+@pytest.mark.parametrize("convergence_tolerance", [0.0, 1e-7])
+def test_material_response(n_envs, is_line_search_enabled, convergence_tolerance, show_viewer):
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
             dt=0.005,
@@ -370,6 +431,7 @@ def test_material_response(n_envs, is_line_search_enabled, show_viewer):
             gravity=(0, 0, 0),
         ),
         vbd_options=gs.options.VBDOptions(
+            convergence_tolerance=convergence_tolerance,
             is_line_search_enabled=is_line_search_enabled,
         ),
         viewer_options=gs.options.ViewerOptions(

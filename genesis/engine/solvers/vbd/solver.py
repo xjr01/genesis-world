@@ -14,11 +14,14 @@ from genesis.engine.states.vbd import VBDState
 from genesis.utils.array_class import ErrorCode, V, V_ANNOTATION
 from genesis.utils.misc import qd_to_numpy, qd_to_torch, tensor_to_array
 
-from .contact import find_contacts, propagate_initialization, solve_colors, update_bounds
+from .collision import find_shell_contacts, find_volume_contacts, initialize_shell_bounds, update_bounds
+from .contact import solve_colors
 from .data import (
+    CollisionData,
     ColorData,
     ElementData,
     HingeData,
+    IterationData,
     PlaneData,
     VBDConfig,
     VertexData,
@@ -33,7 +36,6 @@ from .physics import (
     limit_prediction,
     predict,
     prepare_prediction,
-    update_translation,
     validate_state,
 )
 
@@ -80,15 +82,18 @@ def replace_field(field, values, envs_idx):
 
 
 class VBDSolver(Solver):
-    """Implicit Euler integration with colored vertex block descent (VBD) and barrier contact."""
+    """Implicit Euler integration with colored vertex block descent (VBD) and penalty contact."""
 
     def __init__(self, scene, sim, options):
         super().__init__(scene, sim, options)
         self.options = options
         self.config = VBDConfig(
             options.contact_d_hat,
+            options.contact_search_radius,
             options.friction_epsilon,
             options.contact_stiffness,
+            options.shell_contact_stiffness,
+            options.convergence_tolerance,
             options.is_line_search_enabled,
             options.line_search_iterations,
             n_vertex_threads=8 if gs.backend == gs.cuda else 1,
@@ -98,7 +103,10 @@ class VBDSolver(Solver):
         self.hinges = None
         self.planes = None
         self.colors = None
+        self.iteration = None
+        self.collision = None
         self.errno = None
+        self.has_warned_penetration = False
 
     def add_entity(self, idx, material, morph, surface, name=None):
         entity = VBDEntity(idx, self.scene, morph, self, material, surface, name=name)
@@ -128,6 +136,7 @@ class VBDSolver(Solver):
         measure = np.empty(n_elements, dtype=gs.np_float)
         mu, lam = np.empty_like(measure), np.empty_like(measure)
         is_volume = np.empty(n_elements, dtype=gs.np_bool)
+        is_vertex_volume = np.empty(n_vertices, dtype=gs.np_bool)
         is_plastic = np.zeros(n_elements, dtype=gs.np_bool)
         yield_strain, hardening = np.zeros_like(measure), np.zeros_like(measure)
         mass = np.zeros(n_vertices, dtype=gs.np_float)
@@ -144,6 +153,7 @@ class VBDSolver(Solver):
             n_corners = 3 if is_shell else 4
             indices[es, :n_corners] = connectivity
             is_volume[es] = not is_shell
+            is_vertex_volume[vs] = not is_shell
             friction[vs] = material.friction_mu
             corners = positions[connectivity]
             edges = corners[:, 1:, :] - corners[:, :1, :]
@@ -222,10 +232,6 @@ class VBDSolver(Solver):
         pairs = pairs[pairs[:, 0] != pairs[:, 1]]
         neighbor_offsets, order = incidence(pairs[:, 0], n_vertices)
         neighbors = pairs[order, 1]
-        edge_length = np.full(n_vertices, np.inf)
-        np.minimum.at(
-            edge_length, pairs[:, 0], np.linalg.norm(positions[pairs[:, 1]] - positions[pairs[:, 0]], axis=-1)
-        )
         colors = color_vertices(neighbor_offsets, neighbors)
         self.colors = ColorData(
             array_to_field(np.argsort(colors, kind="stable"), gs.qd_int),
@@ -247,7 +253,6 @@ class VBDSolver(Solver):
         forces = np.repeat(np.concatenate([entity._init_forces for entity in self.entities])[:, None], self._B, axis=1)
         self.vertices = VertexData(
             array_to_field(batch_positions, gs.qd_float, element_shape=(3,)),
-            array_to_field(positions, gs.qd_float, element_shape=(3,)),
             array_to_field(np.zeros_like(batch_positions), gs.qd_float, element_shape=(3,)),
             array_to_field(batch_positions, gs.qd_float, element_shape=(3,)),
             array_to_field(batch_positions, gs.qd_float, element_shape=(3,)),
@@ -257,19 +262,15 @@ class VBDSolver(Solver):
             array_to_field(is_fixed, gs.qd_bool),
             array_to_field(fixed_pos, gs.qd_float, element_shape=(3,)),
             array_to_field(np.zeros((n_vertices, self._B)), gs.qd_float),
-            array_to_field(np.zeros((n_vertices, self._B)), gs.qd_float),
             array_to_field(mass, gs.qd_float),
             array_to_field(radius, gs.qd_float),
-            array_to_field(edge_length, gs.qd_float),
+            array_to_field(is_vertex_volume, gs.qd_bool),
             array_to_field(friction, gs.qd_float),
             array_to_field(entity_indices, gs.qd_int),
             array_to_field(elem_offsets, gs.qd_int),
             array_to_field(elem_entries, gs.qd_int),
             array_to_field(hinge_offsets, gs.qd_int),
             array_to_field(hinge_entries, gs.qd_int),
-            array_to_field(neighbor_offsets, gs.qd_int),
-            array_to_field(neighbors, gs.qd_int),
-            array_to_field(np.bincount(entity_indices, weights=mass), gs.qd_float),
         )
         self.elements = ElementData(
             array_to_field(indices, gs.qd_int, element_shape=(4,)),
@@ -319,31 +320,97 @@ class VBDSolver(Solver):
             len(normals),
         )
         faces = np.concatenate([entity.surface_triangles + entity.v_start for entity in self.entities])
-        edges = np.unique(np.sort(np.concatenate((faces[:, :2], faces[:, 1:], faces[:, [2, 0]])), axis=1), axis=0)
-        primitives = np.concatenate((faces, np.column_stack((edges, edges[:, 1]))))
-        self.n_faces = len(faces)
-        self.surface_indices = array_to_field(np.unique(faces), gs.qd_int)
-        self.primitives = array_to_field(primitives, gs.qd_int, element_shape=(3,))
-        self.contact_counts = torch.zeros(
-            (len(np.unique(faces)) + len(edges)) * self._B, dtype=gs.tc_int, device=gs.device
+        tets = indices[is_volume]
+        tet_faces = tets[:, ((1, 2, 3), (0, 3, 2), (0, 1, 3), (0, 2, 1))].reshape(4 * len(tets), 3)
+        unique_faces, inverse, counts = np.unique(
+            np.sort(tet_faces, axis=1), axis=0, return_inverse=True, return_counts=True
         )
-        self.mean_displacement = V(gs.qd_vec3, (len(self.entities), self._B))
-        self.fixed_translation = V(gs.qd_vec4, (len(self.entities), self._B))
+        if (counts > 2).any():
+            gs.raise_exception("VBD tetrahedra require manifold face adjacency.")
+        order = np.argsort(inverse, kind="stable")
+        starts = np.concatenate(([0], np.cumsum(counts)))[:-1]
+        tet_neighbors = np.full(len(tet_faces), -1, dtype=gs.np_int)
+        interior = starts[counts == 2]
+        tet_neighbors[order[interior]] = order[interior + 1] // 4
+        tet_neighbors[order[interior + 1]] = order[interior] // 4
+        _, combined = np.unique(np.concatenate((unique_faces, np.sort(faces, axis=1))), axis=0, return_inverse=True)
+        owners = np.full(combined.max() + 1, -1, dtype=gs.np_int)
+        owners[combined[: len(unique_faces)]] = order[starts] // 4
+        face_tets = owners[combined[len(unique_faces) :]]
+        volume_faces = np.flatnonzero(face_tets >= 0)
+        triangles = positions[faces[volume_faces]]
+        normals = np.cross(triangles[:, 1] - triangles[:, 0], triangles[:, 2] - triangles[:, 0])
+        centers = positions[tets[face_tets[volume_faces]]].mean(axis=1)
+        reverse = volume_faces[(normals * (centers - triangles[:, 0])).sum(axis=1) > 0]
+        faces[reverse] = faces[reverse][:, [0, 2, 1]]
+        edges, edge_inverse, edge_counts = np.unique(
+            np.sort(faces[:, ((0, 1), (1, 2), (2, 0))].reshape(3 * len(faces), 2), axis=1),
+            axis=0,
+            return_inverse=True,
+            return_counts=True,
+        )
+        if (edge_counts > 2).any():
+            gs.raise_exception("VBD contact surfaces require manifold edges.")
+        edge_order = np.argsort(edge_inverse, kind="stable")
+        edge_starts = np.concatenate(([0], np.cumsum(edge_counts)))[:-1]
+        edge_faces = np.full((len(edges), 2), -1, dtype=gs.np_int)
+        edge_faces[:, 0] = edge_order[edge_starts] // 3
+        edge_faces[edge_counts == 2, 1] = edge_order[edge_starts[edge_counts == 2] + 1] // 3
+        vertex_faces = np.full(n_vertices, len(faces), dtype=gs.np_int)
+        np.minimum.at(vertex_faces, faces.reshape(3 * len(faces)), np.repeat(np.arange(len(faces)), 3))
+        surface_indices = np.unique(faces)
+        surface_pairs = np.concatenate((edges, edges[:, ::-1]))
+        neighbor_offsets, order = incidence(surface_pairs[:, 0], n_vertices)
+        self.config.has_shell = bool((~is_volume).any())
+        self.config.max_contact_thickness = float(2.0 * radius.max())
+        if (
+            self.config.has_shell
+            and self.options.contact_search_radius <= self.config.max_contact_thickness + self.options.contact_d_hat
+        ):
+            gs.raise_exception("VBD contact_search_radius must exceed the maximum shell thickness plus contact_d_hat.")
+        self.collision = CollisionData(
+            array_to_field(surface_indices, gs.qd_int),
+            array_to_field(faces, gs.qd_int, element_shape=(3,)),
+            array_to_field(edges, gs.qd_int, element_shape=(2,)),
+            array_to_field(edge_inverse.reshape(len(faces), 3), gs.qd_int, element_shape=(3,)),
+            array_to_field(edge_faces, gs.qd_int, element_shape=(2,)),
+            array_to_field(vertex_faces, gs.qd_int),
+            array_to_field(neighbor_offsets, gs.qd_int),
+            array_to_field(surface_pairs[order, 1], gs.qd_int),
+            array_to_field(face_tets, gs.qd_int),
+            array_to_field(tets, gs.qd_int, element_shape=(4,)),
+            array_to_field(tet_neighbors.reshape(len(tets), 4), gs.qd_int, element_shape=(4,)),
+            V(gs.qd_int, (len(surface_indices), self._B)),
+            V(gs.qd_int, (len(surface_indices), self._B)),
+            V(gs.qd_vec4, (len(self.entities), self._B)) if self.config.has_shell else None,
+            V(gs.qd_float, (len(self.entities), self._B)) if self.config.has_shell else None,
+            V(gs.qd_int, (len(self.entities), self._B)) if self.config.has_shell else None,
+            array_to_field(np.bincount(entity_indices, weights=mass), gs.qd_float) if self.config.has_shell else None,
+            len(faces),
+            len(edges) if self.config.has_shell else 0,
+            len(tets),
+            self.config.has_shell,
+        )
+        self.collision.intersected_tets.fill(-1)
+        self.collision.contact_faces.fill(-1)
+        self.contact_counts = torch.zeros(
+            (len(surface_indices) + self.collision.n_edges) * self._B if self.config.has_shell else 0,
+            dtype=gs.tc_int,
+            device=gs.device,
+        )
         self.initial_scale = V(gs.qd_float, (len(self.entities), self._B))
         self.prediction_scale = V(gs.qd_float, (n_vertices, self._B))
         self.prediction_correction = V(gs.qd_int, ())
-        self.iteration_stats = V(gs.qd_float, (2,))
-        self.bvh = RefitBVH(AABB(self._B, len(primitives)), [len(faces), len(edges)])
-        update_translation(self.mean_displacement, self.fixed_translation, self.vertices, is_prediction=False)
-        update_bounds(
-            self.primitives,
-            self.mean_displacement,
-            self.vertices,
-            self.bvh,
-            self.options.contact_d_hat,
-            is_initial=False,
-            has_multiple_entities=len(self.entities) > 1,
+        self.iteration = IterationData(
+            V(gs.qd_int, (3,)), V(gs.qd_float, ()) if self.options.convergence_tolerance else None
         )
+        leaf_counts = [self.collision.n_faces]
+        if self.collision.n_edges:
+            leaf_counts.append(self.collision.n_edges)
+        if self.collision.n_tets:
+            leaf_counts.append(self.collision.n_tets)
+        self.bvh = RefitBVH(AABB(self._B, sum(leaf_counts)), leaf_counts)
+        update_bounds(False, False, self.vertices, self.collision, self.bvh)
         self.bvh.rebuild()
         self.errno = V(gs.qd_int, ())
         self.errno.fill(0)
@@ -372,15 +439,7 @@ class VBDSolver(Solver):
         if not self.is_active:
             return
         predict(self.substep_dt, self._gravity, self.vertices, self.errno)
-        update_translation(self.mean_displacement, self.fixed_translation, self.vertices, is_prediction=False)
-        prepare_prediction(
-            self.mean_displacement,
-            self.vertices,
-            self.planes,
-            self.options.contact_d_hat,
-            self.errno,
-        )
-        # Local repairs preserve the inertial motion away from contact; the final entity bound ensures feasibility.
+        prepare_prediction(self.vertices)
         for _ in range(32):
             self.prediction_correction.fill(0)
             limit_prediction(
@@ -389,125 +448,144 @@ class VBDSolver(Solver):
             if not qd_to_numpy(self.prediction_correction, transpose=True).item():
                 break
         self.initial_scale.fill(1.0)
-        empty_indices = torch.empty((0, 4), dtype=gs.tc_int, device=gs.device)
-        empty_weights = torch.empty((0, 4), dtype=gs.tc_float, device=gs.device)
-        empty_normals = torch.empty((0, 3), dtype=gs.tc_float, device=gs.device)
-        empty_gaps = torch.empty(0, dtype=gs.tc_float, device=gs.device)
-        empty_batches = torch.empty(0, dtype=gs.tc_int, device=gs.device)
+        limit_initialization(self.initial_scale, self.vertices, self.elements, self.errno)
+        update_bounds(is_previous=True, is_swept=False, vertices=self.vertices, collision=self.collision, bvh=self.bvh)
+        kernel_refit_bvh(self.bvh)
+        if self.sim.cur_substep_global % (16 * self.sim.substeps) == 0:
+            self.bvh.rebuild()
+        find_volume_contacts(
+            is_ccd=False,
+            vertices=self.vertices,
+            collision=self.collision,
+            bvh=self.bvh,
+            options=self.config,
+            errno=self.errno,
+        )
+        apply_prediction(
+            is_shell=False, scale=self.initial_scale, vertices=self.vertices, collision=self.collision, errno=self.errno
+        )
+        update_bounds(is_previous=False, is_swept=True, vertices=self.vertices, collision=self.collision, bvh=self.bvh)
+        kernel_refit_bvh(self.bvh)
+        find_volume_contacts(
+            is_ccd=True,
+            vertices=self.vertices,
+            collision=self.collision,
+            bvh=self.bvh,
+            options=self.config,
+            errno=self.errno,
+        )
+        contact_faces = qd_to_torch(self.collision.contact_faces, transpose=True)
+        active = (contact_faces >= 0).nonzero()
+        volume_batches = active[:, 0]
+        volume_pairs = torch.cat(
+            (
+                qd_to_torch(self.collision.surface_indices, transpose=True)[active[:, 1], None],
+                qd_to_torch(self.collision.faces, transpose=True)[contact_faces[active[:, 0], active[:, 1]]],
+            ),
+            dim=1,
+        )
         is_rebuild_required = True
-        for iteration in range(self.options.iterations):
+        iteration, check_interval = 0, 1
+        while iteration < self.options.iterations:
             if is_rebuild_required:
-                update_translation(
-                    self.mean_displacement, self.fixed_translation, self.vertices, is_prediction=iteration == 0
-                )
-                update_bounds(
-                    self.primitives,
-                    self.mean_displacement,
-                    self.vertices,
-                    self.bvh,
-                    self.options.contact_d_hat,
-                    is_initial=iteration == 0,
-                    has_multiple_entities=len(self.entities) > 1,
-                )
-                kernel_refit_bvh(self.bvh)
-                find_contacts(
-                    self.surface_indices,
-                    self.primitives,
-                    self.contact_counts,
-                    empty_indices,
-                    empty_batches,
-                    empty_batches,
-                    empty_weights,
-                    empty_normals,
-                    empty_gaps,
-                    self.contact_counts,
-                    self.initial_scale,
-                    self.vertices,
-                    self.bvh,
-                    self.n_faces,
-                    is_fill=False,
-                    is_initial=iteration == 0,
-                    errno=self.errno,
-                )
-                self.check_errno()
-                offsets = torch.cat((self.contact_counts.new_zeros(1), self.contact_counts.cumsum(0, dtype=gs.tc_int)))
-                n_contacts = int(offsets[-1].item())
-                pairs = torch.empty((n_contacts, 4), dtype=gs.tc_int, device=gs.device)
-                weights = torch.empty((n_contacts, 4), dtype=gs.tc_float, device=gs.device)
-                normals = torch.empty((n_contacts, 3), dtype=gs.tc_float, device=gs.device)
-                rest_gaps = torch.empty(n_contacts, dtype=gs.tc_float, device=gs.device)
-                batches = torch.empty(n_contacts, dtype=gs.tc_int, device=gs.device)
-                kinds = torch.empty(n_contacts, dtype=gs.tc_int, device=gs.device)
-                if n_contacts:
-                    find_contacts(
-                        self.surface_indices,
-                        self.primitives,
-                        offsets,
-                        pairs,
-                        batches,
-                        kinds,
-                        weights,
-                        normals,
-                        rest_gaps,
+                pairs, batches = volume_pairs, volume_batches
+                kinds = torch.full((len(pairs),), 2, dtype=gs.tc_int, device=gs.device)
+                if self.config.has_shell:
+                    update_bounds(
+                        is_previous=False,
+                        is_swept=False,
+                        vertices=self.vertices,
+                        collision=self.collision,
+                        bvh=self.bvh,
+                    )
+                    kernel_refit_bvh(self.bvh)
+                    initialize_shell_bounds(self.vertices, self.collision, self.config)
+                    empty_pairs = torch.empty((0, 4), dtype=gs.tc_int, device=gs.device)
+                    empty_indices = torch.empty(0, dtype=gs.tc_int, device=gs.device)
+                    find_shell_contacts(
+                        empty_indices,
+                        empty_pairs,
+                        empty_indices,
+                        empty_indices,
                         self.contact_counts,
-                        self.initial_scale,
-                        self.vertices,
-                        self.bvh,
-                        self.n_faces,
-                        is_fill=True,
-                        is_initial=False,
+                        is_fill=False,
+                        vertices=self.vertices,
+                        collision=self.collision,
+                        bvh=self.bvh,
+                        options=self.config,
                         errno=self.errno,
                     )
+                    offsets = torch.cat(
+                        (self.contact_counts.new_zeros(1), self.contact_counts.cumsum(0, dtype=gs.tc_int))
+                    )
+                    n_shell_contacts = int(offsets[-1].item())
+                    shell_pairs = torch.empty((n_shell_contacts, 4), dtype=gs.tc_int, device=gs.device)
+                    shell_batches = torch.empty(n_shell_contacts, dtype=gs.tc_int, device=gs.device)
+                    shell_kinds = torch.empty(n_shell_contacts, dtype=gs.tc_int, device=gs.device)
+                    find_shell_contacts(
+                        offsets,
+                        shell_pairs,
+                        shell_batches,
+                        shell_kinds,
+                        self.contact_counts,
+                        is_fill=True,
+                        vertices=self.vertices,
+                        collision=self.collision,
+                        bvh=self.bvh,
+                        options=self.config,
+                        errno=self.errno,
+                    )
+                    pairs = torch.cat((pairs, shell_pairs))
+                    batches = torch.cat((batches, shell_batches))
+                    kinds = torch.cat((kinds, shell_kinds))
+                    if iteration == 0:
+                        apply_prediction(
+                            is_shell=True,
+                            scale=self.initial_scale,
+                            vertices=self.vertices,
+                            collision=self.collision,
+                            errno=self.errno,
+                        )
+                n_contacts = len(pairs)
                 slots = (pairs * self._B + batches[:, None]).reshape(n_contacts * 4)
                 entries = torch.argsort(slots, stable=True)
                 counts = torch.bincount(slots, minlength=self.n_vertices * self._B)
                 vertex_offsets = torch.cat((self.contact_counts.new_zeros(1), counts.cumsum(0, dtype=gs.tc_int)))
-            if iteration == 0:
-                limit_initialization(
-                    self.initial_scale,
-                    self.mean_displacement,
+            for i_s in range(min(check_interval, self.options.iterations - iteration)):
+                solve_colors(
+                    vertex_offsets,
+                    entries,
+                    pairs,
+                    kinds,
+                    self.substep_dt,
+                    i_s == 0,
+                    self.iteration,
                     self.vertices,
                     self.elements,
+                    self.hinges,
                     self.planes,
+                    self.colors,
+                    self.config,
                     self.errno,
                 )
-                if len(self.entities) > 1 and n_contacts:
-                    for _ in range(len(self.entities)):
-                        self.prediction_correction.fill(0)
-                        propagate_initialization(
-                            pairs, batches, self.initial_scale, self.prediction_correction, self.vertices
-                        )
-                        if not qd_to_numpy(self.prediction_correction, transpose=True).item():
-                            break
-                apply_prediction(self.initial_scale, self.mean_displacement, self.vertices, self.errno)
-            solve_colors(
-                vertex_offsets,
-                entries,
-                pairs,
-                batches,
-                kinds,
-                self.substep_dt,
-                weights,
-                normals,
-                rest_gaps,
-                self.iteration_stats,
-                self.vertices,
-                self.elements,
-                self.hinges,
-                self.planes,
-                self.colors,
-                self.config,
-                self.errno,
-            )
-            iteration_stats = qd_to_numpy(self.iteration_stats, transpose=True)
-            is_rebuild_required = bool(iteration_stats[0])
-            if (
-                not is_rebuild_required
-                and self.options.convergence_tolerance
-                and iteration_stats[1] <= self.options.convergence_tolerance
-            ):
+            status = qd_to_numpy(self.iteration.status, transpose=True)
+            iteration += int(status[1])
+            is_rebuild_required = bool(status[0])
+            if not is_rebuild_required and not status[2]:
                 break
-        finish(self.substep_dt, self._gravity, self.vertices, self.elements, self.hinges, self.errno)
+            check_interval = 1 if is_rebuild_required else min(2 * check_interval, 8)
+        finish(
+            pairs,
+            kinds,
+            batches,
+            self.substep_dt,
+            self._gravity,
+            self.vertices,
+            self.elements,
+            self.hinges,
+            self.planes,
+            self.errno,
+        )
         validate_state(self.vertices, self.elements, self.hinges, self.errno)
 
     def substep_post_coupling(self, f):
@@ -524,8 +602,12 @@ class VBDSolver(Solver):
             code = qd_to_numpy(self.errno, transpose=True).item()
             if code & ErrorCode.INVALID_VBD_STATE:
                 gs.raise_exception("VBD encountered an invalid deformation. Reset the scene before continuing.")
-            if code & ErrorCode.INVALID_VBD_CONTACT:
-                gs.raise_exception("VBD encountered intersecting contact. Reset the scene before continuing.")
+            if code & ErrorCode.VBD_CONTACT_PENETRATION and not self.has_warned_penetration:
+                gs.logger.warning(
+                    "VBD detected interpenetration. Simulation continues; consider increasing "
+                    "VBDOptions.contact_d_hat to activate contact earlier."
+                )
+                self.has_warned_penetration = True
 
     def get_state(self, f):
         if not self.is_active:
@@ -563,7 +645,7 @@ class VBDSolver(Solver):
     @mutates(StateChange.GEOMETRY, StateChange.DYNAMICS)
     def set_state(self, f, state, envs_idx=None):
         envs_idx = self.scene._sanitize_envs_idx(envs_idx)
-        if len(envs_idx) != self._B and qd_to_numpy(self.errno, transpose=True).item():
+        if len(envs_idx) != self._B and qd_to_numpy(self.errno, transpose=True).item() & ErrorCode.INVALID_VBD_STATE:
             gs.raise_exception("Reset every environment after a VBD simulation failure.")
         fields = (
             self.vertices.pos,
@@ -608,6 +690,7 @@ class VBDSolver(Solver):
         if gs.backend == gs.metal:
             torch.mps.synchronize()
         self.errno.fill(0)
+        self.has_warned_penetration = False
         validate_state(self.vertices, self.elements, self.hinges, self.errno)
         self.check_errno()
 

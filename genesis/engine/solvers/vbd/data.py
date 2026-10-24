@@ -10,16 +10,27 @@ from genesis.utils.array_class import AutoInitMeta, V
 
 class VBDConfig(metaclass=AutoInitMeta):
     contact_d_hat: float
+    contact_search_radius: float
     friction_epsilon: float
     contact_stiffness: float
+    shell_contact_stiffness: float
+    convergence_tolerance: float
     is_line_search_enabled: bool
     line_search_iterations: int
     n_vertex_threads: int
+    has_shell: bool = False
+    max_contact_thickness: float = 0.0
 
 
 class ColorData(metaclass=AutoInitMeta):
     indices: qd.Tensor
     offsets: tuple[int, ...]
+
+
+class IterationData(metaclass=AutoInitMeta):
+    # Status entries hold the rebuild request, completed sweep count and active flag for a submission batch.
+    status: qd.Tensor
+    max_displacement: qd.Tensor | None
 
 
 def array_to_field(values, dtype, element_shape=()):
@@ -65,7 +76,6 @@ def color_vertices(offsets, neighbors):
 
 class VertexData(metaclass=AutoInitMeta):
     pos: qd.Tensor
-    rest_pos: qd.Tensor
     vel: qd.Tensor
     prev: qd.Tensor
     collision_origin: qd.Tensor
@@ -75,19 +85,15 @@ class VertexData(metaclass=AutoInitMeta):
     is_fixed: qd.Tensor
     fixed_pos: qd.Tensor
     bound: qd.Tensor
-    motion_budget: qd.Tensor
     mass: qd.Tensor
     radius: qd.Tensor
-    edge_length: qd.Tensor
+    is_volume: qd.Tensor
     friction: qd.Tensor
     entity_idx: qd.Tensor
     elem_offsets: qd.Tensor
     elem_entries: qd.Tensor
     hinge_offsets: qd.Tensor
     hinge_entries: qd.Tensor | None
-    neighbor_offsets: qd.Tensor
-    neighbors: qd.Tensor
-    entity_mass: qd.Tensor
 
 
 class ElementData(metaclass=AutoInitMeta):
@@ -121,3 +127,27 @@ class PlaneData(metaclass=AutoInitMeta):
     normal: qd.Tensor | None
     offset: qd.Tensor | None
     n_planes: int
+
+
+class CollisionData(metaclass=AutoInitMeta):
+    surface_indices: qd.Tensor
+    faces: qd.Tensor
+    edges: qd.Tensor
+    face_edges: qd.Tensor
+    edge_faces: qd.Tensor
+    vertex_faces: qd.Tensor
+    neighbor_offsets: qd.Tensor
+    neighbors: qd.Tensor
+    face_tets: qd.Tensor
+    tet_indices: qd.Tensor | None
+    tet_neighbors: qd.Tensor | None
+    intersected_tets: qd.Tensor
+    contact_faces: qd.Tensor
+    translation: qd.Tensor | None
+    translation_bound: qd.Tensor | None
+    has_contact: qd.Tensor | None
+    entity_mass: qd.Tensor | None
+    n_faces: int
+    n_edges: int
+    n_tets: int
+    has_shell: bool

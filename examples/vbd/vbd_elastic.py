@@ -87,7 +87,7 @@ def main():
     parser.add_argument("--poisson-ratio", type=float, default=0.25)
     parser.add_argument("--density", type=float, default=360.0)
     parser.add_argument("--friction", type=float, default=0.4)
-    parser.add_argument("--contact-distance", type=float, default=0.0005)
+    parser.add_argument("--contact-distance", type=float, help="Contact activation gap in metres.")
     parser.add_argument("--tet-max-volume", type=float, default=1e-7)
     parser.add_argument(
         "--load-force", type=float, default=20.0, help="Total horizontal load in newtons before unloading."
@@ -101,6 +101,8 @@ def main():
         parser.error("The FEM/IPC baseline uses --gpu, elastic material and --scenario drop.")
     if args.solver == "ipc" and args.is_line_search_enabled:
         parser.error("--line-search controls VBD; the FEM/IPC baseline uses its own line search settings.")
+    if args.contact_distance is None:
+        args.contact_distance = 0.0005 if args.solver == "ipc" else 0.00001
     youngs_modulus = args.youngs_modulus
     if youngs_modulus is None:
         youngs_modulus = 10000.0 if args.scenario == "drop" else 100000.0

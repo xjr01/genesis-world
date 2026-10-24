@@ -3,6 +3,8 @@ import quadrants as qd
 import genesis as gs
 from genesis.utils.array_class import ErrorCode, V_ANNOTATION
 
+from .collision import contact_geometry
+
 
 @qd.func
 def wrapped_angle(angle):
@@ -81,29 +83,39 @@ def element_response(i_e, i_local, i_b, trial, vertices: V_ANNOTATION, elements:
 
 
 @qd.func
-def barrier(gap, stiffness, d_hat):
-    energy, gradient, hessian = 0.0, 0.0, 0.0
-    if gap <= 0.0:
-        energy = 1e30
-    elif gap < d_hat:
-        delta = gap - d_hat
-        log_gap = qd.log(gap / d_hat)
-        energy = -stiffness * delta**2 * log_gap
-        gradient = -stiffness * (2.0 * delta * log_gap + delta**2 / gap)
-        hessian = -stiffness * (2.0 * log_gap + 4.0 * delta / gap - (delta / gap) ** 2)
-    return energy, gradient, hessian
+def contact_potential(gap, stiffness, distance, is_shell):
+    energy, slope, curvature = 0.0, 0.0, 0.0
+    if gap < distance:
+        penetration = distance - gap
+        energy = 0.5 * stiffness * penetration**2
+        slope, curvature = -stiffness * penetration, stiffness
+        if is_shell and 1e-5 < gap < 0.5 * distance:
+            tau = 0.5 * distance
+            coefficient = 0.5 * tau**2 * stiffness
+            energy = coefficient * (qd.log(tau / gap) + 1.0 / distance)
+            slope, curvature = -coefficient / gap, coefficient / gap**2
+    return energy, slope, curvature
 
 
 @qd.func
-def contact_response(displacement, normal, gap, stiffness, friction, normal_load, d_hat, epsilon):
-    energy, slope, curvature = barrier(gap, stiffness, d_hat)
-    tangent = displacement - normal * displacement.dot(normal)
-    distance = qd.sqrt(tangent.norm_sqr() + epsilon**2)
-    projector = qd.Matrix.identity(gs.qd_float, 3) - normal.outer_product(normal)
-    energy += friction * normal_load * (distance - epsilon)
-    gradient = slope * normal + friction * normal_load / distance * tangent
+def contact_response(displacement, normal, gap, stiffness, friction, distance, epsilon, is_shell):
+    energy, slope, curvature = contact_potential(gap, stiffness, distance, is_shell)
+    gradient = slope * normal
     hessian = curvature * normal.outer_product(normal)
-    hessian += friction * normal_load * (projector / distance - tangent.outer_product(tangent) / distance**3)
+    if slope < 0.0 and friction > 0.0:
+        tangent = displacement - normal * displacement.dot(normal)
+        length = tangent.norm()
+        if length > 0.0:
+            factor = 1.0 / length
+            potential = length - epsilon / 3.0
+            if length < epsilon:
+                factor = (2.0 - length / epsilon) / epsilon
+                potential = length**2 / epsilon - length**3 / (3.0 * epsilon**2)
+            load = -friction * slope
+            energy += load * potential
+            gradient += load * factor * tangent
+            # Lagging the tangent direction gives a positive semi-definite (PSD) friction approximation.
+            hessian += load * factor * (qd.Matrix.identity(gs.qd_float, 3) - normal.outer_product(normal))
     return energy, gradient, hessian
 
 
@@ -120,60 +132,9 @@ def predict(dt: float, gravity: qd.Tensor, vertices: V_ANNOTATION, errno: qd.Ten
 
 
 @qd.kernel
-def update_translation(
-    mean_displacement: qd.Tensor,
-    fixed_translation: qd.Tensor,
-    vertices: V_ANNOTATION,
-    is_prediction: qd.template(),
-):
-    for i_entity, i_b in mean_displacement:
-        mean_displacement[i_entity, i_b] = qd.Vector.zero(gs.qd_float, 3)
-        fixed_translation[i_entity, i_b] = qd.Vector.zero(gs.qd_float, 4)
+def prepare_prediction(vertices: V_ANNOTATION):
     for i_v, i_b in vertices.pos:
-        i_entity = vertices.entity_idx[i_v]
-        weight = vertices.mass[i_v] / vertices.entity_mass[i_entity]
-        displacement = vertices.target[i_v, i_b] - vertices.pos[i_v, i_b]
-        if qd.static(is_prediction):
-            displacement = vertices.next_pos[i_v, i_b] - vertices.pos[i_v, i_b]
-        mean_displacement[i_entity, i_b] += weight * displacement
-        if vertices.is_fixed[i_v, i_b]:
-            fixed_translation[i_entity, i_b] += weight * qd.Vector(
-                [displacement[0], displacement[1], displacement[2], 1.0]
-            )
-    for i_entity, i_b in mean_displacement:
-        if fixed_translation[i_entity, i_b][3] > 0.0:
-            mean_displacement[i_entity, i_b] = (
-                fixed_translation[i_entity, i_b][:3] / fixed_translation[i_entity, i_b][3]
-            )
-
-
-@qd.kernel
-def prepare_prediction(
-    mean_displacement: qd.Tensor,
-    vertices: V_ANNOTATION,
-    planes: V_ANNOTATION,
-    d_hat: float,
-    errno: qd.Tensor,
-):
-    for i_v, i_b in vertices.pos:
-        pos = vertices.pos[i_v, i_b]
-        translation = mean_displacement[vertices.entity_idx[i_v], i_b]
-        relative = vertices.target[i_v, i_b] - pos - translation
-        fraction = qd.cast(1.0, gs.qd_float)
-        if not vertices.is_fixed[i_v, i_b]:
-            limit = qd.max(2.0 * d_hat, 0.25 * vertices.edge_length[i_v])
-            fraction = qd.min(1.0, 0.9 * limit / qd.max(relative.norm(), 1e-30))
-        guess = pos + translation + fraction * relative
-        if qd.static(planes.n_planes > 0):
-            for i_p in range(planes.n_planes):
-                normal = planes.normal[i_p]
-                gap = pos.dot(normal) - planes.offset[i_p] - vertices.radius[i_v]
-                if gap <= 0.0:
-                    qd.atomic_or(errno[None], ErrorCode.INVALID_VBD_CONTACT)
-                clearance = qd.min(0.1 * d_hat, 0.1 * gap)
-                predicted_gap = guess.dot(normal) - planes.offset[i_p] - vertices.radius[i_v]
-                guess += qd.max(0.0, clearance - predicted_gap) * normal
-        vertices.next_pos[i_v, i_b] = guess
+        vertices.next_pos[i_v, i_b] = vertices.target[i_v, i_b]
 
 
 @qd.func
@@ -224,28 +185,7 @@ def limit_prediction(
 
 
 @qd.kernel
-def limit_initialization(
-    scale: qd.Tensor,
-    mean_displacement: qd.Tensor,
-    vertices: V_ANNOTATION,
-    elements: V_ANNOTATION,
-    planes: V_ANNOTATION,
-    errno: qd.Tensor,
-):
-    for i_v, i_b in vertices.pos:
-        pos = vertices.pos[i_v, i_b]
-        direction = vertices.next_pos[i_v, i_b] - pos
-        relative_motion = (direction - mean_displacement[vertices.entity_idx[i_v], i_b]).norm()
-        fraction = qd.min(1.0, 0.9 * vertices.motion_budget[i_v, i_b] / qd.max(relative_motion, 1e-30))
-        if qd.static(planes.n_planes > 0):
-            for i_p in range(planes.n_planes):
-                normal = planes.normal[i_p]
-                gap = pos.dot(normal) - planes.offset[i_p] - vertices.radius[i_v]
-                if gap <= 0.0:
-                    qd.atomic_or(errno[None], ErrorCode.INVALID_VBD_CONTACT)
-                if direction.dot(normal) < 0.0:
-                    fraction = qd.min(fraction, 0.9 * qd.max(gap, 0.0) / -direction.dot(normal))
-        qd.atomic_min(scale[vertices.entity_idx[i_v], i_b], fraction)
+def limit_initialization(scale: qd.Tensor, vertices: V_ANNOTATION, elements: V_ANNOTATION, errno: qd.Tensor):
     for i_e, i_b in elements.plastic_strain:
         first = elements.indices[i_e][0]
         fraction = prediction_fraction(i_e, i_b, vertices, elements, errno)
@@ -253,13 +193,36 @@ def limit_initialization(
 
 
 @qd.kernel
-def apply_prediction(scale: qd.Tensor, mean_displacement: qd.Tensor, vertices: V_ANNOTATION, errno: qd.Tensor):
+def apply_prediction(
+    is_shell: bool, scale: qd.Tensor, vertices: V_ANNOTATION, collision: V_ANNOTATION, errno: qd.Tensor
+):
     for i_v, i_b in vertices.pos:
-        if errno[None] == 0:
+        if (errno[None] & ErrorCode.INVALID_VBD_STATE) == 0 and vertices.is_volume[i_v] != is_shell:
             fraction = scale[vertices.entity_idx[i_v], i_b]
-            vertices.pos[i_v, i_b] += fraction * (vertices.next_pos[i_v, i_b] - vertices.pos[i_v, i_b])
-            # A common translation preserves every self-contact distance and consumes no relative motion budget.
-            vertices.collision_origin[i_v, i_b] += fraction * mean_displacement[vertices.entity_idx[i_v], i_b]
+            displacement = fraction * (vertices.next_pos[i_v, i_b] - vertices.pos[i_v, i_b])
+            if qd.static(collision.has_shell):  # noqa: SIM102
+                if is_shell:
+                    translation = qd.Vector.zero(gs.qd_float, 3)
+                    i_entity = vertices.entity_idx[i_v]
+                    if collision.translation[i_entity, i_b][3] == 0.0 and not collision.has_contact[i_entity, i_b]:
+                        translation = collision.translation[i_entity, i_b][:3] * fraction
+                        translation *= qd.min(
+                            1.0, collision.translation_bound[i_entity, i_b] / qd.max(translation.norm(), 1e-30)
+                        )
+                    # Common translation preserves self-distances; external clearance bounds the moving frame.
+                    vertices.collision_origin[i_v, i_b] += translation
+                    vertices.bound[i_v, i_b] = qd.min(
+                        vertices.bound[i_v, i_b],
+                        qd.max(0.0, collision.translation_bound[i_entity, i_b] - translation.norm()),
+                    )
+                    if not vertices.is_fixed[i_v, i_b]:
+                        if collision.has_contact[i_entity, i_b]:
+                            displacement = qd.Vector.zero(gs.qd_float, 3)
+                        else:
+                            displacement -= translation
+                            displacement *= qd.min(1.0, vertices.bound[i_v, i_b] / qd.max(displacement.norm(), 1e-30))
+                            displacement += translation
+            vertices.pos[i_v, i_b] += displacement
 
 
 @qd.func
@@ -314,18 +277,18 @@ def local_response(
         while i_p < planes.n_planes:
             normal = planes.normal[i_p]
             gap = trial.dot(normal) - planes.offset[i_p] - vertices.radius[i_v]
-            initial_gap = vertices.prev[i_v, i_b].dot(normal) - planes.offset[i_p] - vertices.radius[i_v]
-            stiffness = options.contact_stiffness * mass
-            _, slope, _ = barrier(initial_gap, stiffness, options.contact_d_hat)
+            stiffness = options.contact_stiffness
+            if qd.static(elements.has_shell) and not vertices.is_volume[i_v]:
+                stiffness = options.shell_contact_stiffness
             value, force, matrix = contact_response(
                 trial - vertices.prev[i_v, i_b],
                 normal,
                 gap,
                 stiffness,
                 vertices.friction[i_v],
-                -slope,
-                options.contact_d_hat,
-                options.friction_epsilon * dt,
+                distance=options.contact_d_hat,
+                epsilon=options.friction_epsilon * dt,
+                is_shell=False,
             )
             energy += value
             gradient += force
@@ -336,11 +299,15 @@ def local_response(
 
 @qd.kernel
 def finish(
+    pairs: qd.types.ndarray(),
+    kinds: qd.types.ndarray(),
+    batches: qd.types.ndarray(),
     dt: float,
     gravity: qd.Tensor,
     vertices: V_ANNOTATION,
     elements: V_ANNOTATION,
     hinges: V_ANNOTATION,
+    planes: V_ANNOTATION,
     errno: qd.Tensor,
 ):
     for i_v, i_b in vertices.pos:
@@ -351,6 +318,17 @@ def finish(
             vertices.vel[i_v, i_b] = qd.Vector.zero(gs.qd_float, 3)
         if qd.math.isnan(vertices.pos[i_v, i_b]).any() or qd.math.isinf(vertices.pos[i_v, i_b]).any():
             qd.atomic_or(errno[None], ErrorCode.INVALID_VBD_STATE)
+        if qd.static(planes.n_planes > 0):
+            for i_p in range(planes.n_planes):
+                gap = vertices.pos[i_v, i_b].dot(planes.normal[i_p]) - planes.offset[i_p] - vertices.radius[i_v]
+                if gap < 0.0:
+                    qd.atomic_or(errno[None], ErrorCode.VBD_CONTACT_PENETRATION)
+    for i_c in range(pairs.shape[0]):
+        _weights, _normal, gap, _displacement, is_active = contact_geometry(
+            i_c, batches[i_c], -1, qd.Vector.zero(gs.qd_float, 3), pairs, kinds, vertices
+        )
+        if is_active and gap < 0.0:
+            qd.atomic_or(errno[None], ErrorCode.VBD_CONTACT_PENETRATION)
     for i_e, i_b in elements.plastic_strain:
         if elements.is_volume[i_e]:
             F = qd.Matrix.zero(gs.qd_float, 3, 3)
@@ -361,7 +339,7 @@ def finish(
                 )
             if F.determinant() <= 0.0 or qd.math.isnan(F).any() or qd.math.isinf(F).any():
                 qd.atomic_or(errno[None], ErrorCode.INVALID_VBD_STATE)
-            elif elements.is_plastic[i_e] and errno[None] == 0:
+            elif elements.is_plastic[i_e] and (errno[None] & ErrorCode.INVALID_VBD_STATE) == 0:
                 Fe = F @ elements.plastic_inverse[i_e, i_b]
                 _rotation, sigma, V = qd.svd(Fe, gs.qd_float)
                 logarithm = qd.Vector([qd.log(sigma[0, 0]), qd.log(sigma[1, 1]), qd.log(sigma[2, 2])])
@@ -381,7 +359,7 @@ def finish(
                     elements.plastic_strain[i_e, i_b] += flow
     if qd.static(hinges.n_hinges > 0):
         for i_h, i_b in hinges.rest:
-            if hinges.is_plastic[i_h] and errno[None] == 0:
+            if hinges.is_plastic[i_h] and (errno[None] & ErrorCode.INVALID_VBD_STATE) == 0:
                 ids = hinges.indices[i_h]
                 angle, _angle_gradient = hinge_angle_gradient(
                     0,

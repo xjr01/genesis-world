@@ -1,0 +1,206 @@
+{
+  "mode": "baseline",
+  "revision": "2776a1fc189ce85b528195f97383058c1993ec30",
+  "genesis_path": "D:\\DavidX\\genesis-world-demos\\genesis\\__init__.py",
+  "platform": "Windows-10-10.0.26300-SP0",
+  "python": "3.11.15 | packaged by Anaconda, Inc. | (main, Jun 11 2026, 15:12:53) [MSC v.1942 64 bit (AMD64)]",
+  "torch": "2.12.1+cu126",
+  "device": "NVIDIA GeForce RTX 4090",
+  "asset": "meshes/jelly/remeshed.obj",
+  "asset_sha256": "d5b2a11cdc686a4af8922879b2303c0b19bbb3ec2ced7eca82ca2b97cb0a0827",
+  "vertices": 20119,
+  "tetrahedra": 82373,
+  "surface_triangles": 25476,
+  "threads_per_vertex": 8,
+  "color_sizes": [
+    3819,
+    3622,
+    3522,
+    2854,
+    1865,
+    1238,
+    1108,
+    1035,
+    730,
+    286,
+    39,
+    1
+  ],
+  "frame_dt": 0.005,
+  "substeps": 2,
+  "iteration_limit": 100,
+  "convergence_tolerance": 0.0,
+  "precision": "32",
+  "material_model": "log_neohookean",
+  "youngs_modulus": 10000.0,
+  "poisson_ratio": 0.25,
+  "density": 360.0,
+  "friction": 0.4,
+  "contact_distance": 0.0005,
+  "is_line_search_enabled": false,
+  "line_search_iterations": 12,
+  "warmup_frames": 15,
+  "measured_frames_per_repeat": 30,
+  "repeats": 1,
+  "mean_frame_ms": 92.43829666520469,
+  "median_frame_ms": 86.47660000133328,
+  "p95_frame_ms": 120.00835500657554,
+  "total_device_ms": null,
+  "final_minimum_height": 0.0002790484868455678,
+  "final_minimum_volume_ratio": 0.9816758034733886,
+  "timings": [
+    {
+      "repeat": 1,
+      "frame": 1,
+      "milliseconds": 83.67600000929087
+    },
+    {
+      "repeat": 1,
+      "frame": 2,
+      "milliseconds": 89.27490000496618
+    },
+    {
+      "repeat": 1,
+      "frame": 3,
+      "milliseconds": 84.69810002134182
+    },
+    {
+      "repeat": 1,
+      "frame": 4,
+      "milliseconds": 84.49949999339879
+    },
+    {
+      "repeat": 1,
+      "frame": 5,
+      "milliseconds": 89.73560002050363
+    },
+    {
+      "repeat": 1,
+      "frame": 6,
+      "milliseconds": 85.1838999951724
+    },
+    {
+      "repeat": 1,
+      "frame": 7,
+      "milliseconds": 83.42119998997077
+    },
+    {
+      "repeat": 1,
+      "frame": 8,
+      "milliseconds": 81.97189998463728
+    },
+    {
+      "repeat": 1,
+      "frame": 9,
+      "milliseconds": 83.7220000103116
+    },
+    {
+      "repeat": 1,
+      "frame": 10,
+      "milliseconds": 84.35070002451539
+    },
+    {
+      "repeat": 1,
+      "frame": 11,
+      "milliseconds": 98.30270000384189
+    },
+    {
+      "repeat": 1,
+      "frame": 12,
+      "milliseconds": 143.87049997458234
+    },
+    {
+      "repeat": 1,
+      "frame": 13,
+      "milliseconds": 125.74499999755062
+    },
+    {
+      "repeat": 1,
+      "frame": 14,
+      "milliseconds": 112.9969000176061
+    },
+    {
+      "repeat": 1,
+      "frame": 15,
+      "milliseconds": 110.9291999891866
+    },
+    {
+      "repeat": 1,
+      "frame": 16,
+      "milliseconds": 92.95799999381416
+    },
+    {
+      "repeat": 1,
+      "frame": 17,
+      "milliseconds": 86.41359998728149
+    },
+    {
+      "repeat": 1,
+      "frame": 18,
+      "milliseconds": 86.53960001538508
+    },
+    {
+      "repeat": 1,
+      "frame": 19,
+      "milliseconds": 84.6851000096649
+    },
+    {
+      "repeat": 1,
+      "frame": 20,
+      "milliseconds": 82.46819998021238
+    },
+    {
+      "repeat": 1,
+      "frame": 21,
+      "milliseconds": 83.4620000096038
+    },
+    {
+      "repeat": 1,
+      "frame": 22,
+      "milliseconds": 83.12500000465661
+    },
+    {
+      "repeat": 1,
+      "frame": 23,
+      "milliseconds": 84.44219999364577
+    },
+    {
+      "repeat": 1,
+      "frame": 24,
+      "milliseconds": 92.62219999800436
+    },
+    {
+      "repeat": 1,
+      "frame": 25,
+      "milliseconds": 101.85499998624437
+    },
+    {
+      "repeat": 1,
+      "frame": 26,
+      "milliseconds": 91.43569998559542
+    },
+    {
+      "repeat": 1,
+      "frame": 27,
+      "milliseconds": 84.57219999399967
+    },
+    {
+      "repeat": 1,
+      "frame": 28,
+      "milliseconds": 93.2312999793794
+    },
+    {
+      "repeat": 1,
+      "frame": 29,
+      "milliseconds": 92.59129999554716
+    },
+    {
+      "repeat": 1,
+      "frame": 30,
+      "milliseconds": 90.36939998622984
+    }
+  ],
+  "kernels": [],
+  "lines": [],
+  "substep_counts": []
+}

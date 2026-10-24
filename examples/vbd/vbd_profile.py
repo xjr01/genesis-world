@@ -85,6 +85,8 @@ class ProfileReport:
     density: float
     friction: float
     contact_distance: float
+    contact_stiffness: float
+    contact_search_radius: float
     is_line_search_enabled: bool
     line_search_iterations: int
     warmup_frames: int
@@ -126,7 +128,7 @@ class SolverLineTimer:
             self.previous_line = frame.f_lineno - self.first_line
             self.hits[self.previous_line] += 1
         elif event == "return":
-            self.substeps.append(SubstepCounts(frame.f_locals["iteration"] + 1, frame.f_locals["n_contacts"]))
+            self.substeps.append(SubstepCounts(frame.f_locals["iteration"], frame.f_locals["n_contacts"]))
             self.previous_line = None
         self.previous_tick = time.perf_counter_ns()
         return self.trace
@@ -146,6 +148,7 @@ def main():
         help="Enable local energy backtracking at extra cost.",
     )
     parser.add_argument("--tolerance", type=float, default=1e-7)
+    parser.add_argument("--contact-distance", type=float, default=0.00001, help="Contact activation gap in metres.")
     parser.add_argument("--output-dir", type=Path, default=Path("out/vbd/profile"))
     args = parser.parse_args()
     if min(args.steps, args.warmup, args.repeats, args.iterations) <= 0:
@@ -173,7 +176,7 @@ def main():
         vbd_options=gs.options.VBDOptions(
             iterations=args.iterations,
             convergence_tolerance=args.tolerance,
-            contact_d_hat=0.0005,
+            contact_d_hat=args.contact_distance,
             is_line_search_enabled=args.is_line_search_enabled,
         ),
         viewer_options=gs.options.ViewerOptions(
@@ -228,6 +231,7 @@ def main():
             flush=True,
         )
     stem = f"{args.mode}_i{args.iterations}_tol{args.tolerance:g}_ls{'on' if args.is_line_search_enabled else 'off'}"
+    stem += f"_gap{args.contact_distance:g}"
     if args.mode == "python":
         python_profiler.dump_stats(args.output_dir / f"{stem}.pstats")
         with (args.output_dir / f"{stem}.txt").open("w", encoding="utf-8") as stream:
@@ -240,11 +244,11 @@ def main():
             "solve_colors",
             "solve_color",
             "apply_color",
-            "find_contacts",
+            "find_volume_contacts",
+            "find_shell_contacts",
+            "initialize_shell_bounds",
             "kernel_refit_bvh",
-            "refresh_contacts",
             "update_bounds",
-            "update_translation",
             "predict",
             "prepare_prediction",
             "limit_prediction",
@@ -274,46 +278,48 @@ def main():
     final_edges = final_positions[elements[:, 1:]] - final_positions[elements[:, :1]]
     volume_ratio = np.linalg.det(final_edges) / np.linalg.det(rest_edges)
     report = ProfileReport(
-        args.mode,
-        revision,
-        gs.__file__,
-        platform.platform(),
-        sys.version,
-        torch.__version__,
-        torch.cuda.get_device_name(),
-        asset.relative_to(Path(gs.__file__).parent / "assets").as_posix(),
-        hashlib.sha256(asset.read_bytes()).hexdigest(),
-        entity.n_vertices,
-        entity.n_elements,
-        len(mesh.faces),
-        scene.vbd_solver.config.n_vertex_threads,
-        np.diff(scene.vbd_solver.colors.offsets).tolist(),
-        scene.dt,
-        scene.sim.substeps,
-        args.iterations,
-        args.tolerance,
-        "32",
-        "log_neohookean",
-        entity.material.E,
-        entity.material.nu,
-        entity.material.rho,
-        entity.material.friction_mu,
-        scene.vbd_options.contact_d_hat,
-        scene.vbd_options.is_line_search_enabled,
-        scene.vbd_options.line_search_iterations,
-        args.warmup,
-        args.steps,
-        args.repeats,
-        np.mean([row.milliseconds for row in timings]),
-        np.median([row.milliseconds for row in timings]),
-        np.percentile([row.milliseconds for row in timings], 95),
-        total_device_ms,
-        float(final_positions[:, 2].min()),
-        float(volume_ratio.min()),
-        timings,
-        kernels,
-        lines,
-        line_timer.substeps,
+        mode=args.mode,
+        revision=revision,
+        genesis_path=gs.__file__,
+        platform=platform.platform(),
+        python=sys.version,
+        torch=torch.__version__,
+        device=torch.cuda.get_device_name(),
+        asset=asset.relative_to(Path(gs.__file__).parent / "assets").as_posix(),
+        asset_sha256=hashlib.sha256(asset.read_bytes()).hexdigest(),
+        vertices=entity.n_vertices,
+        tetrahedra=entity.n_elements,
+        surface_triangles=len(mesh.faces),
+        threads_per_vertex=scene.vbd_solver.config.n_vertex_threads,
+        color_sizes=np.diff(scene.vbd_solver.colors.offsets).tolist(),
+        frame_dt=scene.dt,
+        substeps=scene.sim.substeps,
+        iteration_limit=args.iterations,
+        convergence_tolerance=args.tolerance,
+        precision="32",
+        material_model="log_neohookean",
+        youngs_modulus=entity.material.E,
+        poisson_ratio=entity.material.nu,
+        density=entity.material.rho,
+        friction=entity.material.friction_mu,
+        contact_distance=scene.vbd_options.contact_d_hat,
+        contact_stiffness=scene.vbd_options.contact_stiffness,
+        contact_search_radius=scene.vbd_options.contact_search_radius,
+        is_line_search_enabled=scene.vbd_options.is_line_search_enabled,
+        line_search_iterations=scene.vbd_options.line_search_iterations,
+        warmup_frames=args.warmup,
+        measured_frames_per_repeat=args.steps,
+        repeats=args.repeats,
+        mean_frame_ms=np.mean([row.milliseconds for row in timings]),
+        median_frame_ms=np.median([row.milliseconds for row in timings]),
+        p95_frame_ms=np.percentile([row.milliseconds for row in timings], 95),
+        total_device_ms=total_device_ms,
+        final_minimum_height=float(final_positions[:, 2].min()),
+        final_minimum_volume_ratio=float(volume_ratio.min()),
+        timings=timings,
+        kernels=kernels,
+        lines=lines,
+        substep_counts=line_timer.substeps,
     )
     report_path = args.output_dir / f"{stem}.json"
     report_path.write_text(json.dumps(asdict(report), indent=2), encoding="utf-8")

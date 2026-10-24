@@ -78,7 +78,7 @@ def main():
     parser.add_argument("--bending-rigidity", type=float, default=5e-8)
     parser.add_argument("--no-bending", action="store_true")
     parser.add_argument("--friction", type=float, default=0.4)
-    parser.add_argument("--contact-distance", type=float, default=0.0005)
+    parser.add_argument("--contact-distance", type=float, default=0.00001)
     parser.add_argument("--benchmark", action="store_true", help="Warm up 20 steps, then time five reset runs.")
     parser.add_argument("-o", "--output-dir", type=Path, default=Path("out/vbd"))
     args = parser.parse_args()
