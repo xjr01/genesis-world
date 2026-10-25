@@ -15,6 +15,7 @@ class VBDConfig(metaclass=AutoInitMeta):
     contact_stiffness: float
     shell_contact_stiffness: float
     convergence_tolerance: float
+    is_contact_diagnostics_enabled: bool
     is_line_search_enabled: bool
     line_search_iterations: int
     n_vertex_threads: int
@@ -103,6 +104,7 @@ class ElementData(metaclass=AutoInitMeta):
     mu: qd.Tensor
     lam: qd.Tensor
     is_volume: qd.Tensor
+    is_log_neohookean: qd.Tensor | None
     is_plastic: qd.Tensor
     yield_strain: qd.Tensor
     hardening: qd.Tensor
@@ -110,6 +112,7 @@ class ElementData(metaclass=AutoInitMeta):
     plastic_strain: qd.Tensor
     has_shell: bool
     has_plastic: bool
+    has_log_neohookean: bool
 
 
 class HingeData(metaclass=AutoInitMeta):
@@ -140,6 +143,8 @@ class CollisionData(metaclass=AutoInitMeta):
     neighbors: qd.Tensor
     face_tets: qd.Tensor
     tet_indices: qd.Tensor | None
+    # Reference volume scales the containment determinant threshold with each tetrahedron's size.
+    tet_min_determinant: qd.Tensor | None
     tet_neighbors: qd.Tensor | None
     intersected_tets: qd.Tensor
     contact_faces: qd.Tensor

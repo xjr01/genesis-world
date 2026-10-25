@@ -6,6 +6,10 @@ vertex. Vertex coloring runs during scene construction.
 
 ## Execution
 
+The default convergence tolerance is zero: every substep runs its configured iteration count, with the convergence
+reduction and maximum-displacement scalar compiled out. Pure-volume scenes submit that budget without reading
+iteration statistics back to the host. Shell scenes retain status checks to refresh contact candidates as needed.
+
 Each active graph replay executes the ordered color passes. Contact geometry is evaluated at each vertex's current
 trial position. Each pass solves its vertices and applies their positions with a global barrier before the next
 color reads them. The accepted
@@ -18,7 +22,8 @@ the leader's sums.
 Fixed vertices and padded lanes participate in the collectives. With line search enabled, a warp-wide vote keeps
 the loop active until all groups finish backtracking. This permits independent acceptance decisions per vertex.
 
-The host submits batches of 1, 2, 4 and up to 8 sweeps, capped by the remaining iteration budget. Device-side checks
+For shells or a positive convergence tolerance, the host submits batches of 1, 2, 4 and up to 8 sweeps, capped by the
+remaining iteration budget. Device-side checks
 stop updates on the first converged sweep, contact rebuild request or fatal state error. The host reads the completed
 count and control flags once per batch. Rebuilding resets the batch size to one, keeping checks responsive during frequent
 contact changes. The device gate preserves the per-sweep stopping decision while later queued sweeps remain idle.
@@ -32,6 +37,27 @@ replay and conditional loops. The RTX 4090 supports graph replay; its conditiona
 fallback. This solver captures each color sweep and batches its submissions with device-side update gating. The
 [subgroup guide](https://genesis-embodied-ai.github.io/quadrants/user_guide/subgroup.html) describes the cooperative
 operations used for vertex reductions.
+
+## Optional diagnostics
+
+The elastic and shell examples measure frame times, synchronize CUDA for timing, inspect the final state and write
+JSON reports only with `--benchmark`. The elastic viewer retains its FPS display during ordinary runs. The separate
+`vbd_profile.py` command explicitly enables performance measurement; temporary investigation scripts in `out/` run
+only when invoked directly.
+
+Penetration diagnostics default to disabled. Set `VBDOptions.is_contact_diagnostics_enabled=True` or pass
+`--contact-diagnostics` to an example to enable geometric penetration checks and warnings. Collision detection and
+contact forces remain active in either mode. Invalid deformation and non-finite state retain their error checks.
+
+The current defaults pass all 18 CUDA float32 and all 18 CPU float64 cases in `tests/deformable/test_vbd.py`.
+Vertex controls cover pure-volume and mixed shell/volume scenes; contact tests explicitly enable penetration
+diagnostics and verify continued motion. Material tests cover fixed iterations and optional early convergence.
+Restoring the default tolerance to 1e-7 in an isolated source copy fails the contact force-balance assertion:
+0.011334 N support versus 0.011301 N weight, exceeding its 2e-5 N tolerance.
+
+A 200-frame GPU audit of the ordinary elastic example records zero iteration-statistics readbacks, zero explicit
+CUDA timing synchronizations, no maximum-displacement buffer and no frame-timing samples. Each substep executes
+20 iterations. Final minimum height is 9.971e-6 m and minimum volume ratio is 0.945321.
 
 ## Volume collision alignment
 
@@ -63,7 +89,7 @@ Finite penalty contact permits load-dependent penetration when the margin is com
 Friction is evaluated during each vertex solve from the current normal load and relative tangential displacement;
 a detected candidate contributes friction only while its normal penalty is active.
 
-Geometric penetration sets a diagnostic bit reported once per state restoration, with a warning suggesting a larger
+With contact diagnostics enabled, geometric penetration sets a bit reported once per state restoration, suggesting a larger
 `VBDOptions.contact_d_hat`. The solver continues updating after this warning. Accepted positions are checked against
 planes and the selected contact pairs, sharing contact geometry with the force calculation. The diagnostic uses the
 existing status readback. Invalid deformation and non-finite state retain their fatal error handling.
@@ -108,7 +134,7 @@ The [200-frame elastic run](collision_elastic_200.json) completes one simulated 
 
 ### Contact validation status
 
-The current solver passes all 16 CUDA float32 cases and all 16 CPU float64 cases in `tests/deformable/test_vbd.py`,
+The activation-margin snapshot passes all 16 CUDA float32 cases and all 16 CPU float64 cases in `tests/deformable/test_vbd.py`,
 covering single and batched environments, both line-search settings and fixed or early-converged iteration budgets.
 
 The contact test includes a thin fixed tetrahedron, a fast incident tetrahedron and an initially penetrating
@@ -126,8 +152,8 @@ the initially intersecting scene. These mutation runs use isolated source copies
 
 ### Activation margin measurements
 
-The current solver runs sequentially with zero and 1e-5 m activation gaps on the same RTX 4090 jelly scene, using
-30 warmup frames and three reset trials of 60 measured frames. Both settings include penetration diagnostics.
+These measurements use convergence tolerance 1e-7 m, enabled penetration diagnostics and sequential runs with zero
+and 1e-5 m activation gaps on the same RTX 4090 jelly scene, with 30 warmup frames and three reset trials of 60 measured frames.
 Compilation, resets and final-state inspection are outside synchronized frame timers.
 
 | Activation gap | Mean ms/frame | P95 ms/frame | Final minimum height, m | Final minimum volume ratio |
@@ -256,20 +282,20 @@ Run from the repository root with the Genesis Python environment:
 ```powershell
 $env:PYTHONPATH = "$PWD"
 $env:QD_OFFLINE_CACHE_FILE_PATH = "$PWD/.cache/qd_vbd_schedule"
-python examples/vbd/vbd_profile.py --mode baseline --steps 60 --warmup 30 --repeats 3 --output-dir out/vbd/scheduling/final
+python examples/vbd/vbd_profile.py --mode baseline --tolerance 1e-7 --steps 60 --warmup 30 --repeats 3 --output-dir out/vbd/scheduling/final
 python examples/vbd/vbd_profile.py --mode baseline --iterations 100 --tolerance 0 --steps 30 --warmup 15 --output-dir out/vbd/scheduling/final
 python -m pytest tests/benchmarks/test_vbd.py --backend gpu -n 0 -m benchmarks
 python -m pytest tests/deformable/test_vbd.py --backend gpu -n 0
 python -m pytest tests/deformable/test_vbd.py --backend cpu -n 0
-python examples/vbd/vbd_elastic.py -g --steps 200 --output-dir out/vbd/scheduling/elastic
-python examples/vbd/vbd_shell.py -g --steps 200 --output-dir out/vbd/scheduling/shell
+python examples/vbd/vbd_elastic.py -g --benchmark --steps 200 --output-dir out/vbd/scheduling/elastic
+python examples/vbd/vbd_shell.py -g --benchmark --steps 200 --output-dir out/vbd/scheduling/shell
 ```
 
 Reproduce the activation-gap comparison with:
 
 ```powershell
-python examples/vbd/vbd_profile.py --mode baseline --contact-distance 0 --steps 60 --warmup 30 --repeats 3 --output-dir out/vbd/contact_margin/profile
-python examples/vbd/vbd_profile.py --mode baseline --contact-distance 0.00001 --steps 60 --warmup 30 --repeats 3 --output-dir out/vbd/contact_margin/profile
+python examples/vbd/vbd_profile.py --mode baseline --tolerance 1e-7 --contact-diagnostics --contact-distance 0 --steps 60 --warmup 30 --repeats 3 --output-dir out/vbd/contact_margin/profile
+python examples/vbd/vbd_profile.py --mode baseline --tolerance 1e-7 --contact-diagnostics --contact-distance 0.00001 --steps 60 --warmup 30 --repeats 3 --output-dir out/vbd/contact_margin/profile
 ```
 
 The managed Windows shell also required `PROCESSOR_ARCHITECTURE=AMD64` for py-cpuinfo.

@@ -94,6 +94,7 @@ class VBDSolver(Solver):
             options.contact_stiffness,
             options.shell_contact_stiffness,
             options.convergence_tolerance,
+            options.is_contact_diagnostics_enabled,
             options.is_line_search_enabled,
             options.line_search_iterations,
             n_vertex_threads=8 if gs.backend == gs.cuda else 1,
@@ -136,6 +137,7 @@ class VBDSolver(Solver):
         measure = np.empty(n_elements, dtype=gs.np_float)
         mu, lam = np.empty_like(measure), np.empty_like(measure)
         is_volume = np.empty(n_elements, dtype=gs.np_bool)
+        is_log_neohookean = np.zeros(n_elements, dtype=gs.np_bool)
         is_vertex_volume = np.empty(n_vertices, dtype=gs.np_bool)
         is_plastic = np.zeros(n_elements, dtype=gs.np_bool)
         yield_strain, hardening = np.zeros_like(measure), np.zeros_like(measure)
@@ -208,6 +210,7 @@ class VBDSolver(Solver):
                 mu[es] = material.E / (2 * (1 + material.nu))
                 lam[es] = material.E * material.nu / ((1 + material.nu) * (1 - 2 * material.nu))
                 density = material.rho
+                is_log_neohookean[es] = material.model == "log_neohookean"
                 is_plastic[es] = material.is_volume_plasticity_enabled
                 yield_strain[es] = np.log1p(material.volume_yield_strain_percent / 100)
                 hardening[es] = material.volume_plastic_hardening
@@ -279,6 +282,7 @@ class VBDSolver(Solver):
             array_to_field(mu, gs.qd_float),
             array_to_field(lam, gs.qd_float),
             array_to_field(is_volume, gs.qd_bool),
+            array_to_field(is_log_neohookean, gs.qd_bool) if is_log_neohookean.any() else None,
             array_to_field(is_plastic, gs.qd_bool),
             array_to_field(yield_strain, gs.qd_float),
             array_to_field(hardening, gs.qd_float),
@@ -286,6 +290,7 @@ class VBDSolver(Solver):
             array_to_field(np.zeros((n_elements, self._B)), gs.qd_float),
             bool((~is_volume).any()),
             bool(is_plastic.any()),
+            bool(is_log_neohookean.any()),
         )
         self.hinges = HingeData(
             array_to_field(hinges, gs.qd_int, element_shape=(4,)),
@@ -379,6 +384,7 @@ class VBDSolver(Solver):
             array_to_field(surface_pairs[order, 1], gs.qd_int),
             array_to_field(face_tets, gs.qd_int),
             array_to_field(tets, gs.qd_int, element_shape=(4,)),
+            array_to_field(6.0 * self.options.contact_min_volume_ratio * measure[is_volume], gs.qd_float),
             array_to_field(tet_neighbors.reshape(len(tets), 4), gs.qd_int, element_shape=(4,)),
             V(gs.qd_int, (len(surface_indices), self._B)),
             V(gs.qd_int, (len(surface_indices), self._B)),
@@ -442,13 +448,11 @@ class VBDSolver(Solver):
         prepare_prediction(self.vertices)
         for _ in range(32):
             self.prediction_correction.fill(0)
-            limit_prediction(
-                self.prediction_scale, self.prediction_correction, self.vertices, self.elements, self.errno
-            )
+            limit_prediction(self.prediction_scale, self.prediction_correction, self.vertices, self.elements)
             if not qd_to_numpy(self.prediction_correction, transpose=True).item():
                 break
         self.initial_scale.fill(1.0)
-        limit_initialization(self.initial_scale, self.vertices, self.elements, self.errno)
+        limit_initialization(self.initial_scale, self.vertices, self.elements)
         update_bounds(is_previous=True, is_swept=False, vertices=self.vertices, collision=self.collision, bvh=self.bvh)
         kernel_refit_bvh(self.bvh)
         if self.sim.cur_substep_global % (16 * self.sim.substeps) == 0:
@@ -485,7 +489,9 @@ class VBDSolver(Solver):
             dim=1,
         )
         is_rebuild_required = True
-        iteration, check_interval = 0, 1
+        has_iteration_control = self.config.has_shell or self.options.convergence_tolerance > 0.0
+        iteration = 0
+        check_interval = 1 if has_iteration_control else self.options.iterations
         while iteration < self.options.iterations:
             if is_rebuild_required:
                 pairs, batches = volume_pairs, volume_batches
@@ -568,6 +574,9 @@ class VBDSolver(Solver):
                     self.config,
                     self.errno,
                 )
+            if not has_iteration_control:
+                iteration += check_interval
+                break
             status = qd_to_numpy(self.iteration.status, transpose=True)
             iteration += int(status[1])
             is_rebuild_required = bool(status[0])
@@ -584,6 +593,7 @@ class VBDSolver(Solver):
             self.elements,
             self.hinges,
             self.planes,
+            self.config,
             self.errno,
         )
         validate_state(self.vertices, self.elements, self.hinges, self.errno)
@@ -602,7 +612,11 @@ class VBDSolver(Solver):
             code = qd_to_numpy(self.errno, transpose=True).item()
             if code & ErrorCode.INVALID_VBD_STATE:
                 gs.raise_exception("VBD encountered an invalid deformation. Reset the scene before continuing.")
-            if code & ErrorCode.VBD_CONTACT_PENETRATION and not self.has_warned_penetration:
+            if (
+                self.options.is_contact_diagnostics_enabled
+                and code & ErrorCode.VBD_CONTACT_PENETRATION
+                and not self.has_warned_penetration
+            ):
                 gs.logger.warning(
                     "VBD detected interpenetration. Simulation continues; consider increasing "
                     "VBDOptions.contact_d_hat to activate contact earlier."

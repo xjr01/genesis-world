@@ -37,6 +37,7 @@ class Benchmark:
     is_line_search_enabled: bool | None
     contact_d_hat: float
     contact_stiffness: float | None
+    is_contact_diagnostics_enabled: bool | None
     friction_epsilon: float
     convergence_tolerance: float | None
     youngs_modulus: float
@@ -67,6 +68,12 @@ def main():
     parser.add_argument("-v", "--vis", action="store_true")
     parser.add_argument("-s", "--steps", type=int, default=200)
     parser.add_argument("--solver", choices=("vbd", "ipc"), default="vbd")
+    parser.add_argument(
+        "--material-model",
+        choices=("stable_neohookean", "log_neohookean"),
+        default="stable_neohookean",
+        help="VBD constitutive model: stable permits inversion recovery; log resists collapse and requires J > 0.",
+    )
     parser.add_argument("--scenario", choices=("drop", "load_unload"), default="drop")
     parser.add_argument("--precision", choices=("32", "64"), default="32")
     parser.add_argument(
@@ -79,20 +86,28 @@ def main():
         action="store_true",
         help="Enable local energy backtracking at extra cost.",
     )
-    parser.add_argument("--tolerance", type=float, default=1e-7)
+    parser.add_argument("--tolerance", type=float, default=0.0, help="Zero runs a fixed iteration count.")
     parser.add_argument("--plastic", action="store_true")
     parser.add_argument("--yield-strain", type=float, default=10.0)
     parser.add_argument("--hardening", type=float, default=0.0)
-    parser.add_argument("--youngs-modulus", type=float, help="Pa; defaults to 10000 for drop, 100000 for load_unload.")
+    parser.add_argument("--youngs-modulus", type=float, default=10000.0, help="Pa; default to 10000.")
     parser.add_argument("--poisson-ratio", type=float, default=0.25)
     parser.add_argument("--density", type=float, default=360.0)
     parser.add_argument("--friction", type=float, default=0.4)
     parser.add_argument("--contact-distance", type=float, help="Contact activation gap in metres.")
+    parser.add_argument(
+        "--contact-diagnostics",
+        dest="is_contact_diagnostics_enabled",
+        action="store_true",
+        help="Check for VBD penetration and report warnings at extra cost.",
+    )
     parser.add_argument("--tet-max-volume", type=float, default=1e-7)
     parser.add_argument(
         "--load-force", type=float, default=20.0, help="Total horizontal load in newtons before unloading."
     )
-    parser.add_argument("--benchmark", action="store_true", help="Warm up 20 steps, then time five reset runs.")
+    parser.add_argument(
+        "--benchmark", dest="is_benchmark", action="store_true", help="Warm up 20 steps, then time five reset runs."
+    )
     parser.add_argument("-o", "--output-dir", type=Path, default=Path("out/vbd"))
     args = parser.parse_args()
     if args.steps <= 0 or args.substeps <= 0 or args.tet_max_volume <= 0 or not np.isfinite(args.load_force):
@@ -101,13 +116,16 @@ def main():
         parser.error("The FEM/IPC baseline uses --gpu, elastic material and --scenario drop.")
     if args.solver == "ipc" and args.is_line_search_enabled:
         parser.error("--line-search controls VBD; the FEM/IPC baseline uses its own line search settings.")
+    if args.solver == "ipc" and args.is_contact_diagnostics_enabled:
+        parser.error("--contact-diagnostics controls VBD penetration warnings.")
+    if args.solver == "ipc" and args.material_model != "stable_neohookean":
+        parser.error("The FEM/IPC baseline supports --material-model stable_neohookean.")
     if args.contact_distance is None:
         args.contact_distance = 0.0005 if args.solver == "ipc" else 0.00001
     youngs_modulus = args.youngs_modulus
-    if youngs_modulus is None:
-        youngs_modulus = 10000.0 if args.scenario == "drop" else 100000.0
     gs.init(backend=gs.gpu if args.gpu else gs.cpu, precision=args.precision)
-    started = time.perf_counter()
+    if args.is_benchmark:
+        started = time.perf_counter()
     asset = Path(gs.__file__).parent / "assets" / "meshes" / "jelly" / "remeshed.obj"
     mesh = trimesh.load(asset, force="mesh", process=False)
     mesh.vertices[:, 2] += 0.015 - mesh.vertices[:, 2].min()
@@ -121,6 +139,7 @@ def main():
         nu=args.poisson_ratio,
         rho=args.density,
         friction_mu=args.friction,
+        model=args.material_model,
         is_volume_plasticity_enabled=args.plastic,
         volume_yield_strain_percent=args.yield_strain,
         volume_plastic_hardening=args.hardening,
@@ -150,15 +169,16 @@ def main():
             iterations=args.iterations,
             convergence_tolerance=args.tolerance,
             contact_d_hat=args.contact_distance,
+            is_contact_diagnostics_enabled=args.is_contact_diagnostics_enabled,
             is_line_search_enabled=args.is_line_search_enabled,
         ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(0.22, -0.28, 0.2),
             camera_lookat=(0.0, 0.0, 0.035),
         ),
-        # profiling_options=gs.options.ProfilingOptions(
-        #     show_FPS=False,
-        # ),
+        profiling_options=gs.options.ProfilingOptions(
+            show_FPS=not args.is_benchmark,
+        ),
         show_viewer=args.vis,
     )
     scene.add_entity(
@@ -176,18 +196,19 @@ def main():
         entity.set_vertex_constraints(np.flatnonzero(entity.init_positions[:, 2] < 0.016))
         loaded_indices = np.flatnonzero(entity.init_positions[:, 2] > entity.init_positions[:, 2].max() - 0.005)
     scene.build()
-    if args.gpu:
-        torch.cuda.synchronize()
-    initialization_seconds = time.perf_counter() - started
-    if args.benchmark:
+    if args.is_benchmark:
+        if args.gpu:
+            torch.cuda.synchronize()
+        initialization_seconds = time.perf_counter() - started
         for _ in range(20):
             for _ in range(scene_steps):
                 scene.step()
         scene.reset()
-    durations = []
+    durations = [] if args.is_benchmark else None
     peak_displacement = None
-    repeats = 5 if args.benchmark else 1
-    started = time.perf_counter()
+    repeats = 5 if args.is_benchmark else 1
+    if args.is_benchmark:
+        started = time.perf_counter()
     for repeat in range(repeats):
         if repeat:
             scene.reset()
@@ -195,17 +216,22 @@ def main():
             if args.scenario == "load_unload" and step == 0:
                 entity.set_vertex_forces([args.load_force / len(loaded_indices), 0.0, 0.0], loaded_indices)
             if args.scenario == "load_unload" and step == args.steps // 2:
-                positions = tensor_to_array(entity.get_state().pos)[0]
-                peak_displacement = np.linalg.norm((positions - entity.init_positions)[loaded_indices].mean(axis=0))
+                if args.is_benchmark:
+                    positions = tensor_to_array(entity.get_state().pos)[0]
+                    peak_displacement = np.linalg.norm((positions - entity.init_positions)[loaded_indices].mean(axis=0))
                 entity.clear_vertex_forces()
-            tick = time.perf_counter()
+            if args.is_benchmark:
+                tick = time.perf_counter()
             for _ in range(scene_steps):
                 scene.step()
-            if args.gpu:
-                torch.cuda.synchronize()
-            durations.append(time.perf_counter() - tick)
-        if args.benchmark:
+            if args.is_benchmark:
+                if args.gpu:
+                    torch.cuda.synchronize()
+                durations.append(time.perf_counter() - tick)
+        if args.is_benchmark:
             print(f"Run {repeat + 1}/{repeats}: mean {np.mean(durations[-args.steps :]) * 1000:.3f} ms", flush=True)
+    if not args.is_benchmark:
+        return
     elapsed = time.perf_counter() - started
     final_state = entity.get_state()
     final_positions = tensor_to_array(final_state.pos)[0]
@@ -222,7 +248,7 @@ def main():
         str(gs.device),
         torch.cuda.get_device_name() if args.gpu else "CPU",
         args.precision,
-        "log_neohookean" if args.solver == "vbd" else "stable_neohookean",
+        material.model,
         entity.n_vertices,
         entity.n_elements,
         len(mesh.faces),
@@ -234,6 +260,7 @@ def main():
         args.is_line_search_enabled if args.solver == "vbd" else None,
         args.contact_distance,
         scene.vbd_options.contact_stiffness if args.solver == "vbd" else None,
+        args.is_contact_diagnostics_enabled if args.solver == "vbd" else None,
         scene.vbd_options.friction_epsilon if args.solver == "vbd" else scene.sim.coupler_options.contact_eps_velocity,
         args.tolerance if args.solver == "vbd" else None,
         youngs_modulus,

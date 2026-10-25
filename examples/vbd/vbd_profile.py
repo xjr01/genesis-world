@@ -87,6 +87,7 @@ class ProfileReport:
     contact_distance: float
     contact_stiffness: float
     contact_search_radius: float
+    is_contact_diagnostics_enabled: bool
     is_line_search_enabled: bool
     line_search_iterations: int
     warmup_frames: int
@@ -147,8 +148,14 @@ def main():
         action="store_true",
         help="Enable local energy backtracking at extra cost.",
     )
-    parser.add_argument("--tolerance", type=float, default=1e-7)
+    parser.add_argument("--tolerance", type=float, default=0.0, help="Zero runs a fixed iteration count.")
     parser.add_argument("--contact-distance", type=float, default=0.00001, help="Contact activation gap in metres.")
+    parser.add_argument(
+        "--contact-diagnostics",
+        dest="is_contact_diagnostics_enabled",
+        action="store_true",
+        help="Check for penetration and report warnings at extra cost.",
+    )
     parser.add_argument("--output-dir", type=Path, default=Path("out/vbd/profile"))
     args = parser.parse_args()
     if min(args.steps, args.warmup, args.repeats, args.iterations) <= 0:
@@ -177,6 +184,7 @@ def main():
             iterations=args.iterations,
             convergence_tolerance=args.tolerance,
             contact_d_hat=args.contact_distance,
+            is_contact_diagnostics_enabled=args.is_contact_diagnostics_enabled,
             is_line_search_enabled=args.is_line_search_enabled,
         ),
         viewer_options=gs.options.ViewerOptions(
@@ -305,6 +313,7 @@ def main():
         contact_distance=scene.vbd_options.contact_d_hat,
         contact_stiffness=scene.vbd_options.contact_stiffness,
         contact_search_radius=scene.vbd_options.contact_search_radius,
+        is_contact_diagnostics_enabled=scene.vbd_options.is_contact_diagnostics_enabled,
         is_line_search_enabled=scene.vbd_options.is_line_search_enabled,
         line_search_iterations=scene.vbd_options.line_search_iterations,
         warmup_frames=args.warmup,

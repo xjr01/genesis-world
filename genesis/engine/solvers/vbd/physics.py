@@ -60,14 +60,29 @@ def element_response(i_e, i_local, i_b, trial, vertices: V_ANNOTATION, elements:
         cofactor = qd.Matrix.cols([F[:, 1].cross(F[:, 2]), F[:, 2].cross(F[:, 0]), F[:, 0].cross(F[:, 1])])
         J = F[:, 0].dot(cofactor[:, 0])
         a = cofactor @ g
-        if J > 0.0:
-            logarithm = qd.log(J)
-            energy = 0.5 * mu * (F.norm_sqr() - 3.0) - mu * logarithm + 0.5 * lam * logarithm**2
-            force = mu * (F @ g) + (lam * logarithm - mu) / J * a
-            curvature = qd.max(0.0, mu + lam * (1.0 - logarithm)) / J**2
-            hessian = mu * g.norm_sqr() * identity + curvature * a.outer_product(a)
+        is_log = False
+        if qd.static(elements.has_log_neohookean):
+            is_log = elements.is_log_neohookean[i_e]
+        if is_log:
+            if J > 0.0:
+                logarithm = qd.log(J)
+                # Retain the rest-energy offset so backtracking accounts for cancellation at the elastic energy scale.
+                energy = 0.5 * mu * F.norm_sqr() - mu * logarithm + 0.5 * lam * logarithm**2
+                force = mu * (F @ g) + (lam * logarithm - mu) / J * a
+                # Project the volume curvature to keep the local Hessian positive semi-definite (PSD).
+                curvature = qd.max(0.0, mu + lam * (1.0 - logarithm)) / J**2
+                hessian = mu * g.norm_sqr() * identity + curvature * a.outer_product(a)
+            else:
+                # A finite sentinel rejects out-of-domain trials during energy backtracking.
+                energy = 1e30
         else:
-            energy = 1e30
+            # This volumetric coefficient preserves the small-strain Young's modulus and Poisson's ratio.
+            volume_stiffness = lam + mu
+            delta_J = J - 1.0
+            energy = 0.5 * mu * (F.norm_sqr() - 3.0) - mu * delta_J + 0.5 * volume_stiffness * delta_J**2
+            force = mu * (F @ g) + (volume_stiffness * delta_J - mu) * a
+            # The determinant is affine in one vertex, so its second derivative vanishes in this block.
+            hessian = mu * g.norm_sqr() * identity + volume_stiffness * a.outer_product(a)
     else:
         G = 0.5 * (F.transpose() @ F - identity)
         G[2, 2] = 0.0
@@ -138,24 +153,22 @@ def prepare_prediction(vertices: V_ANNOTATION):
 
 
 @qd.func
-def prediction_fraction(i_e, i_b, vertices: V_ANNOTATION, elements: V_ANNOTATION, errno: qd.Tensor):
+def prediction_fraction(i_e, i_b, vertices: V_ANNOTATION, elements: V_ANNOTATION):
     F = qd.Matrix.zero(gs.qd_float, 3, 3)
     delta_F = F
     first = elements.indices[i_e][0]
     origin = vertices.pos[first, i_b]
     motion = vertices.next_pos[first, i_b] - origin
-    is_prescribed = vertices.is_fixed[first, i_b]
     for corner in range(1, 3 + elements.is_volume[i_e]):
         i_v = elements.indices[i_e][corner]
-        is_prescribed = is_prescribed and vertices.is_fixed[i_v, i_b]
         gradient = elements.gradient[i_e][corner, :]
         F += (vertices.pos[i_v, i_b] - origin).outer_product(gradient)
         delta_F += (vertices.next_pos[i_v, i_b] - vertices.pos[i_v, i_b] - motion).outer_product(gradient)
     fraction = qd.cast(1.0, gs.qd_float)
     if elements.is_volume[i_e]:
-        if is_prescribed and (F + delta_F).determinant() <= 0.0:
-            qd.atomic_or(errno[None], ErrorCode.INVALID_VBD_STATE)
-        fraction = qd.min(1.0, 0.9 / qd.max((F.inverse() @ delta_F).norm(), 1e-30))
+        # Limit the initial guess under concentrated loads; local solves can cross zero volume during recovery.
+        if F.determinant() != 0.0:
+            fraction = qd.min(1.0, 0.9 / qd.max((F.inverse() @ delta_F).norm(), 1e-30))
     else:
         gram = F.transpose() @ F
         eigen_min = 0.5 * (gram[0, 0] + gram[1, 1] - qd.sqrt((gram[0, 0] - gram[1, 1]) ** 2 + 4.0 * gram[0, 1] ** 2))
@@ -169,12 +182,11 @@ def limit_prediction(
     has_correction: qd.Tensor,
     vertices: V_ANNOTATION,
     elements: V_ANNOTATION,
-    errno: qd.Tensor,
 ):
     for i_v, i_b in vertices.pos:
         scales[i_v, i_b] = 1.0
     for i_e, i_b in elements.plastic_strain:
-        if prediction_fraction(i_e, i_b, vertices, elements, errno) < 1.0:
+        if prediction_fraction(i_e, i_b, vertices, elements) < 1.0:
             has_correction[None] = 1
             for corner in range(3 + elements.is_volume[i_e]):
                 qd.atomic_min(scales[elements.indices[i_e][corner], i_b], 0.5)
@@ -185,10 +197,10 @@ def limit_prediction(
 
 
 @qd.kernel
-def limit_initialization(scale: qd.Tensor, vertices: V_ANNOTATION, elements: V_ANNOTATION, errno: qd.Tensor):
+def limit_initialization(scale: qd.Tensor, vertices: V_ANNOTATION, elements: V_ANNOTATION):
     for i_e, i_b in elements.plastic_strain:
         first = elements.indices[i_e][0]
-        fraction = prediction_fraction(i_e, i_b, vertices, elements, errno)
+        fraction = prediction_fraction(i_e, i_b, vertices, elements)
         qd.atomic_min(scale[vertices.entity_idx[first], i_b], fraction)
 
 
@@ -308,6 +320,7 @@ def finish(
     elements: V_ANNOTATION,
     hinges: V_ANNOTATION,
     planes: V_ANNOTATION,
+    options: V_ANNOTATION,
     errno: qd.Tensor,
 ):
     for i_v, i_b in vertices.pos:
@@ -318,45 +331,49 @@ def finish(
             vertices.vel[i_v, i_b] = qd.Vector.zero(gs.qd_float, 3)
         if qd.math.isnan(vertices.pos[i_v, i_b]).any() or qd.math.isinf(vertices.pos[i_v, i_b]).any():
             qd.atomic_or(errno[None], ErrorCode.INVALID_VBD_STATE)
-        if qd.static(planes.n_planes > 0):
+        if qd.static(options.is_contact_diagnostics_enabled and planes.n_planes > 0):
             for i_p in range(planes.n_planes):
                 gap = vertices.pos[i_v, i_b].dot(planes.normal[i_p]) - planes.offset[i_p] - vertices.radius[i_v]
                 if gap < 0.0:
                     qd.atomic_or(errno[None], ErrorCode.VBD_CONTACT_PENETRATION)
-    for i_c in range(pairs.shape[0]):
-        _weights, _normal, gap, _displacement, is_active = contact_geometry(
-            i_c, batches[i_c], -1, qd.Vector.zero(gs.qd_float, 3), pairs, kinds, vertices
-        )
-        if is_active and gap < 0.0:
-            qd.atomic_or(errno[None], ErrorCode.VBD_CONTACT_PENETRATION)
-    for i_e, i_b in elements.plastic_strain:
-        if elements.is_volume[i_e]:
-            F = qd.Matrix.zero(gs.qd_float, 3, 3)
-            origin = vertices.pos[elements.indices[i_e][0], i_b]
-            for corner in qd.static(range(1, 4)):
-                F += (vertices.pos[elements.indices[i_e][corner], i_b] - origin).outer_product(
-                    elements.gradient[i_e][corner, :]
-                )
-            if F.determinant() <= 0.0 or qd.math.isnan(F).any() or qd.math.isinf(F).any():
-                qd.atomic_or(errno[None], ErrorCode.INVALID_VBD_STATE)
-            elif elements.is_plastic[i_e] and (errno[None] & ErrorCode.INVALID_VBD_STATE) == 0:
-                Fe = F @ elements.plastic_inverse[i_e, i_b]
-                _rotation, sigma, V = qd.svd(Fe, gs.qd_float)
-                logarithm = qd.Vector([qd.log(sigma[0, 0]), qd.log(sigma[1, 1]), qd.log(sigma[2, 2])])
-                deviator = logarithm - logarithm.sum() / 3.0
-                magnitude = deviator.norm()
-                limit = elements.yield_strain[i_e] + elements.hardening[i_e] * elements.plastic_strain[i_e, i_b]
-                flow = qd.max(0.0, magnitude - limit) / (1.0 + elements.hardening[i_e])
-                if flow > 0.0:
-                    scale = qd.exp(-flow / magnitude * deviator)
-                    correction = (
-                        V
-                        @ qd.Matrix([[scale[0], 0.0, 0.0], [0.0, scale[1], 0.0], [0.0, 0.0, scale[2]]])
-                        @ V.transpose()
+    if qd.static(options.is_contact_diagnostics_enabled):
+        for i_c in range(pairs.shape[0]):
+            _weights, _normal, gap, _displacement, is_active = contact_geometry(
+                i_c, batches[i_c], -1, qd.Vector.zero(gs.qd_float, 3), pairs, kinds, vertices
+            )
+            if is_active and gap < 0.0:
+                qd.atomic_or(errno[None], ErrorCode.VBD_CONTACT_PENETRATION)
+    if qd.static(elements.has_plastic):
+        for i_e, i_b in elements.plastic_strain:
+            if elements.is_plastic[i_e] and (errno[None] & ErrorCode.INVALID_VBD_STATE) == 0:
+                F = qd.Matrix.zero(gs.qd_float, 3, 3)
+                origin = vertices.pos[elements.indices[i_e][0], i_b]
+                for corner in qd.static(range(1, 4)):
+                    F += (vertices.pos[elements.indices[i_e][corner], i_b] - origin).outer_product(
+                        elements.gradient[i_e][corner, :]
                     )
-                    inverse = elements.plastic_inverse[i_e, i_b] @ correction
-                    elements.plastic_inverse[i_e, i_b] = inverse / inverse.determinant() ** (1.0 / 3.0)
-                    elements.plastic_strain[i_e, i_b] += flow
+                J = F.determinant()
+                if qd.math.isnan(F).any() or qd.math.isinf(F).any() or qd.math.isnan(J) or qd.math.isinf(J):
+                    qd.atomic_or(errno[None], ErrorCode.INVALID_VBD_STATE)
+                # Plastic flow resumes after elastic forces restore positive orientation.
+                elif J > 0.0:
+                    Fe = F @ elements.plastic_inverse[i_e, i_b]
+                    _rotation, sigma, V = qd.svd(Fe, gs.qd_float)
+                    logarithm = qd.Vector([qd.log(sigma[0, 0]), qd.log(sigma[1, 1]), qd.log(sigma[2, 2])])
+                    deviator = logarithm - logarithm.sum() / 3.0
+                    magnitude = deviator.norm()
+                    limit = elements.yield_strain[i_e] + elements.hardening[i_e] * elements.plastic_strain[i_e, i_b]
+                    flow = qd.max(0.0, magnitude - limit) / (1.0 + elements.hardening[i_e])
+                    if flow > 0.0:
+                        scale = qd.exp(-flow / magnitude * deviator)
+                        correction = (
+                            V
+                            @ qd.Matrix([[scale[0], 0.0, 0.0], [0.0, scale[1], 0.0], [0.0, 0.0, scale[2]]])
+                            @ V.transpose()
+                        )
+                        inverse = elements.plastic_inverse[i_e, i_b] @ correction
+                        elements.plastic_inverse[i_e, i_b] = inverse / inverse.determinant() ** (1.0 / 3.0)
+                        elements.plastic_strain[i_e, i_b] += flow
     if qd.static(hinges.n_hinges > 0):
         for i_h, i_b in hinges.rest:
             if hinges.is_plastic[i_h] and (errno[None] & ErrorCode.INVALID_VBD_STATE) == 0:
@@ -393,8 +410,13 @@ def validate_state(vertices: V_ANNOTATION, elements: V_ANNOTATION, hinges: V_ANN
             measure = F.determinant()
         inverse = elements.plastic_inverse[i_e, i_b]
         strain = elements.plastic_strain[i_e, i_b]
+        is_positive_required = not elements.is_volume[i_e]
+        if qd.static(elements.has_log_neohookean):
+            is_positive_required = is_positive_required or elements.is_log_neohookean[i_e]
         if (
-            measure <= 0.0
+            (is_positive_required and measure <= 0.0)
+            or qd.math.isnan(measure)
+            or qd.math.isinf(measure)
             or qd.math.isnan(F).any()
             or qd.math.isinf(F).any()
             or inverse.determinant() <= 0.0

@@ -31,6 +31,7 @@ class Benchmark:
     is_line_search_enabled: bool
     contact_d_hat: float
     contact_stiffness: float
+    is_contact_diagnostics_enabled: bool
     friction_epsilon: float
     convergence_tolerance: float
     thickness: float
@@ -66,7 +67,7 @@ def main():
         action="store_true",
         help="Enable local energy backtracking at extra cost.",
     )
-    parser.add_argument("--tolerance", type=float, default=1e-7)
+    parser.add_argument("--tolerance", type=float, default=0.0, help="Zero runs a fixed iteration count.")
     parser.add_argument("--plastic", action="store_true")
     parser.add_argument("--yield-angle", type=float, default=10.0)
     parser.add_argument("--hardening", type=float, default=0.0)
@@ -79,13 +80,22 @@ def main():
     parser.add_argument("--no-bending", action="store_true")
     parser.add_argument("--friction", type=float, default=0.4)
     parser.add_argument("--contact-distance", type=float, default=0.00001)
-    parser.add_argument("--benchmark", action="store_true", help="Warm up 20 steps, then time five reset runs.")
+    parser.add_argument(
+        "--contact-diagnostics",
+        dest="is_contact_diagnostics_enabled",
+        action="store_true",
+        help="Check for penetration and report warnings at extra cost.",
+    )
+    parser.add_argument(
+        "--benchmark", dest="is_benchmark", action="store_true", help="Warm up 20 steps, then time five reset runs."
+    )
     parser.add_argument("-o", "--output-dir", type=Path, default=Path("out/vbd"))
     args = parser.parse_args()
     if args.steps <= 0:
         parser.error("--steps must be positive")
     gs.init(backend=gs.gpu if args.gpu else gs.cpu, precision=args.precision)
-    started = time.perf_counter()
+    if args.is_benchmark:
+        started = time.perf_counter()
     asset = None
     if args.scenario == "jelly":
         asset = Path(gs.__file__).parent / "assets" / "meshes" / "jelly" / "remeshed.obj"
@@ -110,15 +120,16 @@ def main():
             iterations=args.iterations,
             convergence_tolerance=args.tolerance,
             contact_d_hat=args.contact_distance,
+            is_contact_diagnostics_enabled=args.is_contact_diagnostics_enabled,
             is_line_search_enabled=args.is_line_search_enabled,
         ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(0.22, -0.28, 0.2),
             camera_lookat=(0.0, 0.0, 0.035),
         ),
-        profiling_options=gs.options.ProfilingOptions(
-            show_FPS=False,
-        ),
+        # profiling_options=gs.options.ProfilingOptions(
+        #     show_FPS=False,
+        # ),
         show_viewer=args.vis,
     )
     scene.add_entity(
@@ -150,17 +161,18 @@ def main():
         entity.set_vertex_constraints(moving_indices)
         moving_rest = entity.init_positions[moving_indices].copy()
     scene.build()
-    if args.gpu:
-        torch.cuda.synchronize()
-    initialization_seconds = time.perf_counter() - started
-    if args.benchmark:
+    if args.is_benchmark:
+        if args.gpu:
+            torch.cuda.synchronize()
+        initialization_seconds = time.perf_counter() - started
         for _ in range(20):
             scene.step()
         scene.reset()
-    durations = []
+    durations = [] if args.is_benchmark else None
     minimum_height = np.inf
-    repeats = 5 if args.benchmark else 1
-    started = time.perf_counter()
+    repeats = 5 if args.is_benchmark else 1
+    if args.is_benchmark:
+        started = time.perf_counter()
     for repeat in range(repeats):
         if repeat:
             scene.reset()
@@ -173,14 +185,18 @@ def main():
                 entity.set_vertex_constraints(moving_indices, targets)
             elif args.scenario == "fold" and step == args.steps // 2:
                 entity.remove_vertex_constraints(moving_indices)
-            tick = time.perf_counter()
+            if args.is_benchmark:
+                tick = time.perf_counter()
             scene.step()
-            if args.gpu:
-                torch.cuda.synchronize()
-            durations.append(time.perf_counter() - tick)
-        minimum_height = min(minimum_height, tensor_to_array(entity.get_state().pos)[..., 2].min())
-        if args.benchmark:
+            if args.is_benchmark:
+                if args.gpu:
+                    torch.cuda.synchronize()
+                durations.append(time.perf_counter() - tick)
+        if args.is_benchmark:
+            minimum_height = min(minimum_height, tensor_to_array(entity.get_state().pos)[..., 2].min())
             print(f"Run {repeat + 1}/{repeats}: mean {np.mean(durations[-args.steps :]) * 1000:.3f} ms", flush=True)
+    if not args.is_benchmark:
+        return
     elapsed = time.perf_counter() - started
     result = Benchmark(
         asset.relative_to(Path(gs.__file__).parent / "assets").as_posix() if asset is not None else None,
@@ -196,6 +212,7 @@ def main():
         args.is_line_search_enabled,
         args.contact_distance,
         scene.vbd_options.contact_stiffness,
+        args.is_contact_diagnostics_enabled,
         scene.vbd_options.friction_epsilon,
         args.tolerance,
         args.thickness,

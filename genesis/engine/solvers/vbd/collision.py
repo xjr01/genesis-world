@@ -102,10 +102,15 @@ def next_node(node, batch, root, bvh: V_ANNOTATION):
 
 
 @qd.func
-def tetrahedron_weights(point, a, b, c, d):
+def tetrahedron_weights(point, a, b, c, d, min_determinant):
     matrix = qd.Matrix.cols([b - a, c - a, d - a])
-    bary = matrix.inverse() @ (point - a)
-    return qd.Vector([1.0 - bary.sum(), bary[0], bary[1], bary[2]])
+    determinant = matrix.determinant()
+    # Zero-volume tetrahedra have no interior for containment queries.
+    weights = qd.Vector([-1.0, -1.0, -1.0, -1.0])
+    if determinant != 0.0 and qd.abs(determinant) >= min_determinant:
+        bary = matrix.inverse() @ (point - a)
+        weights = qd.Vector([1.0 - bary.sum(), bary[0], bary[1], bary[2]])
+    return weights
 
 
 @qd.func
@@ -215,11 +220,11 @@ def traverse_tetrahedra(i_b, start, target, origin, end, vertices: V_ANNOTATION,
         ids = collision.tet_indices[current]
         a, b = vertices.prev[ids[0], i_b], vertices.prev[ids[1], i_b]
         c, d = vertices.prev[ids[2], i_b], vertices.prev[ids[3], i_b]
-        finish = tetrahedron_weights(end, a, b, c, d)
+        finish = tetrahedron_weights(end, a, b, c, d, 0.0)
         if current == target and finish.min() >= -1e-5:
             is_valid = True
             break
-        begin = tetrahedron_weights(origin, a, b, c, d)
+        begin = tetrahedron_weights(origin, a, b, c, d, 0.0)
         crossing, next_tet = qd.cast(2.0, gs.qd_float), -1
         for i in qd.static(range(4)):
             neighbor = collision.tet_neighbors[current][i]
@@ -272,13 +277,15 @@ def find_volume_contacts(
                                         vertices.prev[ids[1], i_b],
                                         vertices.prev[ids[2], i_b],
                                         vertices.prev[ids[3], i_b],
+                                        collision.tet_min_determinant[i_e],
                                     )
                                     if weights.min() > 1e-6:
                                         intersected = i_e
                             node = next_node(node, i_b, root, bvh)
                     collision.intersected_tets[i_q, i_b] = intersected
                     if intersected >= 0:
-                        qd.atomic_or(errno[None], ErrorCode.VBD_CONTACT_PENETRATION)
+                        if qd.static(options.is_contact_diagnostics_enabled):
+                            qd.atomic_or(errno[None], ErrorCode.VBD_CONTACT_PENETRATION)
                         target_ids = collision.tet_indices[intersected]
                         target_entity = vertices.entity_idx[target_ids[0]]
                         center = qd.Vector.zero(gs.qd_float, 3)
@@ -286,6 +293,7 @@ def find_volume_contacts(
                             center += 0.25 * vertices.prev[target_ids[i], i_b]
                         root, best, closest = bvh.roots_idx[0], qd.cast(1e30, gs.qd_float), -1
                         node = root
+                        n_candidates = 0
                         while node >= 0:
                             box = bvh.nodes[i_b, node].bound
                             is_overlap = point_aabb_distance_sqr(point, box.min, box.max) < best
@@ -296,7 +304,16 @@ def find_volume_contacts(
                                 if is_overlap:
                                     i_f = bvh.leaves_idx[i_b, node - bvh.n_aabbs + 1]
                                     ids = collision.faces[i_f]
-                                    if vertices.entity_idx[ids[0]] == target_entity and (ids != i_v).all():
+                                    is_eligible = vertices.entity_idx[ids[0]] == target_entity
+                                    if is_eligible:
+                                        n_candidates += 1
+                                        if n_candidates > 500:
+                                            # An incomplete search can retain a distant match with excessive penetration.
+                                            closest = -1
+                                            break
+                                        # A vertex can cross its incident tetrahedron's opposite face during recovery.
+                                        is_eligible = (collision.tet_indices[collision.face_tets[i_f]] != i_v).all()
+                                    if is_eligible:
                                         a, b, c = (
                                             vertices.prev[ids[0], i_b],
                                             vertices.prev[ids[1], i_b],
@@ -340,7 +357,10 @@ def find_volume_contacts(
                             if is_overlap:
                                 i_f = bvh.leaves_idx[i_b, node - bvh.n_aabbs + 1]
                                 ids = collision.faces[i_f]
-                                if vertices.is_volume[ids[0]] and (ids != i_v).all():
+                                is_eligible = vertices.is_volume[ids[0]]
+                                if is_eligible:
+                                    is_eligible = (collision.tet_indices[collision.face_tets[i_f]] != i_v).all()
+                                if is_eligible:
                                     previous, current = (
                                         qd.Matrix.zero(gs.qd_float, 4, 3),
                                         qd.Matrix.zero(gs.qd_float, 4, 3),
@@ -550,7 +570,7 @@ def find_shell_contacts(
                                 if not is_fill:
                                     for i in qd.static(range(4)):
                                         qd.atomic_or(collision.has_contact[vertices.entity_idx[ids[i]], i_b], 1)
-                                if distance <= thickness:
+                                if qd.static(options.is_contact_diagnostics_enabled) and distance <= thickness:
                                     qd.atomic_or(errno[None], ErrorCode.VBD_CONTACT_PENETRATION)
                                 if is_fill:
                                     index = offsets[i_q * bvh.n_batches + i_b] + count

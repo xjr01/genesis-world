@@ -18,6 +18,7 @@ Contact displacement limits and invalid-state checks remain active in both modes
 ```powershell
 python examples/vbd/vbd_shell.py -g -v
 python examples/vbd/vbd_elastic.py -g -v
+python examples/vbd/vbd_elastic.py -g -v --material-model log_neohookean
 python examples/vbd/vbd_elastic.py -g -v --solver ipc
 python examples/vbd/vbd_shell.py -g --scenario fold --plastic
 python examples/vbd/vbd_elastic.py -g --scenario load_unload --plastic --yield-strain 1
@@ -25,9 +26,13 @@ python examples/vbd/vbd_elastic.py -g --scenario load_unload --plastic --yield-s
 
 `-g` 使用 GPU，`-v` 打开查看器，`-s` 设置步数（默认 200）。省略 `-v` 可无窗口运行；省略 `-g` 使用 CPU。两个文件可以独立运行。所有 jelly 仿真统一读取 `genesis/assets/meshes/jelly/remeshed.obj`，包括薄壳、VBD 弹性体、加载卸载和 FEM/IPC 基线。资产已采用米制尺寸和 Z-up，脚本仅将底部抬高到 0.015 m。气泡装饰不参与仿真。
 
-时间步和重力由 `SimOptions` 统一控制。示例采用 `dt=0.005`、2 个子步、每子步最多 20 次迭代；`--iterations` 和 `--precision 32|64` 可用于收敛与精度对照。`--tolerance` 默认 `1e-7` 米，当所有顶点的局部校正低于此值时提前结束；设为 `0` 执行完整迭代次数。
+`SimOptions` controls the time step and gravity. Examples use `dt=0.005`, two substeps and 20 iterations per substep.
+`--iterations` and `--precision 32|64` support convergence and precision comparisons. `--tolerance` defaults to zero,
+running every iteration without a convergence reduction; a positive distance enables early stopping.
 
-弹性体下落示例默认使用 `E=10000 Pa`，便于观察果冻落地时的压缩和回振。加载卸载示例及 `VBD.Elastic` 材料本身仍默认使用 `100000 Pa`。可用 `--youngs-modulus` 显式覆盖；更高刚度缩小形变量，并提高有限迭代下的求解难度。弹性体示例还支持 `--substeps`：增加子步可减少隐式积分对振动的耗散，同时增加每帧计算量。
+The elastic example uses `E=10000 Pa` for both drop and load/unload scenarios; the `VBD.Elastic` material defaults to
+`100000 Pa`. Override this with `--youngs-modulus`. Higher stiffness reduces deformation and requires more work to converge.
+`--substeps` increases temporal resolution and reduces implicit integration damping at the cost of more work per frame.
 
 体积加载卸载场景固定底部顶点，在前半段向顶部施加总计 `--load-force` N 的水平力（默认 20 N），后半段清除。上面的塑性演示显式降低屈服阈值以产生残余形变；可省略 `--plastic` 对照弹性恢复。JSON 记录卸载前位移、末态残余位移和累积塑性应变。
 
@@ -89,17 +94,48 @@ scene.reset()
 
 ## 材料与接触约定
 
-求解器最小化隐式 Euler 的惯性能量和材料、接触能量。静态图着色使同色顶点可并行计算局部梯度和 3×3 Hessian，逐色更新位置，并用局部回溯控制能量下降。
+The solver minimizes implicit Euler inertia, material and contact energies. Graph coloring permits parallel local
+gradient and 3-by-3 Hessian evaluation, followed by updates in color order. Local energy backtracking is optional;
+`--line-search` enables it. A zero convergence tolerance runs the configured iteration count.
 
-体积材料使用可压缩 Neo-Hookean 能量：`mu=E/(2*(1+nu))`，`lambda=E*nu/((1+nu)*(1-2*nu))`，单位参考体积能量为 `mu/2*(||F||^2-3)-mu*log(J)+lambda/2*log(J)^2`。`J` 接近零时能量发散，以抵抗体积塌缩。塑性采用弹性奇异值的对数偏应变返回映射，屈服阈值为 `log(1+percent/100)`，累积塑性应变提高后续阈值。塑性变形保持体积。
+`vbd_elastic.py --material-model stable_neohookean|log_neohookean` selects the VBD constitutive law and defaults to
+`stable_neohookean`. The material API is `gs.materials.VBD.Elastic(model=...)`. Benchmark output records the selected
+model. The FEM/IPC baseline supports `stable_neohookean`.
+
+Both solid models use `mu=E/(2*(1+nu))` and `lambda=E*nu/((1+nu)*(1-2*nu))`.
+The log Neo-Hookean energy is `mu/2*(||F||^2-3)-mu*log(J)+lambda/2*log(J)^2` and requires `J>0`.
+It increasingly resists volume collapse; zero or negative volume halts the simulation. Local line search can reject
+inverted trial updates. Stable Neo-Hookean permits recovery through zero and negative volume:
+The energy per reference volume is `mu/2*(||F||^2-3)-mu*(J-1)+(lambda+mu)/2*(J-1)^2`, where `J=det(F)`.
+The volumetric coefficient preserves the small-strain interpretation of `E` and `nu`. Energy and restoring forces
+remain defined at zero and negative signed volume, permitting inversion recovery subject to constraints, loading and
+convergence. Plasticity uses logarithmic deviatoric strain return mapping, with yield threshold `log(1+percent/100)`
+and accumulated-strain hardening. Plastic flow preserves volume and updates only after positive orientation returns.
+
+Volume containment skips tetrahedra with `abs(J) < VBDOptions.contact_min_volume_ratio`, which defaults to `0.01`.
+The ratio uses each tetrahedron's original reference volume, so uniform scaling preserves the decision. Increasing
+the threshold suppresses unreliable contacts near collapse at the cost of missed contacts in compressed regions;
+zero retains every nonzero-volume tetrahedron. Material forces remain active for skipped tetrahedra.
+The surface search processes up to 500 candidates and discards the current match when this budget is exceeded.
 
 薄壳使用平面应力膜能量；独立剪切刚度添加到 Green 应变的偏量能量中。完整厚度 `t` 决定面密度 `rho*t`、膜刚度和两侧各 `t/2` 的接触半径。离散弯曲使用静止二面角和 `3*D*edge_length^2/(area_left+area_right)` 的铰链系数。折痕通过更新参考二面角产生，硬化按累积塑性转角增加屈服阈值。`bending_model=None` 使弯曲能量及其历史更新全部关闭。
 
-接触覆盖顶点—三角形、边—边及静态平面，包含对数障碍能量和正则化摩擦。`contact_d_hat` 是物理表面之外的激活间隙，与薄壳厚度分别计算。候选对使用 GPU 包围盒层次结构生成；运动受保守距离界约束。自由顶点每轮搜索的相对运动预算上限为 `max(2*contact_d_hat, 最短关联边长/4)`，兼顾接触间隙和局部网格尺度。预算耗尽时重新搜索后继续下降；较大力会增加所需迭代数。公共平移单独处理，固定点按其目标位置分配预算。塑性历史在每个已接受子步更新一次。
+Solid contacts use containment and swept vertex-face queries; shell contacts use vertex-face and edge-edge candidates.
+Static planes use analytic contact. Penalty forces include regularized friction, with `contact_d_hat` setting an
+activation gap outside the physical surface independently of shell thickness. A shell candidate limits each participating
+vertex's motion from the latest query position to `0.45*max(distance-thickness, 0)`, further bounded by the search radius.
+Vertices take the smallest candidate bound. Exhausting a bound requests another search. Zero clearance produces a zero
+bound, which can lock motion because the bound also limits separation and tangential motion. Common translation is
+handled separately when the entity has no retained shell contacts or fixed vertices.
 
-同一实体的自接触激活距离以参考形状中的物理间隙为上限，避免密集网格在静止形状中产生额外排斥力。惯性预测先逐顶点处理地面，再局部修复单元可行性；剩余限步按实体及其接触关联传播，保持独立实体的运动独立。惯性能量始终使用完整预测目标。
+Prediction limits the initial deformation change under concentrated loads while retaining the complete inertial target
+in the objective. Local solid updates can cross zero volume during recovery. A vertex's incident tetrahedra are excluded
+from its self-contact candidates, allowing recovery through an incident tetrahedron's opposite face.
 
-当前集成范围为 VBD 实体之间的接触和固定刚体 Plane；平面使用构建时的姿态，运行期间保持固定。查看器使用 Rasterizer。自动微分、其他求解器之间的双向接触和其他渲染器会明确报错。数值无效或接触交叉会在同一次 `scene.step()` 返回前报错，此后必须重置所有环境才能继续读取或推进状态。
+The integration supports contact among VBD entities and fixed rigid Plane entities at their build-time poses. The viewer
+uses Rasterizer. Unsupported differentiation, two-way contact with other solvers and other renderers raise errors.
+NaN, infinity and invalid internal state halt the step and require resetting every environment.
+Optional `--contact-diagnostics` reports interpenetration warnings; it is disabled by default.
 
 ## 性能复现
 
@@ -113,7 +149,11 @@ python examples/vbd/vbd_elastic.py -g --solver ipc --youngs-modulus 100000 --ben
 
 弹性体对照采用相同资产提取、四面体化输入、材料参数、物理子步长度和接触距离。每个采样帧是 5 ms、两个 2.5 ms 物理子步。当前 IPC 接入每次调用使用 `SimOptions.dt`，因此脚本为 IPC 构建 `dt=0.0025, substeps=1` 的场景，并在一帧内调用两次 `scene.step()`；VBD 使用 `dt=0.005, substeps=2` 并调用一次。JSON 同时记录 `dt/substeps`（采样帧）和 `scene_dt/scene_substeps`（实际场景设置）。
 
-VBD 使用对数 Neo-Hookean，FEM/IPC 使用当前接入提供的 stable Neo-Hookean，接触刚度的定义也不同。JSON 的 `precision` 是 Genesis 状态精度；当前 IPC 原生交换接口使用 float64。对照衡量当前集成在相同物理时长下的耗时和变形效果，两者的能量与收敛准则分别记录。FEM/IPC 基线限于弹性下落场景；塑性和加载卸载单独验收。
+VBD defaults to stable Neo-Hookean and also supports log Neo-Hookean. FEM/IPC uses stable Neo-Hookean, with contact laws
+and convergence rules specific to each integration.
+JSON `precision` describes Genesis state precision; the IPC native exchange interface uses float64. Comparisons measure
+runtime and deformation over equal physical durations. Archived results retain their recorded material variants and
+settings. The FEM/IPC baseline covers elastic drop scenes; plasticity and loading/unloading are validated separately.
 
 IPC 使用 libuipc 0.0.25 的原生默认求解配置：Newton 最多 1024 次、速度容差 0.05、线搜索最多 8 次、`fused_pcg` 线性求解容差 0.001。软件版本、完整采样设置及相关默认值见 [environment.json](results/environment.json)。
 
