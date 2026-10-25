@@ -143,7 +143,8 @@ blender --background --python examples/butter_cut_spread/export_blend.py -- --fi
 blender --background --python examples/butter_cut_spread/export_blend.py -- --file DISH.blend --output out/assets/dish --names DISH_OBJECT
 blender --background --python examples/butter_cut_spread/export_blend.py -- --file KNIFE.blend --output out/assets/knife --names HANDLE_OBJECT CAP_OBJECT SEAM_OBJECT FERRULE_OBJECT STEEL_OBJECT
 python -m examples.butter_cut_spread.asset_init --exports out/assets --output out/initialized
-python -m examples.butter_cut_spread.asset_demo --assets out/initialized --run out/asset-cut
+python -m examples.butter_cut_spread.prepare_runtime --assets out/initialized --output out/prepared --blender PATH_TO_BLENDER
+python -m examples.butter_cut_spread.asset_demo --assets out/prepared --run out/asset-cut
 python -m examples.butter_cut_spread.asset_particles --run out/asset-cut
 ```
 
@@ -162,17 +163,18 @@ and flow exponent are unchanged. This is an engineering fit, not a measured
 universal butter material; see [material calibration](MATERIAL_CALIBRATION.md).
 Use `--material` to select another physical preset. The primitive example and
 shared engine defaults are unaffected.
-It settles for 0.6 s, lowers the blade through 1.5 s, draws across
-a nominal 5 mm end slice through 2.6 s, separates through 2.9 s, lifts through
-3.7 s, and holds through 4.0 s. The 15-degree handle elevation clears the dish rim;
-the entry is positioned above the full short side, using the actual steel
-cross-section in the cutting plane. The draw stroke moves the lowest cutting
-edge from 1 mm beyond the far short-side boundary to 1 mm beyond the near
-boundary (or two particle spacings when larger). This covers the upper section
-during descent and the lower section during drawing. The blade then returns to
-the butter's short-side center for pickup. A blade too short to span the entry
-section is rejected; different tool shapes require checking the complete swept
-section and dish clearance. Native
+The authored knife uses its shallow 15-degree cutting posture. It settles for
+0.6 s, lowers the blade through 1.5 s,
+and advances once across the short side through 2.9 s. It then rises through
+3.7 s and holds through 4.0 s. During the first 0.2 s of ascent, a monotone 3 mm
+outward peel opens the cut. There is no fore/aft reversal, oscillation, or pause.
+Stroke limits combine the downstroke with the single bottom draw using the actual
+steel cross-section. This covers butter taller than the horizontal blade before
+lifting, while retaining the shallow knife posture. The standalone initialization retains a
+nominal 5 mm slice; the annotated cut-and-spread initializer defaults to 10 mm
+measured beyond the outer blade face. Different tool shapes require checking
+the complete swept section and tool clearance against the support.
+Native
 ordinary contact uses the actual nonconvex steel and dish meshes. The example's
 `CuttingScene` restricts CPIC separation to the steel entity selected through
 `scene.build(cutting_tools=(blade,))`. The dish and countertop retain native
@@ -272,3 +274,11 @@ Run the focused tests from the repository root:
 ```shell
 python -m pytest -n 0 --backend gpu tests/particles/test_butter_cut_spread.py
 ```
+
+## Annotated board, bread and handled-knife assets
+
+For a continuous end cut, pickup and left-to-right spreading stroke using annotated
+ZIP assets at their actual dimensions, see [aligned asset setup](ALIGNED_ASSETS.md).
+This entry places deformable bread on the annotated second cutting board and uses
+the authored handled knife throughout. It preserves the butter material state
+across the cutting and spreading phases.

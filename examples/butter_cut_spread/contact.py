@@ -3,6 +3,7 @@
 import numpy as np
 
 import genesis as gs
+from examples.butter_cut_spread.face_footprint import face_distance
 from examples.butter_cut_spread.geometry import convex_planes, tool_mesh
 from examples.butter_spreading.config import ContactParameters
 from examples.butter_spreading.contact import _impulse_velocity
@@ -12,12 +13,14 @@ qd = gs.qd
 
 
 class ToolContact:
-    def __init__(self, butter, config, support=None):
+    def __init__(self, butter, config, support=None, face=None):
         self.solver = butter.solver
         self.particles = butter.solver.particles
         self.start = butter.particle_start
         self.count = butter.n_particles
         self.dt = config.dt
+        self.face = face
+        self.has_face = face is not None
         self.spacing = config.particle_size
         self.half = qd.Vector([v / 2 for v in config.blade_size])
         self.bevel = config.blade_bevel_height
@@ -28,19 +31,25 @@ class ToolContact:
         self.planes.from_numpy(planes.astype(gs.np_float))
         self.rho = butter.material.rho
         self.range = config.adhesion_range
+        self.capture_range = (
+            config.particle_size if config.adhesion_capture_range is None else config.adhesion_capture_range
+        )
+        if not 0 < self.capture_range <= self.range:
+            raise ValueError("Adhesion capture range must be positive and within the release range.")
         self.normal_stress = config.normal_stress
         self.shear_stress = config.shear_stress
         self.spread_normal = config.spread_normal_stress
         self.spread_shear = config.spread_shear_stress
         wet = ContactParameters()
         self.spread_range = config.spread_adhesion_range
-        self.spread_slip_time = wet.blade_slip_time
+        self.spread_slip_time = config.spread_slip_time
         self.spread_normal_time = wet.blade_normal_time
         self.spread_max_separation_speed = wet.blade_max_separation_speed
         self.equilibrium_adhesion = wet.is_equilibrium_adhesion
         self.board_normal = config.board_normal_stress
         self.board_shear = config.board_shear_stress
         self.cut_end_time = config.cut_end_time
+        self.cutting_shear = config.cutting_shear_stress
         self.spread_transition_time = config.spread_transition_time
         if support is None:
             center, size = config.board_centers[0], config.board_sizes[0]
@@ -126,10 +135,14 @@ def contact(
             gap = qd.abs(local[2]) - self.half[2] - self.spacing / 2
             edge = qd.min(self.half[0] - qd.abs(local[0]), self.half[1] - qd.abs(local[1]))
             edge = qd.min(edge, local[0] + self.half[0] - self.bevel)
+            if qd.static(self.has_face):
+                edge = -self.spacing
+                if gap < qd.max(self.range, self.spread_range):
+                    edge = face_distance(local[0], local[1], self.face)
             if edge <= 0 or gap >= self.range or gap < -self.spacing or sign * self.side[i] < 0:
                 self.side[i] = 0
                 self.age[i] = 0.0
-            elif self.side[i] == 0 and gap < self.spacing:
+            elif self.side[i] == 0 and gap < self.capture_range:
                 self.side[i] = sign
                 self.anchors[i] = qd.Vector([local[0], local[1]])
             if self.side[i] != 0:
@@ -167,7 +180,7 @@ def contact(
                 impulse /= self.rho * depth + weight * (self.dt * damping + self.dt**2 * stiffness)
                 limit = shear * self.dt * weight / (self.rho * depth)
                 if time_s < self.cut_end_time:
-                    limit = qd.min(limit, 50 * self.dt * weight / (self.rho * depth))
+                    limit = qd.min(limit, self.cutting_shear * self.dt * weight / (self.rho * depth))
                     self.anchors[i] = qd.Vector([local[0], local[1]])
                 impulse *= qd.min(1.0, limit / qd.max(impulse.norm(), 1e-12))
                 relative[0] += impulse[0]
