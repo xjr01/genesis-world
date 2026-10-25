@@ -21,10 +21,13 @@ def main():
     started = time.perf_counter()
     run = args.run.resolve()
     config = json.loads((run / "config.json").read_text())
+    assets = json.loads((run / "assets.json").read_text())
+    is_spreading = assets.get("is_cut_and_spread", False)
     with np.load(run / "state.npz") as data:
         particles, times, centers, quats = (
             data[k] for k in ("particles", "time_s", "knife_positions", "knife_quaternions")
         )
+        bread_frames = data["bread_particles"] if is_spreading else None
     dish = trimesh.load_mesh(run / "dish.obj", process=False)
     blade = trimesh.load_mesh(run / "blade.obj", process=False)
     dish_section = dish.section((0, 1, 0), (0, 0, 0)).discrete
@@ -33,6 +36,15 @@ def main():
     side, top = figure.subplots(2, 1)
     side.set(xlim=(-80, 85), ylim=(-3, 115), xlabel="X (mm)", ylabel="Z (mm)", aspect="equal")
     top.set(xlim=(-80, 85), ylim=(-25, 25), xlabel="X (mm)", ylabel="Y (mm)", aspect="equal")
+    bread_side, bread_top = None, None
+    if is_spreading:
+        side.set(xlim=(-80, 300), ylim=(-3, 145))
+        top.set(xlim=(-80, 300), ylim=(-70, 70))
+        board = trimesh.load_mesh(run / "board.obj", process=False)
+        for line in board.section((0, 1, 0), (0, 0, 0)).discrete:
+            side.plot(line[:, 0] * 1000, line[:, 2] * 1000, color="#976638", linewidth=1)
+        bread_side = side.scatter([], [], s=1, color="#ba9669")
+        bread_top = top.scatter([], [], s=0.5, color="#d3b48c")
     for line in dish_section:
         side.plot(line[:, 0] * 1000, line[:, 2] * 1000, color="#8a939b", linewidth=1)
     plots = [side.scatter([], [], s=1, color=color) for color in ("#d5ac45", "#ed852b")]
@@ -48,7 +60,8 @@ def main():
     side.set_title("Authored assets | central Y section | active MPM particles")
     top.set_title("Top view | fixed particle-ID subsample")
     figure.tight_layout()
-    with av.open(str(run / "asset-cut-particles.mp4"), "w") as movie:
+    filename = "aligned-cut-spread-particles.mp4" if is_spreading else "asset-cut-particles.mp4"
+    with av.open(str(run / filename), "w") as movie:
         stream = movie.add_stream("libx264", rate=config["fps"])
         stream.width, stream.height, stream.pix_fmt = 1280, 720, "yuv420p"
         stream.options = {"crf": "18"}
@@ -57,6 +70,10 @@ def main():
             for plot, mask in zip(plots, (~slice_ids, slice_ids)):
                 plot.set_offsets(points[section & mask][:, (0, 2)] * 1000)
             overview.set_offsets(points[static_ids, :2] * 1000)
+            if is_spreading:
+                bread_points = bread_frames[i]
+                bread_side.set_offsets(bread_points[abs(bread_points[:, 1]) < 0.0008][:, (0, 2)] * 1000)
+                bread_top.set_offsets(bread_points[::24, :2] * 1000)
             rotation = Rotation.from_quat(quats[i, [1, 2, 3, 0]])
             world_blade = blade.copy()
             world_blade.vertices = rotation.apply(blade.vertices) + centers[i]

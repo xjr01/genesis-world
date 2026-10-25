@@ -30,10 +30,13 @@ class Config:
     shear_stress: float = 1000.0
     spread_normal_stress: float = 100.0
     spread_shear_stress: float = 150.0
+    spread_slip_time: float = 0.008
     spread_adhesion_range: float = 0.0008
     adhesion_range: float = 0.0008
+    adhesion_capture_range: float | None = None
     board_normal_stress: float = 40.0
     board_shear_stress: float = 80.0
+    cutting_shear_stress: float = 50.0
     cut_end_time: float = 0.95
     spread_transition_time: float = 3.6
     spread_start_offset: float = -0.037
@@ -41,6 +44,7 @@ class Config:
     spread_start_gap: float = 0.0028
     spread_end_gap: float = 0.00254
     spread_pitch_degrees: float = 0.0
+    spread_yaw_degrees: float = 0.0
 
 
 PHASES = (

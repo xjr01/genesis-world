@@ -14,6 +14,7 @@ from examples.butter_cut_spread.compare import trajectory_difference
 from examples.butter_cut_spread.config import PHASES, Config, angular_velocities, motion, rotation
 from examples.butter_cut_spread.contact import ToolContact
 from examples.butter_cut_spread.cutting_scene import CuttingScene
+from examples.butter_cut_spread.face_footprint import BladeFace, face_samples
 from examples.butter_cut_spread.geometry import convex_planes, tool_mesh
 from examples.butter_spreading.config import ButterParameters, ContactParameters
 from genesis.utils.misc import tensor_to_array
@@ -21,14 +22,14 @@ from tests.utils import assert_allclose, assert_equal
 
 
 def test_asset_cut_sweeps_short_side_before_lifting():
-    profile = np.array([[-0.030, 0.010], [0.025, 0.0], [0.020, -0.014], [-0.025, -0.004]])
+    profile = np.array([[-0.015, 0.045], [0.015, 0.045], [0.010, -0.014], [-0.010, -0.014]])
     blade = trimesh.creation.extrude_triangulation(profile, np.array([[0, 1, 2], [0, 2, 3]]), 0.0008)
     blade.vertices = blade.vertices[:, [2, 0, 1]] - (0.0004, 0, 0)
     orientation = Rotation.from_euler("x", -15, degrees=True) * Rotation.from_euler("y", -90, degrees=True)
     blade.vertices = orientation.inv().apply(blade.vertices)
-    config = replace(Config(), butter_size=(0.12, 0.026, 0.039), butter_center=(0, 0.008, 0.025))
-    assets = {"cutting_roll_degrees": -15.0, "blade_min_z_when_cutting_m": -0.014}
-    times = np.array([0.0, 0.6, 1.5, 2.6, 2.9, 3.7, 4.0])
+    config = replace(Config(), butter_size=(0.12, 0.026, 0.039), butter_center=(0, 0.008, 0.025), cut_end_time=2.9)
+    assets = {"cutting_roll_degrees": -15.0, "blade_min_z_when_cutting_m": -0.014, "lift_outward_clearance_m": 0.003}
+    times = np.array([0.0, 0.6, 1.5, 2.05, 2.9, 3.7, 4.0])
     positions, _, quaternions = asset_motion(times, config, assets, blade)
     low = np.array(config.butter_center)[1:] - np.array(config.butter_size)[1:] / 2
     high = np.array(config.butter_center)[1:] + np.array(config.butter_size)[1:] / 2
@@ -39,12 +40,15 @@ def test_asset_cut_sweeps_short_side_before_lifting():
     points = np.column_stack((y.reshape(-1), z.reshape(-1)))
     covered = np.zeros(len(points), dtype=bool)
     # A convex section translated along a segment sweeps its endpoint hull.
-    for start, end in zip(positions[:3, 1:], positions[1:4, 1:]):
+    for start, end in zip(positions[:4, 1:], positions[1:5, 1:]):
         hull = ConvexHull(np.concatenate((profile + start, profile + end)))
         covered |= np.all(points @ hull.equations[:, :2].T + hull.equations[:, 2] <= 1e-12, axis=1)
     assert covered.all(), "Entry and draw strokes must sweep every sampled location in the initial cutting section."
-    assert positions[2, 1] + profile[2, 0] > high[0]
-    assert positions[3, 1] + profile[2, 0] < low[0]
+    assert np.all(np.diff(positions[:5, 1]) >= 0)
+    assert positions[2, 1] + profile[:, 0].min() < low[0]
+    assert positions[4, 1] + profile[:, 0].max() > high[0]
+    assert_allclose(positions[4:, 1], positions[4, 1], atol=1e-12)
+    assert np.all(np.diff(positions[4:, 0]) >= 0)
     assert_allclose(quaternions, np.tile(orientation.as_quat()[[3, 0, 1, 2]], (len(times), 1)), atol=1e-12)
 
 
@@ -242,6 +246,98 @@ def test_two_sided_wet_contact_releases_anchor_memory_and_has_finite_range(backe
     )
     scene.build()
     assert butter.n_particles == 2
+    # Authored geometry can extend past an old rectangular contact proxy. The
+    # same real face outline must govern adhesion and temporal side preservation.
+    face = BladeFace(face_samples(asset_tmp_path, tool_mesh(config), -config.blade_size[1] / 2, True))
+    narrow = replace(
+        config,
+        blade_size=(config.blade_size[0], config.blade_size[1] / 2, config.blade_size[2]),
+        board_normal_stress=0,
+        board_shear_stress=0,
+    )
+    tip_points = np.array(((0, config.blade_size[1] * 0.4, -0.0008), (0, config.blade_size[1], -0.0008)))
+    for outline in (None, face):
+        tip_contact = ToolContact(butter, narrow, face=outline)
+        butter.set_particles_pos(tip_points)
+        butter.set_particles_vel(np.zeros((2, 3)))
+        tip_contact.apply((0, 0, 0), (0, 0, 0), (0, 0), (0, 0, 0), 1.5)
+        result = tensor_to_array(butter.get_particles_vel())
+        if outline is None:
+            assert_allclose(result, 0, atol=1e-8)
+        else:
+            assert result[0, 2] > 0
+            assert_allclose(result[1], 0, atol=1e-8)
+        assert_allclose(tensor_to_array(butter.get_particles_pos()), tip_points, atol=1e-9)
+    tip_points[:, 1] = config.blade_size[1] * 0.4
+    tip_points[:, 2] = np.array((-1, 1)) * (config.blade_size[2] / 2 + 0.0001)
+    tip_projection = MeshProjection(butter, blade, np.eye(3), narrow.blade_size, face=face)
+    butter.set_particles_pos(tip_points)
+    tip_projection.record((0, 0, 0))
+    crossed_tip = tip_points.copy()
+    crossed_tip[:, 2] *= -1
+    butter.set_particles_pos(crossed_tip)
+    butter.set_particles_vel(np.zeros((2, 3)))
+    tip_projection.apply((0, 0, 0), (0, 0, 0))
+    corrected_tip = tensor_to_array(butter.get_particles_pos())
+    assert np.all(corrected_tip[:, 2] * np.array((-1, 1)) >= config.blade_size[2] / 2)
+    # A grid-contact stand-off can exceed one particle spacing. Widening capture
+    # must enable bounded traction without moving positions or attracting far particles.
+    capture_positions = np.zeros((2, 3))
+    capture_positions[:, 2] = -(config.blade_size[2] / 2 + config.particle_size / 2 + np.array((0.0006, 0.0018)))
+    for capture_range in (None, 0.0008):
+        captured = replace(
+            config,
+            adhesion_capture_range=capture_range,
+            adhesion_range=0.0016,
+            normal_stress=2000,
+            board_normal_stress=0,
+            board_shear_stress=0,
+        )
+        capture_contact = ToolContact(butter, captured)
+        butter.set_particles_pos(capture_positions)
+        butter.set_particles_vel(np.zeros((2, 3)))
+        capture_contact.apply((0, 0, 0), (0, 0, 0), (0, 0), (0, 0, 0), 1.5)
+        result = tensor_to_array(butter.get_particles_vel())
+        if capture_range is None:
+            assert_allclose(result, 0, atol=1e-8)
+        else:
+            assert (
+                0
+                < result[0, 2]
+                < captured.normal_stress * config.dt / (butter.material.rho * 2 * captured.adhesion_range / 3)
+            )
+            assert_allclose(result[1], 0, atol=1e-8)
+        assert_allclose(tensor_to_array(butter.get_particles_pos()), capture_positions, atol=1e-9)
+    # The cutting cap changes sliding traction, not particle positions or the
+    # post-cut carrying law. Zero, legacy and carrying-strength caps are distinct.
+    cut_points = np.zeros((2, 3))
+    cut_points[:, 2] = -(config.blade_size[2] / 2 + config.particle_size / 2 + 0.0002)
+    cut_speeds = []
+    carry_speeds = []
+    for cap in (0.0, 50.0, 1500.0):
+        capped = replace(
+            config,
+            cutting_shear_stress=cap,
+            shear_stress=1500,
+            normal_stress=0,
+            board_normal_stress=0,
+            board_shear_stress=0,
+        )
+        capped_contact = ToolContact(butter, capped)
+        for when, results in ((0.5, cut_speeds), (1.5, carry_speeds)):
+            butter.set_particles_pos(cut_points)
+            butter.set_particles_vel(np.tile((0.05, 0, 0), (2, 1)))
+            capped_contact.side.fill(-1)
+            capped_contact.age.fill(1)
+            capped_contact.anchors.fill(0)
+            capped_contact.apply((0, 0, 0), (0, 0, 0), (0, 0), (0, 0, 0), when)
+            speed = tensor_to_array(butter.get_particles_vel())[0, 0]
+            results.append(speed)
+            assert 0 < speed <= 0.05 + 1e-8
+            assert_allclose(tensor_to_array(butter.get_particles_pos()), cut_points, atol=1e-9)
+    assert_allclose(cut_speeds[0], 0.05, atol=1e-8)
+    assert cut_speeds[0] > cut_speeds[1] > cut_speeds[2]
+    assert_allclose(carry_speeds, carry_speeds[0], atol=1e-8)
     contact = ToolContact(butter, config)
     signs = np.array([-1, 1])
     gap = 0.0004
@@ -274,6 +370,18 @@ def test_two_sided_wet_contact_releases_anchor_memory_and_has_finite_range(backe
     butter.set_particles_vel(gs.tensor(velocity @ tilted.T))
     contact.apply((0, 0, 0), (0, 0, 0), (0, 0), (0, 0, 0), 4.0, roll=0.25)
     assert_allclose(tensor_to_array(butter.get_particles_vel()), expected @ tilted.T, atol=2e-7, rtol=1e-5)
+    # Stronger sliding contact remains stress-limited and never reverses tangential slip.
+    stronger = replace(config, spread_slip_time=0.00005, spread_shear_stress=450.0)
+    strong_contact = ToolContact(butter, stronger)
+    butter.set_particles_pos(gs.tensor(positions))
+    fast_velocity = np.tile((0.2, 0.0, 0.0), (2, 1))
+    butter.set_particles_vel(gs.tensor(fast_velocity))
+    strong_contact.apply((0, 0, 0), (0, 0, 0), (0, 0), (0, 0, 0), 4.0)
+    measured = tensor_to_array(butter.get_particles_vel())
+    depth = config.spread_adhesion_range / 3 + config.particle_size / 2
+    capped_drag = stronger.spread_shear_stress * config.dt / (butter.material.rho * depth) * (1 - separation) ** 2
+    assert_allclose(measured[:, 0], 0.2 - capped_drag, atol=2e-7)
+    assert np.all(measured[:, 0] > 0)
     for gap in (0.0, 0.0006, 0.0015, 1.1 * config.spread_adhesion_range):
         positions[:, 2] = signs * (config.blade_size[2] / 2 + config.particle_size / 2 + gap)
         butter.set_particles_pos(gs.tensor(positions))
@@ -319,6 +427,18 @@ def test_two_sided_wet_contact_releases_anchor_memory_and_has_finite_range(backe
         corrected = tensor_to_array(butter.get_particles_pos())
         assert np.all(corrected[:, 2] * signs >= config.blade_size[2] / 2)
         assert_allclose(tensor_to_array(butter.get_particles_vel()), 0, atol=1e-7)
+
+    # Previous/current local coordinates must follow the same particle IDs as the tool rotates.
+    tilted = Rotation.from_euler("y", 80, degrees=True)
+    butter.set_particles_pos(gs.tensor(outside))
+    projection.record((0, 0, 0), np.eye(3).tolist())
+    blade.set_quat(tilted.as_quat()[[3, 0, 1, 2]], relative=False)
+    scene.step(update_visualizer=False)
+    butter.set_particles_pos(gs.tensor(tilted.apply(-outside)))
+    butter.set_particles_vel(gs.tensor(np.zeros((2, 3))))
+    projection.apply((0, 0, 0), (0, 0, 0), tilted.as_matrix().tolist())
+    corrected = tilted.inv().apply(tensor_to_array(butter.get_particles_pos()))
+    assert np.all(corrected[:, 2] * signs >= config.blade_size[2] / 2 - 1e-8)
 
 
 @pytest.mark.parametrize("backend", [None])
