@@ -13,6 +13,8 @@ class Config:
     fps: int = 24
     seed: int = 17
     particle_size: float = 0.0004
+    # Fix the calibrated contact shell while varying integration quadrature density.
+    contact_particle_size: float | None = None
     bread_particle_size: float = 0.0008
     grid_density: int = 768
     blade_size: tuple[float, float, float] = (0.020, 0.048, 0.0008)

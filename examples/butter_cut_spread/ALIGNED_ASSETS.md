@@ -1,5 +1,8 @@
 # 标注资产的连续切割与涂抹
 
+直接运行最新版内置场景，请使用 [独立运行入口](STANDALONE.md)。下文说明从原始
+ZIP/Blend 重新制作资产的流程；它需要原始源资产和 Blender。
+
 该入口将盘中的黄油端部切片带到右侧砧板上的面包，从左向右涂抹。
 黄油和面包在同一个 Genesis 场景中连续积分；黄油保留原粒子编号和材料状态。
 刀具是带把手、偏置刀颈的真实钢片网格。CPIC 仅选择刀具；瓷盘和砧板参与普通接触。
@@ -22,8 +25,6 @@
 
 先按主 README 的资产流程导出黄油、瓷盘及刀具，生成 `out/initialized` 和
 `out/assets/knife`。初始化阶段另需 USD 读取依赖；实际 Genesis 仿真读取导出的网格。
-资产预处理与校验入口使用 Python 3.11–3.13。输入 ZIP、Blend、生成的缓存和视频不随源码分发，
-需要提供自己的资产并在目标机器执行离线准备；已有的本机缓存路径不能直接搬到另一台机器使用。
 
 ```shell
 python -m pip install -r examples/butter_cut_spread/requirements-assets.txt
@@ -80,7 +81,7 @@ python -m examples.butter_cut_spread.asset_demo --assets out/aligned-prepared --
 生成配置后重新准备，再运行对应案例。当前示例使用单环境接触与记录；批量案例通过独立
 运行组织，不能仅增大 `scene.build` 的环境数来替代这些入口。
 
-默认沿用实际尺寸黄油的校准参数：屈服应力 160 Pa、稠度 15 Pa·s^0.5、密度 900 kg/m³，
+默认使用更能保持切片形状的参数：屈服应力 240 Pa、稠度 15 Pa·s^0.5、密度 900 kg/m³，
 剪切/体积模量分别 20/150 kPa。该参数是演示校准值。时间步 25 μs，黄油/面包粒子间距
 0.4/0.8 mm。完整过程 8.4 s，336,000 步，按 24 fps 记录，并额外保留最终时刻。
 
@@ -141,6 +142,7 @@ python -m examples.butter_cut_spread.asset_demo --assets out/aligned-prepared --
 旋转刀具的防穿透约束分别使用前、后时刻的接触坐标系，并计入角速度产生的表面速度。
 面包显示网格使用固定材料点邻域插值位移，保持原始 UV 和纹理随表面移动。
 
-当前横刀版本的结果见 [横刀验证记录](HORIZONTAL_VALIDATION.md)。
+当前 240 Pa 默认材质的结果见 [默认材质验证记录](DEFAULT_MATERIAL_VALIDATION.md)。
+之前 160 Pa 横刀版本的结果见 [横刀验证记录](HORIZONTAL_VALIDATION.md)。
 碰撞优化对照见 [资产优化记录](ASSET_OPTIMIZATION_VALIDATION.md)。
 上一版 5 mm 切片的历史结果见 [早期验证记录](ALIGNED_VALIDATION.md)。

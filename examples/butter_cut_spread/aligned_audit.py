@@ -1,7 +1,6 @@
 """Audit continuous particle identity, pickup, deposition and aligned asset contact."""
 
 import argparse
-import hashlib
 import json
 from pathlib import Path
 
@@ -12,6 +11,8 @@ import trimesh
 from scipy.ndimage import map_coordinates
 from scipy.spatial import cKDTree
 from scipy.spatial.transform import Rotation
+
+from examples.butter_cut_spread.asset_runtime import file_digest
 
 
 def main():
@@ -94,7 +95,7 @@ def main():
     )
     is_finite = bool(np.isfinite(particles).all() and np.isfinite(bread).all())
     report = {
-        "state_sha256": hashlib.sha256((run / "state.npz").read_bytes()).hexdigest(),
+        "state_sha256": file_digest(run / "state.npz"),
         "is_complete": simulation["is_complete"],
         "all_particles_active": simulation["all_particles_active"],
         "all_particles_finite": is_finite,

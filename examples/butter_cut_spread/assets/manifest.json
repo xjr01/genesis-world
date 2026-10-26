@@ -1,0 +1,7 @@
+{
+  "file": "scene.zip",
+  "sha256": "ac04e8aa16eab45e8dd35e2585104bdf6e538b503edbfa73d72395d3cf88a3a9",
+  "files": 49,
+  "bytes": 60626777,
+  "scope": "Portable evaluated geometry, validated support proxy, scene configuration and original visual textures; no trajectories, particles or machine caches."
+}

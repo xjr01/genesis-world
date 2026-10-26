@@ -1,7 +1,6 @@
 """Measure support settling and sampled mesh penetration without editing the particle trajectory."""
 
 import argparse
-import hashlib
 import json
 import time
 from pathlib import Path
@@ -10,6 +9,8 @@ import igl
 import numpy as np
 import trimesh
 from scipy.spatial.transform import Rotation
+
+from examples.butter_cut_spread.asset_runtime import file_digest
 
 
 def main():
@@ -68,7 +69,7 @@ def main():
         record["blade_penetration_max_m"] = float(max(0, -distance.min())) if len(distance) else 0.0
         record["blade_inside_fraction"] = float(np.sum(distance < -config["particle_size"] / 2) / particles.shape[1])
     report = {
-        "state_sha256": hashlib.sha256((run / "state.npz").read_bytes()).hexdigest(),
+        "state_sha256": file_digest(run / "state.npz"),
         "sampled_particles": len(indices),
         "all_particles_finite": bool(np.isfinite(particles).all()),
         "domain_boundary_unique_particles": int(touched_boundary.sum()),

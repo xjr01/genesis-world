@@ -1,13 +1,13 @@
 """Compare all saved material-point frames against an explicitly supplied reference run."""
 
 import argparse
-import hashlib
 import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import numpy as np
 
+from examples.butter_cut_spread.asset_runtime import file_digest
 from examples.butter_cut_spread.config import Config
 
 
@@ -83,8 +83,8 @@ def main():
     )
     report = ComparisonReport(
         is_accepted,
-        hashlib.sha256((run / "state.npz").read_bytes()).hexdigest(),
-        hashlib.sha256((reference / "state.npz").read_bytes()).hexdigest(),
+        file_digest(run / "state.npz"),
+        file_digest(reference / "state.npz"),
         frames,
         butter,
         bread,

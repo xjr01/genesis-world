@@ -1,5 +1,10 @@
 # Continuous butter cutting and spreading
 
+**最新版真实资产案例：** [独立安装、完整模拟与 Isaac 渲染](STANDALONE.md)。
+运行所需资产和渲染代码均包含在本仓库；默认使用全程固定的 firm-smooth 材质、
+0.6 mm 黄油采样和 50 μs 时间步。入口为 `examples.butter_cut_spread.asset_pipeline`。
+下文的 `pipeline` 是保留的基础几何案例。
+
 One Genesis scene simulates cutting an end slice from a butter bar, carrying it on
 a blade, and spreading it left to right on deformable bread. The same material
 points remain active throughout; there is no particle replacement or state handoff.
@@ -9,7 +14,7 @@ Finite cohesive contact and a unilateral blade correction supplement native coup
 
 ## Install and run
 
-Use Python 3.10-3.13 and a supported GPU. Install a hardware-compatible PyTorch
+Use Python 3.11 and a supported GPU. Install a hardware-compatible PyTorch
 build, then install this repository from its root:
 
 ```shell
@@ -24,7 +29,7 @@ Allow several GB of RAM and disk space for full trajectories. First-run compilat
 adds initialization time.
 
 The default primitive example uses only this repository and its declared Python
-dependencies. Its geometry is generated in code. The optional authored-asset
+dependencies. Its geometry is generated in code. The optional source-asset export
 workflow below consumes user-supplied meshes; its Blender export utility runs
 separately from Genesis. Neither simulation workflow requires Isaac or another
 project checkout. Particle video uses Matplotlib's noninteractive Agg backend and PyAV; no
@@ -97,6 +102,15 @@ use defaults. The expanded configuration is saved with each run.
 self-support and flow checks; changing a Blender surface shader does not change
 the mechanical material.
 
+The authored-asset default uses 240 Pa yield stress and 15 Pa s^0.5 consistency
+to better retain the cut slice's shape. The earlier 160 Pa and intermediate
+200 Pa settings remain available as `configs/asset_yield_160.json` and
+`configs/asset_firmer.json`, respectively, through `--material`.
+External callers must load a preset into the material constructor; copying its
+JSON file or importing the scene does not replace the engine's 80 / 25 defaults.
+See [material calibration](MATERIAL_CALIBRATION.md#slightly-firmer-slices-and-external-trajectories)
+for effective-parameter logging and the required comparison on the actual motion.
+
 - `butter_size`, `blade_size` and `cut_offset` control slice geometry. For the
   upright cut, slice thickness is `butter_size[0]/2 - cut_offset - blade_size[2]/2`.
   Keep it several particle spacings thick and fit the cut face within the blade.
@@ -158,11 +172,16 @@ corresponding adapter, not an implicit axis swap or arbitrary scale correction.
 
 The asset demo uses the same constitutive model and a 25 microsecond physical step.
 Its default [physical material preset](asset_material.json) uses yield stress
-160 Pa and consistency 15 Pa s^0.5 for the 39.17 mm tall asset. Moduli, density,
+240 Pa and consistency 15 Pa s^0.5 for the 39.17 mm tall asset. Moduli, density,
 and flow exponent are unchanged. This is an engineering fit, not a measured
 universal butter material; see [material calibration](MATERIAL_CALIBRATION.md).
 Use `--material` to select another physical preset. The primitive example and
 shared engine defaults are unaffected.
+The complete 240 Pa authored-asset result is recorded in
+[default material validation](DEFAULT_MATERIAL_VALIDATION.md), including pickup,
+spreading, contact limits and the increased bread deformation.
+The [performance guide](PERFORMANCE.md) explains the full-resolution execution,
+uncompressed trajectory storage and reconstruction tradeoffs.
 The authored knife uses its shallow 15-degree cutting posture. It settles for
 0.6 s, lowers the blade through 1.5 s,
 and advances once across the short side through 2.9 s. It then rises through
@@ -282,3 +301,127 @@ ZIP assets at their actual dimensions, see [aligned asset setup](ALIGNED_ASSETS.
 This entry places deformable bread on the annotated second cutting board and uses
 the authored handled knife throughout. It preserves the butter material state
 across the cutting and spreading phases.
+
+## Lower particle count and a firmer cut
+
+`asset_demo --prepare-only --particle-size 0.0006` rebuilds the butter samples
+while retaining the authored grid, timestep, bread sampling and calibrated
+contact shell. The original 0.4 mm setup remains available. The CLI requires at
+least two particles across a grid cell; reducing quadrature density trades fine
+material detail and boundary-volume accuracy for less particle work and storage.
+Preparation must target a fresh directory to retain the reference assets.
+
+The optional `configs/asset_hard.json` uses an 80 kPa shear modulus and 1200 Pa
+yield stress. This fitted demonstration material reduces recoverable strain and
+plastic flow during cutting; it also requires greater force during spreading.
+It remains a deformable MPM material with finite tool adhesion.
+
+```shell
+python -m examples.butter_cut_spread.asset_demo --assets out/horizontal-cut-spread-prepared --run out/hard-prepared --prepare-only --particle-size 0.0006 --material examples/butter_cut_spread/configs/asset_hard.json
+python -m examples.butter_cut_spread.asset_demo --assets out/hard-prepared --run out/hard-run --material examples/butter_cut_spread/configs/asset_hard.json
+python -m examples.butter_cut_spread.shape_audit --run out/hard-run
+python -m examples.butter_cut_spread.asset_particles --run out/hard-run
+python -m examples.butter_cut_spread.aligned_audit --run out/hard-run
+python -m examples.butter_cut_spread.asset_audit --run out/hard-run
+```
+
+Use `--material` in both preparation and execution. Omission retains the 240 Pa
+asset default. `shape_audit` measures all initial slice particles at phase
+checkpoints after removing a proper rigid transform, reporting RMS and
+99th-percentile deformation in meters. Compare reduced sampling with a fine run
+of the **same material** to isolate discretization changes.
+
+See [measured performance, shape retention and tradeoffs](PERFORMANCE.md#reduced-sampling-with-a-firm-material-preset)
+for the complete local validation and the same-material fine-sampling comparison.
+
+## Faster integration and visual review
+
+For a firmer cut with easier spreading using **one material throughout**, use
+`configs/asset_firm_smooth.json` in place of `asset_hard.json`. Its fixed parameters
+are G=80 kPa, K=150 kPa, yield=600 Pa, consistency=25 and flow exponent=0.5.
+There is no time-dependent material interpolation or phase switch. The measured
+run is `out/firm-smooth-full`, using the existing 50 microsecond prepared assets:
+
+```shell
+python -m examples.butter_cut_spread.asset_demo --assets out/firm-50us-prepared --run out/firm-smooth-new --material examples/butter_cut_spread/configs/asset_firm_smooth.json
+```
+
+Compared with the fixed 1200 Pa preset, cut slice deformation RMS changes from
+1.167 to 1.241 mm and lifted slice RMS from 1.597 to 1.860 mm. Spreading becomes
+longer (59.81 to 76.50 mm), with 80.96% deposition and 99.95% pickup. Full physics
+takes 558.31 seconds. These are demonstration material fits, not measurements of
+a particular butter product.
+
+The supported-film density reconstruction uses one particle
+spacing of additional tangential kernel width, with normalized particle volume
+and sufficient grid padding. This smooths submillimeter sampling gaps in thin
+coatings. It preserves the bulk reconstruction away from bread and still passes
+the test that retains a real 4 mm gap. Full physics and the 203-frame particle
+video pass the aligned audit; Isaac review covers five frames.
+
+### Thin coating holes
+
+At 0.6 mm particle spacing, spreading stretches particles into a thin, unevenly
+sampled film. The reconstructed density can fall below the 0.5 surface threshold
+even where neighboring particles support a continuous-looking coating. In the
+final checkpoint, the 13 enclosed gaps in the horizontal density projection had
+nearest-particle distances of 0.21--1.19 mm. This indicates sampling/reconstruction
+contributes to the visible holes; it does not establish that every gap is artificial.
+
+`film.py` repairs enclosed gaps on the bread only when every
+gap pixel is within two particle spacings of supported particles. It redistributes
+surplus nearby density while keeping donor voxels above the surface threshold.
+It preserves the density integral, leaves open edges and unsupported larger gaps,
+and makes no changes to particle positions, mass, material or solver steps.
+This is a visual regularization: the extracted mesh volume is not exactly conserved.
+
+For `out/firm-smooth-full`, final projected enclosed gaps decrease from 13
+(28.66 square mm) to zero. The integrated density changes by less than 1e-11
+relative, while final combined mesh volume increases by about 0.0165%.
+Three-dimensional mesh topology still has 12 handles/tunnels, and irregular open
+edges remain. These metrics must not be interpreted as a completely hole-free
+solid. The five reviewed Isaac frames use 128 samples each; the full 203-frame
+Isaac animation has not been regenerated. The material is fixed throughout.
+
+Focused tests cover density conservation, absent particle support, insufficient
+density budget, retained large holes and open edges. Run these from this repository:
+
+```shell
+python -m pytest -n 0 tests/particles/test_butter_film_gaps.py tests/particles/test_butter_cut_spread_surface.py -k "sampling_gap or density or supported_single_layer" -q
+```
+
+`asset_demo --prepare-only --dt SECONDS` rebuilds the prescribed trajectory at a
+different integration interval. The material integration and contact impulses use
+that same interval. This changes numerical integration accuracy, so compare the
+complete pickup and spreading sequence before adopting a larger interval for a
+different material. The default remains 25 microseconds.
+
+For the firm asset preset, the tested faster configuration uses 0.6 mm butter
+sampling and a 50 microsecond step:
+
+```shell
+python -m examples.butter_cut_spread.asset_demo --assets out/firm-balanced-prepared --run out/fast-prepared --prepare-only --particle-size 0.0006 --dt 0.00005 --material examples/butter_cut_spread/configs/asset_hard.json
+python -m examples.butter_cut_spread.asset_demo --assets out/fast-prepared --run out/fast-run --material examples/butter_cut_spread/configs/asset_hard.json
+```
+
+The prepared `out/firm-50us-prepared` directory is also available on the measured
+workstation. Use a fresh `--run` directory for each simulation. See
+[fast-profile measurements and numerical differences](PERFORMANCE.md#larger-timestep-with-the-same-firm-particles).
+
+Tool velocity and position writes now defer their geometry update until the
+quaternion write, publishing the complete prescribed state once per step.
+
+The bundled Isaac replay supports a matching five-frame reconstruction/capture
+preview. Run the following from this repository,
+using its existing reconstruction and Isaac Python environments respectively:
+
+```shell
+python -m examples.butter_cut_spread.asset_prepare --run RUN_DIRECTORY --preview --workers 5 --coating-voxel 0.0001
+python -m examples.butter_cut_spread.asset_render --run RUN_DIRECTORY --preview --samples 128
+```
+
+This preview keeps the original spatial reconstruction and render sample budget;
+it covers the initial, quarter, middle, three-quarter and final recorded frames.
+It is a visual review of five states, not a full animation. Remove `--preview`
+from **both** commands to reconstruct and render every frame. The renderer rejects
+a full capture when the reconstruction manifest only covers the preview frames.

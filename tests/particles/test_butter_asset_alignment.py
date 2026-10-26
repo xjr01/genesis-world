@@ -1,4 +1,5 @@
 import json
+import re
 from dataclasses import replace
 
 import numpy as np
@@ -9,9 +10,43 @@ from scipy.spatial.transform import Rotation
 
 from examples.butter_cut_spread.aligned_motion import continue_motion
 from examples.butter_cut_spread.asset_demo import asset_motion
+from examples.butter_cut_spread.asset_pipeline import unpack_scene
 from examples.butter_cut_spread.asset_runtime import file_digest, source_signature, verify_prepared
 from examples.butter_cut_spread.config import Config
 from examples.butter_cut_spread.geometry import rigid_fit
+
+
+@pytest.mark.parametrize("backend", [None])
+def test_bundled_scene_resolves_geometry_and_texture_inputs_without_local_caches(backend, asset_tmp_path):
+    output = asset_tmp_path / "bundled-cut-spread"
+    unpack_scene(output)
+    assets = json.loads((output / "assets.json").read_text())
+    config = Config(**json.loads((output / "config.json").read_text()))
+    for name in (
+        *assets["tool_meshes"],
+        "butter.obj",
+        "bread.obj",
+        "board.obj",
+        "blade.obj",
+        "dish.obj",
+        assets["dish_collision_file"],
+        "board-collision.obj",
+        "support.npz",
+        "blade-face.npz",
+    ):
+        assert (output / name).is_file()
+    for visual in output.glob("annotated/*/visual.usda"):
+        for reference in re.findall(r"@([^@]+)@", visual.read_text(encoding="utf-8")):
+            dependency = (visual.parent / reference).resolve()
+            assert dependency.is_relative_to(output.resolve())
+            assert dependency.is_file()
+    assert len(list(output.glob("annotated/*/visual.usda"))) == 3
+    assert config.particle_size <= 0.5 / config.grid_density
+    assert not (output / "runtime-preparation.json").exists()
+    assert not (output / "motion.npz").exists()
+    assert not list(output.glob("*-particles.npy"))
+    with pytest.raises(ValueError, match="new directory"):
+        unpack_scene(output)
 
 
 @pytest.mark.parametrize("backend", [None])

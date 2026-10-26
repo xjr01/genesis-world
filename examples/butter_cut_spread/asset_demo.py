@@ -1,7 +1,6 @@
 """Cut and lift an end slice using evaluated, meter-scale butter, dish and knife assets."""
 
 import argparse
-import hashlib
 import json
 import math
 import shutil
@@ -19,6 +18,7 @@ from examples.butter_cut_spread.aligned_motion import PHASES as ALIGNED_PHASES, 
 from examples.butter_cut_spread.asset_contact import MeshProjection
 from examples.butter_cut_spread.asset_runtime import (
     StartupTimings,
+    file_digest,
     particle_morph,
     sdf_records,
     verify_prepared,
@@ -94,9 +94,19 @@ def main():
         help="ButterParameters JSON overrides; omitted fields retain the calibrated real-asset preset.",
     )
     parser.add_argument("--fps", type=int, help="Particle recording frequency; does not change integration dt.")
+    parser.add_argument("--dt", type=float, help="Integration step in seconds; requires --prepare-only.")
+    parser.add_argument(
+        "--particle-size",
+        type=float,
+        help="Butter spacing in meters during preparation; coarser sampling saves work but resolves less detail.",
+    )
     args = parser.parse_args()
     if args.prepare_only and (args.duration is not None or args.stationary):
         parser.error("Offline preparation must use the complete configured trajectory.")
+    if args.particle_size is not None and not args.prepare_only:
+        parser.error("Particle spacing changes require --prepare-only to rebuild particles and their manifest.")
+    if args.dt is not None and (not args.prepare_only or not math.isfinite(args.dt) or args.dt <= 0):
+        parser.error("A finite positive --dt requires --prepare-only to rebuild the trajectory.")
     started = time.perf_counter()
     startup = StartupTimings()
     if not args.prepare_only:
@@ -118,6 +128,19 @@ def main():
         shutil.copy2(file, snapshot / file.name)
     startup.mark("copy_assets_and_source")
     config = Config(**json.loads((run / "config.json").read_text()))
+    if args.dt is not None:
+        config = replace(config, dt=args.dt)
+        (run / "config.json").write_text(json.dumps(asdict(config), indent=2))
+    if args.particle_size is not None:
+        if not math.isfinite(args.particle_size) or not 0 < args.particle_size <= 0.5 / config.grid_density:
+            parser.error("Butter spacing must be positive and at most half a grid cell (eight samples per cell).")
+        config = replace(
+            config,
+            particle_size=args.particle_size,
+            contact_particle_size=config.contact_particle_size or config.particle_size,
+        )
+        (run / "config.json").write_text(json.dumps(asdict(config), indent=2))
+    contact_config = replace(config, particle_size=config.contact_particle_size or config.particle_size)
     if args.fps is not None:
         if args.fps <= 0 or args.fps * config.dt > 1:
             parser.error("Recording frequency must be positive and no greater than the integration frequency.")
@@ -199,7 +222,7 @@ def main():
     blade_mesh = trimesh.load_mesh(run / "blade.obj", process=False) if args.prepare_only else None
     footprint = face_samples(run, blade_mesh, -config.blade_size[1] / 2, args.prepare_only)
     if args.prepare_only:
-        positions, angles, quats = asset_motion(times, config, assets, blade_mesh)
+        positions, angles, quats = asset_motion(times, contact_config, assets, blade_mesh)
         rolls = np.full(len(times), math.radians(assets["cutting_roll_degrees"]))
         if has_bread:
             positions, angles, quats, rolls = continue_motion(times, config, assets, positions, angles, quats)
@@ -253,7 +276,7 @@ def main():
     with np.load(run / "support.npz") as archive:
         support = archive["origin"], archive["spacing"], archive["heights"]
     face = BladeFace(footprint)
-    contact = ToolContact(butter, config, support=support, face=face)
+    contact = ToolContact(butter, contact_config, support=support, face=face)
     bread_contact = None
     bread_frames = []
     if bread is not None:
@@ -262,7 +285,7 @@ def main():
             bread,
             butter,
             blade,
-            spacing=config.particle_size,
+            spacing=contact_config.particle_size,
             dt=config.dt,
             blade_size=config.blade_size,
             lower_bound=config.lower_bound,
@@ -304,9 +327,10 @@ def main():
     )
     with physics_only_visual_updates(scene):
         for i in range(1 if args.prepare_only else steps):
-            blade.set_pos(target_positions[i], zero_velocity=False, relative=False)
+            # Publish geometry once, after both the velocity and position writes
+            blade.set_dofs_velocity(target_rates[i], skip_forward=True)
+            blade.set_pos(target_positions[i], zero_velocity=False, relative=False, skip_forward=True)
             blade.set_quat(target_quats[i], zero_velocity=False, relative=False)
-            blade.set_dofs_velocity(target_rates[i])
             if bread_contact is not None:
                 bread_contact.apply(center=centers[i], velocity=speeds[i])
             contact.apply(
@@ -377,7 +401,8 @@ def main():
         (run / "runtime-preparation.json").write_text(json.dumps(report, indent=2))
         print(json.dumps(report, indent=2), flush=True)
         return
-    np.savez_compressed(
+    export_started = time.perf_counter()
+    np.savez(
         run / "state.npz",
         particles=np.stack(frames),
         tool_faces=np.stack(faces),
@@ -390,6 +415,10 @@ def main():
         knife_size=config.blade_size,
         fps=config.fps,
     )
+    export_seconds = time.perf_counter() - export_started
+    hash_started = time.perf_counter()
+    state_hash = file_digest(run / "state.npz")
+    hash_seconds = time.perf_counter() - hash_started
     report = {
         "is_complete": args.stationary or math.isclose(duration, config.duration),
         "steps": steps,
@@ -402,6 +431,9 @@ def main():
         "startup_seconds": startup.seconds,
         "native_sdf": caches_before_build,
         "stepping_seconds": stepping_seconds,
+        "export_seconds": export_seconds,
+        "hash_seconds": hash_seconds,
+        "state_storage": "uncompressed_npz",
         "elapsed_seconds": time.perf_counter() - started,
         "phases": phase_times,
         "cpic_cutting_geom_indices": [geom.idx for geom in blade.geoms],
@@ -412,7 +444,7 @@ def main():
         "stationary": args.stationary,
         "initial_bounds_m": [initial.min(0).tolist(), initial.max(0).tolist()],
         "final_bounds_m": [frames[-1].min(0).tolist(), frames[-1].max(0).tolist()],
-        "state_sha256": hashlib.sha256((run / "state.npz").read_bytes()).hexdigest(),
+        "state_sha256": state_hash,
     }
     (run / "simulation.json").write_text(json.dumps(report, indent=2))
     print(json.dumps(report, indent=2), flush=True)
