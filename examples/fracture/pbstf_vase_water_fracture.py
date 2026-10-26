@@ -96,10 +96,13 @@ PUSH_ANG_VEL = (0.0, -4.0, 0.0)
 # defaults of the native rigid solver.
 SOL_PARAMS = (4e-4, 1.0, 0.9, 0.95, 1.0e-3, 0.5, 2.0)
 RENDER_RES = (1280, 720)
-# Camera offsets are roughly half the full-size ones (same look-at targets, halved stand-off), so
-# the half-size vase still fills the frame.
-CAMERA_POS_DROP = (-0.72, -0.93, 0.95)
-CAMERA_LOOKAT_DROP = (-0.2, -0.2, 0.35)
+# Camera framing: the close start fills the frame with the half-size vase; the wide end must keep the
+# full table column, the table-foot shard cluster, and the floor water film in view at a steep
+# enough depression angle (grazing views wash the thin recon surface out to near-white). The table,
+# fall height, and splash extent stay world-sized, so the wide pose keeps a full-size-class
+# stand-off instead of a halved one.
+CAMERA_POS_DROP = (-1.25, -1.55, 2.0)
+CAMERA_LOOKAT_DROP = (-0.15, -0.15, 0.22)
 CAMERA_POS_DROP_CLOSE = (-0.16, -0.4, 0.99)
 CAMERA_LOOKAT_DROP_CLOSE = (0.12, 0.0, 0.78)
 CAMERA_WIDE_TIME = 0.65

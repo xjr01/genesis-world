@@ -176,9 +176,9 @@ attached to the single hidden FEM fragment boundary described above. The other i
 The final metrics report both the total collider count and the deformable collider count,
 the absorption capacity, and the number of water particles inside the table volume.
 
-Measured on an RTX 4060 at half scale with 2 mm liquid particles and recon recording: 1.5-1.6
-outer steps per second; the default 8 s run (4000 steps) spends about 43 minutes in the stepping
-loop and roughly 55 minutes end to end including kernel build and video finalization.
+Measured on an RTX 4060 at half scale with 2 mm liquid particles and recon recording: 1.5-1.8
+outer steps per second; the default 8 s run (4000 steps) spends 41-43 minutes in the stepping
+loop and 42-50 minutes end to end including kernel build and video finalization.
 
 ### Notes and limitations
 
