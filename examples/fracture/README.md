@@ -78,14 +78,38 @@ Measured on an RTX 4060 with warm JIT caches and no recording: roughly 100–130
 - The contact time constant is clamped to twice the substep timestep by the solver; slammed fragments
   may briefly penetrate the floor before the contact force ramps.
 
+## Impulse-triggered shatter demo
+
+`impulse_shatter.py` demonstrates the alternative fracture path: a pure rigid-body scene where a
+pre-fragmented object (vase, bowl, or plate) topples off the table and shatters on the calibrated floor
+impact. A throwaway PBD pre-pass partitions the source mesh (`genesis/utils/fracture_seeds.py`), builds
+the mass model, and exports per-fragment assets: the cut render meshes and a VHACD convex decomposition
+of each closed fragment as the collision source geometry (fused by the loader into one watertight SDF
+collision geom per fragment). The delivered scene is rigid-only: a compound parent body
+carries surface-hull collision proxies until `PBDRigidFragmentBridge.arm_impact_trigger()` fires, then
+all fragment links are released at once with the parent's exact state.
+
+Each preset pins the md5 of its calibrated seed partition, so the fragment layout reproduces the
+validated one bit-for-bit (`--skip-seed-gate` lifts the pin for exploring new layouts). Impact
+thresholds are per-object impulse sums in N*s from the calibration ladder (gentle placements stay
+event-free, the floor slam fires); `--threshold` overrides.
+
+Requires the `fracture` extra for the seed sampler and the convex decomposition backend:
+
+```bash
+python -m pip install -e ".[fracture]"
+python examples/fracture/impulse_shatter.py --object vase --video
+python examples/fracture/impulse_shatter.py --object bowl --video
+python examples/fracture/impulse_shatter.py --object plate --video
+```
+
+First run for an object takes several minutes (pre-pass + VHACD + mesh build); assets are cached under
+`examples/fracture/.cache/<object>_seed<seed>/` and reused afterwards. Outputs land in `--out-dir`
+(default `<work-dir>/run/`): `summary.json` (fire step, switch continuity errors, per-fragment rest
+penetration, visual rest gate), `metrics.npz` (per-step traces), frames and `shatter_720p.mp4` with
+`--video`. `--steps 300` gives a quick smoke test that reaches the trigger and release.
+
 ## Related engine capabilities
 
-- **Impulse-triggered brittle fracture**: `PBDRigidFragmentBridge.arm_impact_trigger()` releases all
-  fragments at once when a calibrated impact impulse exceeds a threshold, bypassing progressive PBD
-  bond breaking. Not demonstrated in this example; API in
-  `genesis/engine/couplers/pbd_rigid_fragments.py`.
 - **Seam damage time model**: `PBD.Solid` accepts `seam_damage_time_constant` and related parameters
   that model gradual seam degradation under cyclic loading. Not exposed as a CLI flag; set in source.
-- **Non-convex collision proxies**: collision accuracy for resting fragments can be improved by
-  replacing the convex hull proxy with a VHACD convex decomposition (multiple convex geoms per
-  fragment link). Not demonstrated in this example.

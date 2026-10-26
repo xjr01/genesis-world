@@ -143,6 +143,12 @@ usd = [
     # Used to serialize concurrent omni-kit bake operations (concurrent bootstrapping causes segfaults)
     "filelock",
 ]
+fracture = [
+    # Volumetric seed sampling (genesis.utils.fracture_seeds) and convex proxies in examples/fracture
+    "scipy",
+    # Convex decomposition backend for 'trimesh.decomposition.convex_decomposition'
+    "vhacdx",
+]
 
 [project.scripts]
 gs = "genesis._main:main"
