@@ -7,8 +7,8 @@ boundaries. Separated fragments are automatically handed to the native rigid-bod
 `PBDRigidFragmentBridge`, so the shattered pieces bounce and scatter under rigid-body contact dynamics
 while the PBD render mesh remains the single visual representation.
 
-A second demo in this directory, `pbstf_vase_water_fracture.py`, fills the same vase with PBSTF water
-(see the "PBSTF water-filled vase" section below).
+A second demo in this directory, `pbstf_vase_water_fracture.py`, fills a half-scale copy of the
+same vase with PBSTF water (see the "PBSTF water-filled vase" section below).
 
 ## Running
 
@@ -95,9 +95,14 @@ Measured on an RTX 4060 with warm JIT caches and no recording: roughly 100-130 m
 
 ## PBSTF water-filled vase (`pbstf_vase_water_fracture.py`)
 
-The same vase (same fixed 24-fragment Voronoi wall layout) holds a low fill of PBSTF liquid and
-topples off the table; the shards scatter and the water escapes through the broken wall and spreads
-across the floor. The liquid boundary is a single hidden FEM tetrahedral proxy: each fragment's
+The same vase at half its asset scale (`VASE_SCALE = 0.5` in the source; the table, floor, and fall
+height stay world-sized) holds a low fill of PBSTF liquid and topples off the table; the shards
+scatter and the water escapes through the broken wall and spreads across the floor. The fragment
+layout is selectable: `--seed-layout regular` keeps the fixed 24-fragment Voronoi wall grid shared
+with `pbd_vase_fracture.py`, while `--seed-layout random` samples variable-density volumetric seeds
+through `genesis/utils/fracture_seeds.py` and accepts any resulting fragment count in 18-30
+(`--layout-seed 3` yields 28). The liquid boundary is a single hidden FEM tetrahedral proxy: each
+fragment's
 convex hull fans into tetrahedra over an interior center, the 24 fans merge into one mesh with
 per-fragment independent vertices, and that entity drives one
 `PBSTFAbsorbentBoxStaticColliderOptions` deformable collider. The collider box itself shrinks to a
@@ -110,11 +115,14 @@ and the PBSTF solver refreshes the collider surface from the proxy at the next s
 
 ### Running
 
-The bundled assets in `pbstf_vase_water_assets/` (24 proxy OBJs plus `water_particles.npz` holding
-the filtered water spawn and the merged tetra proxy) match the source-fixed fragment layout, so the
-demo runs directly. Outputs land in the workspace-root `experiments/vase_pbstf_fracture/` by
-default; the asset directory only ever holds the OBJs and the NPZ (mesh and particle caches go to
-the user cache directory):
+The bundled assets in `pbstf_vase_water_assets/` (per-fragment proxy OBJs plus `water_particles.npz`
+holding the filtered water spawn and the merged tetra proxy) match the source-fixed fragment layout,
+so the demo runs directly. The regular layout lives in the directory root (24 OBJs); every random
+layout seed keeps its own `random_seed_<n>/` subdirectory (seed 3 bundles 28 OBJs). At the 2 mm
+liquid particle size the half-scale fill is 14842 particles for the regular layout and 17525 for
+random seed 3 (the full-size vase sampled 115283). Outputs land in the workspace-root
+`experiments/vase_pbstf_fracture/` by default; the asset directory only ever holds the OBJs and the
+NPZ (mesh and particle caches go to the user cache directory):
 
 ```bash
 python examples/fracture/pbstf_vase_water_fracture.py --record --metrics-output metrics.json --keyframe-dir keyframes
@@ -130,10 +138,12 @@ python examples/fracture/pbstf_vase_water_fracture.py --settle-only --duration 3
 ```
 
 Regenerate the bundled assets after changing the vase layout, fill height, or particle size in the
-source. The runtime verifies asset/scene consistency and refuses mismatches:
+source; random layouts regenerate into their own subdirectory. The runtime verifies asset/scene
+consistency and refuses mismatches:
 
 ```bash
 python examples/fracture/pbstf_vase_water_fracture.py --prepare-proxies
+python examples/fracture/pbstf_vase_water_fracture.py --prepare-proxies --seed-layout random --layout-seed 3
 ```
 
 ### Command-line options
@@ -147,6 +157,8 @@ python examples/fracture/pbstf_vase_water_fracture.py --prepare-proxies
 | `--prepare-proxies` | off | Regenerate the 24 OBJs and water NPZ, then exit. |
 | `--settle-only` | off | Place the filled vase on the floor without the initial push. |
 | `--water-render` | `recon` | Render the liquid as `recon` (reconstructed surface) or `particle`. |
+| `--seed-layout` | `regular` | Fragment seed layout: `regular` (fixed 24-fragment wall grid) or `random` (volumetric variable-density, 18-30 fragments). |
+| `--layout-seed` | 3 | RNG seed for the `random` layout; also names its asset subdirectory. |
 | `--metrics-output` | none | Write final metrics and sampled wall-clearance diagnostics to JSON. |
 | `--keyframe-dir` | none | Save rendered PNG keyframes in this directory. |
 | `--keyframe-times` | mode-specific | Optional list of keyframe times in seconds. Drop defaults are 0.2, 0.45, 0.7, 1.2, and 3.0 s, plus the final state. |
@@ -164,6 +176,10 @@ attached to the single hidden FEM fragment boundary described above. The other i
 The final metrics report both the total collider count and the deformable collider count,
 the absorption capacity, and the number of water particles inside the table volume.
 
+Measured on an RTX 4060 at half scale with 2 mm liquid particles and recon recording: 1.5-1.6
+outer steps per second; the default 8 s run (4000 steps) spends about 43 minutes in the stepping
+loop and roughly 55 minutes end to end including kernel build and video finalization.
+
 ### Notes and limitations
 
 - The liquid boundary is the convex hull of each fragment, so the curved wall is approximated by
@@ -176,10 +192,14 @@ the absorption capacity, and the number of water particles inside the table volu
   from the proxy every substep; the proxy is rigidly posed from the fragment links each frame, so no
   elastic deformation enters the boundary.
 - Coupling is one-way: vase fragments push the water, with no water reaction on the vase or shards.
-- The fixed 24-fragment layout keeps the bundled proxies, the water spawn, the tetra proxy and the
-  runtime registration in lockstep; other layouts require regenerating the assets explicitly.
-- Sampled hull diagnostics are not a per-substep non-penetration guarantee. In an independent 1.2 s
-  table-collider verification, 8 of 1463 water particles were inside fragment hulls at the 0.5 s
-  fracture sample, with a minimum signed distance of about -0.904 mm; the 0.7 s sample returned to
-  zero inside particles. The default drop keyframe times do not include 0.5 s, so the 8 s metrics
-  do not independently resolve that transient.
+- Each layout's bundled proxies, water spawn, tetra proxy, and runtime registration stay in
+  lockstep; switching layouts or layout seeds requires regenerating that layout's assets explicitly.
+- The hidden FEM proxy is re-posed from the fragment links every step, so its Young's modulus only
+  bounds the explicit-integrator stiffness of the thinnest fan tetrahedra; it scales with
+  `VASE_SCALE^2` to stay inside the substep stability limit, which the flat shards of a random
+  layout otherwise sit on top of.
+- Sampled hull diagnostics are not a per-substep non-penetration guarantee. In the half-scale
+  random-layout 8 s run, no particle sat inside a fragment hull through 0.05 s (minimum signed
+  distance +0.13 mm in a dedicated 0.1 s diagnostic); during the 0.08-0.45 s fracture sweep the
+  separating hulls transiently dipped up to 122 of 17525 particles inside (minimum about -2.7 mm
+  at the 0.2 s sample), and every sample from 0.45 s on reported zero inside particles.

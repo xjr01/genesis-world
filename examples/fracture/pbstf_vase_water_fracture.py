@@ -1,7 +1,10 @@
 """PBSTF water inside a PBD vase that topples off a table and shatters on the floor.
 
-The vase is a fracturable ``PBD.Solid`` carrying the same fixed 24-fragment Voronoi partition as
-``pbd_vase_fracture.py`` and holds a low PBSTF liquid fill. Every fragment's convex collision proxy
+The vase is a fracturable ``PBD.Solid`` carrying a Voronoi wall partition and holds a low PBSTF
+liquid fill; the vase asset is uniformly scaled to ``VASE_SCALE``. The partition comes from
+``--seed-layout``: ``regular`` reuses the fixed grid of ``pbd_vase_fracture.py`` (24 fragments),
+while ``random`` samples variable-density volumetric seeds through
+``genesis.utils.fracture_seeds.sample_volume_seeds``. Every fragment's convex collision proxy
 is registered twice: once as a native rigid-body proxy through ``PBDRigidFragmentBridge`` and once
 inside a single hidden FEM tetrahedral boundary driven from the same fragment poses. That FEM proxy
 (one merged tetra mesh, per-fragment independent vertices, each fragment the fan of its convex hull
@@ -15,9 +18,10 @@ PBSTF solver synchronizes the collider surface from the proxy at the next subste
 
 The convex proxies approximate the curved wall by chord facets that bulge a few millimetres into the
 cavity, so the liquid starts with a matching clearance to every hull and the broken wall shows small
-gaps between liquid and shards. ``--prepare-proxies`` regenerates the bundled assets for the fixed
-fragment layout; the demo reads them directly otherwise, and verifies at build time that the runtime
-fragment meshes and spawn poses still match the bundled ones.
+gaps between liquid and shards. ``--prepare-proxies`` regenerates the bundled assets for the selected
+fragment layout (each random layout seed keeps its own asset subdirectory); the demo reads them
+directly otherwise, and verifies at build time that the runtime fragment meshes and spawn poses still
+match the bundled ones.
 """
 
 import argparse
@@ -32,12 +36,14 @@ import igl
 import imageio
 import numpy as np
 import torch
+import trimesh
 
 import genesis as gs
 import genesis.utils.geom as geom_utils
 import genesis.utils.mesh as mesh_utils
 import genesis.utils.particle as particle_utils
 from genesis.engine.couplers.pbd_rigid_fragments import PBDRigidFragmentBridge
+from genesis.utils.fracture_seeds import sample_volume_seeds
 from genesis.utils.misc import tensor_to_array
 
 if __package__:
@@ -45,11 +51,17 @@ if __package__:
 else:
     from pbd_vase_fracture import fragment_layout, sector_seeds
 
+# Uniform scale of the vase asset; the demo vase simulates at half size.
+VASE_SCALE = 0.5
 N_FRAGMENTS = 24
-PBSTF_PARTICLE_SIZE = 0.008
+# The random layout accepts any runtime fragment count within this span of N_FRAGMENTS.
+RANDOM_LAYOUT_COUNT_SPAN = 6
+PBSTF_PARTICLE_SIZE = 0.002
+MESH_CAVITY_CLEARANCE = 0.004
 HULL_CLEARANCE_FACTOR = 0.65
-WATER_SEED_LOCAL = (0.0, 0.0, 0.03)
-WATER_MAX_HEIGHT_LOCAL = 0.10
+# Vase-local quantities below are already expressed in the scaled local frame.
+WATER_SEED_LOCAL = (0.0, 0.0, 0.015)
+WATER_MAX_HEIGHT_LOCAL = 0.05
 PROXY_ENTITY_NAME = "vase_fragment_proxy"
 # The collider box shrinks to a single voxel centered on a fragment-0 hull interior point, and the
 # rate/capacity pair floors ``total_capacity`` at zero: the box binds the moving FEM boundary while
@@ -66,7 +78,13 @@ FAN_CENTER_MIN_CLEARANCE = 5.0e-4
 DEGENERATE_FACE_AREA_TWICE = 1.0e-6
 # Wall lattice spacing of the PBD vase particles; the unit for partition drift tolerances.
 LATTICE_SPACING = 6.0e-3
-VASE_POS = (0.14, 0.0, 0.75)
+# The proxy is rigidly driven from the fragment poses every step, so its Young's modulus only sets
+# the explicit-integrator stiffness of the thinnest fan tets. Stability requires E < rho * (h/dt)^2
+# with the tet height h tied to the fragment thickness, so the modulus scales with VASE_SCALE^2.
+PROXY_YOUNGS_MODULUS = 1.0e4 * VASE_SCALE**2
+# The overhang of the vase centre past the table edge scales with the vase so the half-size base is
+# perched at the same ratio; the mesh local origin is the bottom centre, so z is the table top.
+VASE_POS = (0.145, 0.0, 0.75)
 SETTLE_VASE_POS = (-0.3, 0.0, 0.0)
 TABLE_LOWER = (0.15, -0.15, 0.0)
 TABLE_UPPER = (0.45, 0.15, 0.75)
@@ -78,19 +96,32 @@ PUSH_ANG_VEL = (0.0, -4.0, 0.0)
 # defaults of the native rigid solver.
 SOL_PARAMS = (4e-4, 1.0, 0.9, 0.95, 1.0e-3, 0.5, 2.0)
 RENDER_RES = (1280, 720)
-CAMERA_POS_DROP = (-1.25, -1.65, 1.55)
+# Camera offsets are roughly half the full-size ones (same look-at targets, halved stand-off), so
+# the half-size vase still fills the frame.
+CAMERA_POS_DROP = (-0.72, -0.93, 0.95)
 CAMERA_LOOKAT_DROP = (-0.2, -0.2, 0.35)
-CAMERA_POS_DROP_CLOSE = (-0.45, -0.8, 1.15)
-CAMERA_LOOKAT_DROP_CLOSE = (0.1, 0.0, 0.74)
+CAMERA_POS_DROP_CLOSE = (-0.16, -0.4, 0.99)
+CAMERA_LOOKAT_DROP_CLOSE = (0.12, 0.0, 0.78)
 CAMERA_WIDE_TIME = 0.65
-CAMERA_POS_SETTLE = (-0.85, -0.85, 0.55)
+CAMERA_POS_SETTLE = (-0.58, -0.43, 0.33)
 CAMERA_LOOKAT_SETTLE = (-0.3, 0.0, 0.1)
 DROP_KEYFRAME_TIMES = (0.2, 0.45, 0.7, 1.2, 3.0)
 SETTLE_KEYFRAME_TIMES = (0.3, 1.0, 3.0)
 ASSET_DIR = Path(__file__).resolve().parent / "pbstf_vase_water_assets"
-WATER_NPZ = ASSET_DIR / "water_particles.npz"
 RUN_OUTPUT_DIR = Path(__file__).resolve().parents[3] / "experiments" / "vase_pbstf_fracture"
 DEFAULT_OUTPUT = RUN_OUTPUT_DIR / "pbstf_vase_water_fracture.mp4"
+
+
+def layout_asset_dir(seed_layout, layout_seed):
+    """Bundled-asset directory of a layout; each random layout seed gets its own subdirectory."""
+    if seed_layout == "regular":
+        return ASSET_DIR
+    return ASSET_DIR / f"random_seed_{layout_seed}"
+
+
+def layout_water_npz(seed_layout, layout_seed):
+    """Water-asset NPZ path of a layout."""
+    return layout_asset_dir(seed_layout, layout_seed) / "water_particles.npz"
 
 
 def vase_mesh_file():
@@ -101,8 +132,43 @@ def make_vase_morph(pos=VASE_POS):
     """Vase mesh morph shared by the asset preparation scene and the simulation scene."""
     return gs.morphs.Mesh(
         file=vase_mesh_file(),
+        scale=VASE_SCALE,
         pos=tuple(pos),
     )
+
+
+def fragment_count_window(seed_layout):
+    """Accepted runtime fragment-count window for a layout."""
+    if seed_layout == "regular":
+        return (N_FRAGMENTS, N_FRAGMENTS)
+    return (N_FRAGMENTS - RANDOM_LAYOUT_COUNT_SPAN, N_FRAGMENTS + RANDOM_LAYOUT_COUNT_SPAN)
+
+
+def build_fragment_seeds(seed_layout, layout_seed):
+    """Voronoi fragment seeds in the scaled vase-local frame for the requested layout."""
+    if seed_layout == "regular":
+        return [
+            (x * VASE_SCALE, y * VASE_SCALE, z * VASE_SCALE) for x, y, z in sector_seeds(*fragment_layout(N_FRAGMENTS))
+        ]
+    mesh = trimesh.load(vase_mesh_file(), force="mesh")
+    mesh.apply_scale(VASE_SCALE)
+    count_lo, count_hi = fragment_count_window(seed_layout)
+    # The sampler's default radius band and impact-lobe height band target the full-size asset;
+    # scaling both keeps the fragment-size mix and lobe position on the half-size wall.
+    info = {}
+    seeds = sample_volume_seeds(
+        mesh=mesh,
+        count_range=(count_lo, count_hi),
+        rng_seed=layout_seed,
+        radius_range=(0.018 * VASE_SCALE, 0.05 * VASE_SCALE),
+        impact_band=(0.02 * VASE_SCALE, 0.10 * VASE_SCALE),
+        info_out=info,
+    )
+    print(
+        f"[random layout] accepted {len(seeds)} seeds (window {count_lo}-{count_hi}, seed {layout_seed}, "
+        f"rescale {info.get('rescale_factor', 1.0)})"
+    )
+    return [tuple(seed) for seed in seeds]
 
 
 def make_vase_surface():
@@ -117,8 +183,8 @@ def make_vase_surface():
     )
 
 
-def make_vase_material():
-    """Fracturable PBD solid material with the fixed 24-fragment Voronoi wall layout."""
+def make_vase_material(seed_layout="regular", layout_seed=3):
+    """Fracturable PBD solid material with the requested fragment Voronoi layout."""
     return gs.materials.PBD.Solid(
         sampler="regular",
         static_friction=0.8,
@@ -128,7 +194,7 @@ def make_vase_material():
         shear_threshold=0.2,
         rotation_threshold=0.25,
         seam_failure_threshold=1.0,
-        fragment_seeds=sector_seeds(*fragment_layout(N_FRAGMENTS)),
+        fragment_seeds=build_fragment_seeds(seed_layout, layout_seed),
         bond_radius_factor=1.15,
     )
 
@@ -137,7 +203,7 @@ def world_vase_mesh():
     """Vase surface mesh moved to the spawn pose (identity rotation by construction)."""
     mesh = mesh_utils.load_mesh(vase_mesh_file()).copy()
     mesh.merge_vertices(merge_tex=True, merge_norm=True)
-    mesh.vertices = mesh.vertices + np.array(VASE_POS)
+    mesh.vertices = mesh.vertices * VASE_SCALE + np.array(VASE_POS)
     return mesh
 
 
@@ -188,22 +254,23 @@ def water_candidate_positions():
         p_size=PBSTF_PARTICLE_SIZE,
         seed=seed,
         max_height=max_height,
+        clearance=MESH_CAVITY_CLEARANCE,
         height_axis=2,
     )
 
 
-def filter_water_by_proxies(candidates, spawn_pos):
+def filter_water_by_proxies(candidates, spawn_pos, asset_dir):
     """Keep the candidates at least one hull clearance outside every fragment proxy hull."""
     clearance = HULL_CLEARANCE_FACTOR * PBSTF_PARTICLE_SIZE
     is_kept = np.ones(len(candidates), dtype=bool)
     for i_k in range(len(spawn_pos)):
-        verts, faces = read_obj(ASSET_DIR / proxy_obj_name(i_k))
+        verts, faces = read_obj(asset_dir / proxy_obj_name(i_k))
         distance = igl.signed_distance(candidates, verts + spawn_pos[i_k], faces)[0]
         is_kept &= distance >= clearance
     return candidates[is_kept], int(len(candidates) - is_kept.sum()), clearance
 
 
-def build_fragment_tetra_proxy(n_fragments):
+def build_fragment_tetra_proxy(n_fragments, asset_dir):
     """Merge per-fragment convex-hull fans into one tetra mesh with per-fragment independent vertices.
 
     Each fragment contributes its faces-referenced hull vertices plus one interior center; every
@@ -218,7 +285,7 @@ def build_fragment_tetra_proxy(n_fragments):
     min_tet_det = math.inf
     min_center_clearance = math.inf
     for i_k in range(n_fragments):
-        verts, faces = read_obj(ASSET_DIR / proxy_obj_name(i_k))
+        verts, faces = read_obj(asset_dir / proxy_obj_name(i_k))
         used = np.unique(faces.reshape(-1))
         remap = np.full(len(verts), -1, dtype=gs.np_int)
         remap[used] = np.arange(len(used))
@@ -301,8 +368,10 @@ def build_fragment_tetra_proxy(n_fragments):
     )
 
 
-def prepare_assets():
+def prepare_assets(args):
     """Export the fragment proxy OBJs and the filtered water spawn through the native bridge."""
+    asset_dir = layout_asset_dir(args.seed_layout, args.layout_seed)
+    water_npz = layout_water_npz(args.seed_layout, args.layout_seed)
     gs.init(backend=gs.cuda, precision="32", logging_level="info")
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
@@ -318,18 +387,24 @@ def prepare_assets():
     )
     vase = scene.add_entity(
         morph=make_vase_morph(),
-        material=make_vase_material(),
+        material=make_vase_material(args.seed_layout, args.layout_seed),
         surface=make_vase_surface(),
     )
     bridge = PBDRigidFragmentBridge(scene.sim)
     scene.sim._pbd_rigid_fragment_bridge = bridge
-    ASSET_DIR.mkdir(parents=True, exist_ok=True)
-    bridge.register_solid_fragments(vase, proxy_dir=ASSET_DIR)
+    asset_dir.mkdir(parents=True, exist_ok=True)
+    for stale_obj in asset_dir.glob("fragment_proxy_*.obj"):
+        stale_obj.unlink()
+    bridge.register_solid_fragments(vase, proxy_dir=asset_dir)
     scene.build(n_envs=0)
 
     n_fragments = bridge.n_fragments
-    if n_fragments != N_FRAGMENTS:
-        gs.raise_exception(f"Fragment layout produced {n_fragments} fragments, expected {N_FRAGMENTS}.")
+    count_lo, count_hi = fragment_count_window(args.seed_layout)
+    if not count_lo <= n_fragments <= count_hi:
+        gs.raise_exception(
+            f"The '{args.seed_layout}' fragment layout produced {n_fragments} fragments, "
+            f"expected {count_lo}-{count_hi}."
+        )
     links_idx = fragment_link_idxs(scene, n_fragments)
     spawn_pos, spawn_quat = fragment_spawn_poses(scene, links_idx)
     identity_quats = np.tile(np.array((1.0, 0.0, 0.0, 0.0)), (n_fragments, 1))
@@ -337,7 +412,7 @@ def prepare_assets():
         gs.raise_exception("Fragment spawn quaternions must be identity for the bundled asset frame.")
 
     candidates = water_candidate_positions()
-    positions, n_removed, clearance = filter_water_by_proxies(candidates, spawn_pos)
+    positions, n_removed, clearance = filter_water_by_proxies(candidates, spawn_pos, asset_dir)
     if len(positions) == 0:
         gs.raise_exception("Water sampling left no particle outside the fragment hull boundary.")
     if not np.isfinite(positions).all():
@@ -351,20 +426,22 @@ def prepare_assets():
         min_face_area_twice,
         min_tet_det,
         min_center_clearance,
-    ) = build_fragment_tetra_proxy(n_fragments)
+    ) = build_fragment_tetra_proxy(n_fragments, asset_dir)
     if not np.isfinite(proxy_vertices_local).all():
         gs.raise_exception("Fragment proxy tetra mesh contains non-finite vertices.")
     if proxy_elements.min() < 0 or proxy_elements.max() >= len(proxy_vertices_local):
         gs.raise_exception("Fragment proxy tetra elements reference vertices outside the merged mesh.")
 
     np.savez(
-        WATER_NPZ,
+        water_npz,
         positions=positions,
         particle_size=np.array(PBSTF_PARTICLE_SIZE),
         vase_pos=np.array(VASE_POS),
         fragment_pos=spawn_pos,
         fragment_quat=spawn_quat,
         n_fragments=np.array(n_fragments),
+        seed_layout=np.array(args.seed_layout),
+        layout_seed=np.array(args.layout_seed),
         proxy_vertices_local=proxy_vertices_local,
         proxy_elements=proxy_elements,
         proxy_vertex_offsets=proxy_vertex_offsets,
@@ -374,9 +451,10 @@ def prepare_assets():
     n_verts = 0
     n_faces = 0
     for i_k in range(n_fragments):
-        verts, faces = read_obj(ASSET_DIR / proxy_obj_name(i_k))
+        verts, faces = read_obj(asset_dir / proxy_obj_name(i_k))
         n_verts += len(verts)
         n_faces += len(faces)
+    print(f"seed layout: {args.seed_layout} (layout seed {args.layout_seed})")
     print(f"fragments: {n_fragments}")
     print(f"proxy hulls: {n_verts} vertices / {n_faces} triangles")
     print(
@@ -389,13 +467,13 @@ def prepare_assets():
         f"{n_removed}, kept: {len(positions)}"
     )
     print(f"water z range: {positions[:, 2].min():.4f} .. {positions[:, 2].max():.4f}")
-    print(f"assets written to {ASSET_DIR}")
+    print(f"assets written to {asset_dir}")
 
 
-def load_water_asset():
-    if not WATER_NPZ.exists():
-        gs.raise_exception(f"Missing {WATER_NPZ}; run with --prepare-proxies first.")
-    with np.load(WATER_NPZ) as data:
+def load_water_asset(water_npz):
+    if not water_npz.exists():
+        gs.raise_exception(f"Missing {water_npz}; run with --prepare-proxies first.")
+    with np.load(water_npz) as data:
         return {key: data[key] for key in data.files}
 
 
@@ -405,7 +483,7 @@ def hull_signed_volume(vertices, faces):
     )
 
 
-def verify_fragment_proxies(proxy_dir, n_fragments):
+def verify_fragment_proxies(proxy_dir, n_fragments, asset_dir):
     """Check the runtime fragment partition against the bundled asset partition at layout level.
 
     The particle sampler carries cross-process float32 noise that flips exact Voronoi-tie lattice
@@ -418,7 +496,7 @@ def verify_fragment_proxies(proxy_dir, n_fragments):
     asset_volumes = np.empty(n_fragments)
     runtime_volumes = np.empty(n_fragments)
     for i_k in range(n_fragments):
-        asset_verts, asset_faces = read_obj(ASSET_DIR / proxy_obj_name(i_k))
+        asset_verts, asset_faces = read_obj(asset_dir / proxy_obj_name(i_k))
         runtime_verts, runtime_faces = read_obj(Path(proxy_dir) / proxy_obj_name(i_k))
         if abs(len(asset_verts) - len(runtime_verts)) > max(3, int(0.15 * len(asset_verts))):
             gs.raise_exception(
@@ -508,18 +586,38 @@ def measure_wall_clearance(scene, water, bridge, links_idx, proxy_dir, n_fragmen
     }
 
 
-def collect_metrics(scene, water, bridge, args, n_fragments, wall_time, proxy_deviations, collider):
+def collect_metrics(
+    scene, water, bridge, args, n_fragments, wall_time, proxy_deviations, collider, pbstf_options, water_material
+):
     positions = tensor_to_array(water.get_particles_pos())
     commit_counts = bridge.read_commit_counts().reshape(-1)
     commit_rejected = bridge.read_commit_rejected().reshape(-1)
     return {
         "mode": "settle_only" if args.settle_only else "drop",
+        "seed_layout": args.seed_layout,
+        "layout_seed": args.layout_seed,
         "water_render": args.water_render,
         "duration_s": args.duration,
         "sim_time_s": float(scene.cur_t),
         "wall_time_s": wall_time,
         "n_fragments": n_fragments,
         "n_water_particles": int(water.n_particles),
+        "water_particle_size": float(pbstf_options.particle_size),
+        "pbf_max_solver_iterations": pbstf_options.max_solver_iterations,
+        "pbf_iteration_option": "PBSTFOptions.max_solver_iterations",
+        "pbstf_options": pbstf_options.model_dump(mode="json"),
+        "water_material": {
+            "sampler": water_material.sampler,
+            "rho": water_material.rho,
+            "density_compliance": water_material.density_compliance,
+            "surface_tension_compliance": water_material.surface_tension_compliance,
+            "surface_distance_compliance": water_material.surface_distance_compliance,
+            "interior_distance_compliance": water_material.interior_distance_compliance,
+            "surface_viscosity": water_material.surface_viscosity,
+            "interior_viscosity": water_material.interior_viscosity,
+            "c_init": water_material.c_init,
+        },
+        "wall_collider_options": [options.model_dump(mode="json") for options in pbstf_options.static_colliders],
         "all_positions_finite": bool(np.isfinite(positions).all()),
         "water_min_z": float(positions[:, 2].min()),
         "water_max_z": float(positions[:, 2].max()),
@@ -544,10 +642,17 @@ def collect_metrics(scene, water, bridge, args, n_fragments, wall_time, proxy_de
 
 
 def run_sim(args):
-    asset = load_water_asset()
+    asset = load_water_asset(layout_water_npz(args.seed_layout, args.layout_seed))
     n_fragments = int(asset["n_fragments"])
-    if n_fragments != N_FRAGMENTS:
+    count_lo, count_hi = fragment_count_window(args.seed_layout)
+    if not count_lo <= n_fragments <= count_hi:
         gs.raise_exception("Bundled water asset targets a different fragment count; regenerate with --prepare-proxies.")
+    if "seed_layout" not in asset:
+        gs.raise_exception("Bundled water asset predates the layout options; regenerate with --prepare-proxies.")
+    if str(asset["seed_layout"]) != args.seed_layout or int(asset["layout_seed"]) != args.layout_seed:
+        gs.raise_exception(
+            "Bundled water asset was generated for a different layout; regenerate with --prepare-proxies."
+        )
     if not np.isclose(float(asset["particle_size"]), PBSTF_PARTICLE_SIZE):
         gs.raise_exception("Bundled water asset uses a different particle size; regenerate with --prepare-proxies.")
 
@@ -570,10 +675,14 @@ def run_sim(args):
         collider_center = collider_center + shift
     proxy_spawn_vertices = proxy_vertices_local + np.repeat(spawn_pos, np.diff(proxy_vertex_offsets), axis=0)
 
+    gs.init(backend=gs.cuda, precision="32", logging_level="info")
     static_colliders = [
         gs.options.PBSTFAbsorbentBoxStaticColliderOptions(
             pos=tuple(collider_center),
             quat=(1.0, 0.0, 0.0, 0.0),
+            is_collider_adhesion_friction_enabled=True,
+            collider_adhesion_compliance=50.0,
+            collider_friction=0.1,
             absorption_rate=ABSORPTION_RATE,
             absorption_capacity_fraction=ABSORPTION_CAPACITY_FRACTION,
             lower=(-COLLIDER_BOX_HALF, -COLLIDER_BOX_HALF, -COLLIDER_BOX_HALF),
@@ -583,12 +692,37 @@ def run_sim(args):
         gs.options.PBSTFBoxStaticColliderOptions(
             pos=(0.0, 0.0, 0.0),
             quat=(1.0, 0.0, 0.0, 0.0),
+            is_collider_adhesion_friction_enabled=True,
+            collider_adhesion_compliance=50.0,
+            collider_friction=0.5,
             lower=TABLE_LOWER,
             upper=TABLE_UPPER,
         ),
     ]
+    pbstf_options = gs.options.PBSTFOptions(
+        diffusion_coeff=0.001,
+        particle_size=PBSTF_PARTICLE_SIZE,
+        lower_bound=(-1.0, -1.0, 0.0),
+        upper_bound=(1.0, 1.0, 1.5),
+        max_solver_iterations=10,
+        topology_rebuild_interval=10,
+        max_surface_neighbors=128,
+        max_localmesh_neighbors=64,
+        enable_pca_normals=False,
+        static_colliders=static_colliders,
+    )
+    water_material = gs.materials.PBSTF.Liquid(
+        sampler="regular",
+        rho=1000.0,
+        density_compliance=375000.0,
+        surface_tension_compliance=1.0 / 225.0,
+        surface_distance_compliance=40.0,
+        interior_distance_compliance=180.0,
+        surface_viscosity=0.5,
+        interior_viscosity=0.5,
+        c_init=0.0,
+    )
 
-    gs.init(backend=gs.cuda, precision="32", logging_level="info")
     camera_pos = CAMERA_POS_SETTLE if args.settle_only else CAMERA_POS_DROP_CLOSE
     camera_lookat = CAMERA_LOOKAT_SETTLE if args.settle_only else CAMERA_LOOKAT_DROP_CLOSE
     scene = gs.Scene(
@@ -608,17 +742,7 @@ def run_sim(args):
         coupler_options=gs.options.LegacyCouplerOptions(
             rigid_fem=False,
         ),
-        pbstf_options=gs.options.PBSTFOptions(
-            particle_size=PBSTF_PARTICLE_SIZE,
-            lower_bound=(-1.0, -1.0, 0.0),
-            upper_bound=(1.0, 1.0, 1.5),
-            max_solver_iterations=5,
-            topology_rebuild_interval=10,
-            max_surface_neighbors=128,
-            max_localmesh_neighbors=64,
-            enable_pca_normals=False,
-            static_colliders=static_colliders,
-        ),
+        pbstf_options=pbstf_options,
         viewer_options=gs.options.ViewerOptions(
             realtime_factor=1.0,
             camera_pos=camera_pos,
@@ -645,7 +769,7 @@ def run_sim(args):
     )
     vase = scene.add_entity(
         morph=make_vase_morph(pos=vase_pos),
-        material=make_vase_material(),
+        material=make_vase_material(args.seed_layout, args.layout_seed),
         surface=make_vase_surface(),
     )
     # the hidden FEM proxy is the deformable geometry of the single PBSTF boundary; adding it before
@@ -657,7 +781,7 @@ def run_sim(args):
             elements=proxy_elements,
         ),
         material=gs.materials.FEM.Elastic(
-            E=1.0e4,
+            E=PROXY_YOUNGS_MODULUS,
             model="stable_neohookean",
         ),
         surface=gs.surfaces.Default(
@@ -669,16 +793,7 @@ def run_sim(args):
         morph=gs.morphs.Particles(
             positions=water_positions,
         ),
-        material=gs.materials.PBSTF.Liquid(
-            sampler="regular",
-            rho=1000.0,
-            density_compliance=33750.0,
-            surface_tension_compliance=3.0 / 225.0,
-            surface_distance_compliance=40.0,
-            interior_distance_compliance=180.0,
-            surface_viscosity=0.2,
-            interior_viscosity=0.05,
-        ),
+        material=water_material,
         surface=gs.surfaces.Default(
             color=(0.08, 0.3, 0.8, 0.9),
             vis_mode="recon" if args.water_render == "recon" else "particle",
@@ -720,7 +835,7 @@ def run_sim(args):
 
     if bridge.n_fragments != n_fragments:
         gs.raise_exception(f"Runtime registration produced {bridge.n_fragments} fragments, expected {n_fragments}.")
-    verify_fragment_proxies(proxy_dir, n_fragments)
+    verify_fragment_proxies(proxy_dir, n_fragments, layout_asset_dir(args.seed_layout, args.layout_seed))
 
     links_idx = fragment_link_idxs(scene, n_fragments)
     spawn_pose_pos, spawn_pose_quat = fragment_spawn_poses(scene, links_idx)
@@ -784,7 +899,9 @@ def run_sim(args):
     for i_k in range(n_fragments):
         block = slice(*proxy_vertex_offsets[i_k : i_k + 2])
         proxy_deviations.append(float(np.abs(proxy_positions[block] - proxy_target[block]).max()))
-    metrics = collect_metrics(scene, water, bridge, args, n_fragments, wall_time, proxy_deviations, collider)
+    metrics = collect_metrics(
+        scene, water, bridge, args, n_fragments, wall_time, proxy_deviations, collider, pbstf_options, water_material
+    )
     metrics["keyframe_wall_clearance"] = keyframe_diagnostics
     if args.metrics_output is not None:
         args.metrics_output.parent.mkdir(parents=True, exist_ok=True)
@@ -816,6 +933,18 @@ def main():
         default="recon",
         help="render the liquid as a reconstructed surface or as particles",
     )
+    parser.add_argument(
+        "--seed-layout",
+        choices=("regular", "random"),
+        default="regular",
+        help="fragment seed layout: the fixed wall grid or a volumetric random sample",
+    )
+    parser.add_argument(
+        "--layout-seed",
+        type=int,
+        default=3,
+        help="RNG seed for the random fragment layout",
+    )
     parser.add_argument("--metrics-output", type=Path, default=None, help="write the run metrics JSON here")
     parser.add_argument("--keyframe-dir", type=Path, default=None, help="save rendered keyframes here")
     parser.add_argument(
@@ -829,7 +958,7 @@ def main():
     if args.duration <= 0.0:
         parser.error("--duration must be positive")
     if args.prepare_proxies:
-        prepare_assets()
+        prepare_assets(args)
         return
     run_sim(args)
 
