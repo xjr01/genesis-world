@@ -48,12 +48,17 @@ def main():
         and rendering.get("effective_samples") == rendering["samples"]
         and all(frame.get("effective_samples") == rendering["samples"] for frame in rendering["frames"])
     )
+    is_film_shader_verified = (
+        rendering["film_shader_sha256"]
+        == hashlib.sha256((Path(__file__).parent / "materials/blade_film.mdl").read_bytes()).hexdigest()
+    )
     is_passed = bool(
         simulation["is_complete"]
         and physics["is_passed"]
         and rendering["is_complete"]
         and matches
         and is_sampling_verified
+        and is_film_shader_verified
         and surface["frames"] == simulation["frames"]
         and surface["film_partition_max_relative_error"] < 1e-12
         and surface["film_sheet_max_volume_error_m3"] < 1e-15
@@ -72,6 +77,8 @@ def main():
         "state_sha256": state_hash,
         "all_state_hashes_match": matches,
         "is_sampling_verified": is_sampling_verified,
+        "is_film_shader_verified": is_film_shader_verified,
+        "film_shader_sha256": rendering["film_shader_sha256"],
         "effective_samples": rendering.get("effective_samples"),
         "videos": video_reports,
         "pickup_fraction": physics["pickup_fraction"],

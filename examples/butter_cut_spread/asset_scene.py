@@ -13,7 +13,7 @@ import omni.replicator.core as rep
 import omni.usd
 import trimesh
 from PIL import Image, ImageDraw
-from pxr import Gf, Sdf, UsdGeom, UsdLux, UsdShade
+from pxr import Gf, Sdf, UsdGeom, UsdLux, UsdShade, Vt
 
 from examples.butter_cut_spread.aligned_scene import build_aligned_assets
 from examples.butter_cut_spread.appearance import ButterAppearance
@@ -103,27 +103,35 @@ def render(
     film_settings = FilmSettings(**report["film_settings"])
     film_material = UsdShade.Material.Define(stage, "/World/Materials/BladeFilm")
     shader = UsdShade.Shader.Define(stage, "/World/Materials/BladeFilm/Surface")
-    shader.CreateIdAttr("UsdPreviewSurface")
-    shader.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).Set(Gf.Vec3f(*film_settings.color))
+    film_shader_path = Path(__file__).parent / "materials/blade_film.mdl"
+    shader.CreateImplementationSourceAttr(UsdShade.Tokens.sourceAsset)
+    shader.SetSourceAsset(Sdf.AssetPath(str(film_shader_path.resolve())), "mdl")
+    shader.SetSourceAssetSubIdentifier("BladeFilm", "mdl")
+    shader.CreateOutput("out", Sdf.ValueTypeNames.Token)
+    shader.CreateInput("tint", Sdf.ValueTypeNames.Color3f).Set(Gf.Vec3f(*film_settings.color))
     shader.CreateInput("roughness", Sdf.ValueTypeNames.Float).Set(film_settings.roughness)
-    shader.CreateInput("ior", Sdf.ValueTypeNames.Float).Set(1.05)
-    shader.CreateInput("opacityThreshold", Sdf.ValueTypeNames.Float).Set(0.0)
-    reader = UsdShade.Shader.Define(stage, "/World/Materials/BladeFilm/Opacity")
-    reader.CreateIdAttr("UsdPrimvarReader_float")
-    reader.CreateInput("varname", Sdf.ValueTypeNames.Token).Set("displayOpacity")
-    shader.CreateInput("opacity", Sdf.ValueTypeNames.Float).ConnectToSource(reader.ConnectableAPI(), "result")
-    film_material.CreateSurfaceOutput().ConnectToSource(shader.ConnectableAPI(), "surface")
+    film_material.CreateSurfaceOutput("mdl").ConnectToSource(shader.ConnectableAPI(), "out")
     film_opacity = []
+    film_meshes = []
     for side_index in range(2):
         prim = UsdGeom.Mesh.Define(stage, f"/World/Tool/ButterFilm{side_index}")
-        upload_triangle_mesh(prim, trimesh.Trimesh(film_vertices[side_index], film_faces[side_index], process=False))
+        vertices = film_vertices[side_index]
+        prim.GetPointsAttr().Set(Vt.Vec3fArray.FromNumpy(vertices.astype(np.float32)))
+        prim.GetExtentAttr().Set(
+            Vt.Vec3fArray.FromNumpy(np.stack((vertices.min(axis=0), vertices.max(axis=0))).astype(np.float32))
+        )
+        prim.GetFaceVertexCountsAttr().Set(Vt.IntArray())
+        prim.GetFaceVertexIndicesAttr().Set(Vt.IntArray())
+        prim.GetVisibilityAttr().Set("invisible")
         prim.CreateSubdivisionSchemeAttr("none")
         prim.CreateDoubleSidedAttr(False)
-        prim.SetNormalsInterpolation("vertex")
+        prim.SetNormalsInterpolation("uniform")
+        prim.GetNormalsAttr().Set(Vt.Vec3fArray())
         UsdShade.MaterialBindingAPI.Apply(prim.GetPrim()).Bind(film_material)
         opacity = prim.CreateDisplayOpacityPrimvar(UsdGeom.Tokens.vertex)
         opacity.Set(np.zeros(len(film_vertices[side_index]), dtype=np.float32))
         film_opacity.append(opacity)
+        film_meshes.append(prim)
     create_lights(stage, 0, False)
     if bread_replay is not None:
         # Center the unchanged neutral light rig on the two-workspace layout.
@@ -175,9 +183,24 @@ def render(
             film_path = run / "blade-film" / f"{i:04d}.npz"
             if hashlib.sha256(film_path.read_bytes()).hexdigest() != report["film_files_sha256"][film_path.name]:
                 raise ValueError("Blade film frame differs from its reconstruction manifest.")
+            visible_film_triangles = []
             with np.load(film_path) as coating:
                 for side_index, opacity in enumerate(film_opacity):
-                    opacity.Set(coating["opacity"][side_index].astype(np.float32))
+                    values = coating["opacity"][side_index]
+                    # Match standalone cutting: zero-coverage triangles must not
+                    # enter RTX as transparent geometry, where they can still
+                    # produce reflections and a rectangular moving silhouette.
+                    faces = film_faces[side_index]
+                    visible = faces[np.max(values[faces], axis=1) > 1e-6]
+                    prim = film_meshes[side_index]
+                    prim.GetFaceVertexCountsAttr().Set(Vt.IntArray.FromNumpy(np.full(len(visible), 3, dtype=np.int32)))
+                    prim.GetFaceVertexIndicesAttr().Set(Vt.IntArray.FromNumpy(visible.reshape(-1).astype(np.int32)))
+                    normals = np.zeros((len(visible), 3), dtype=np.float32)
+                    normals[:, 2] = 2 * side_index - 1
+                    prim.GetNormalsAttr().Set(Vt.Vec3fArray.FromNumpy(normals))
+                    prim.GetVisibilityAttr().Set("inherited" if len(visible) else "invisible")
+                    opacity.Set(Vt.FloatArray.FromNumpy(values.astype(np.float32)))
+                    visible_film_triangles.append(len(visible))
             translation.Set(Gf.Vec3d(*map(float, centers[i])))
             q = quats[i]
             orientation.Set(Gf.Quatf(float(q[0]), Gf.Vec3f(*map(float, q[1:]))))
@@ -222,6 +245,7 @@ def render(
                     "capture_seconds": capture_seconds,
                     "upload_error_m": float(error),
                     "effective_samples": settings.get_as_int("/rtx/pathtracing/totalSpp"),
+                    "visible_film_triangles_negative_positive": visible_film_triangles,
                 }
             )
             print(f"Rendered {i + 1}/{len(times)}", flush=True)
@@ -233,6 +257,8 @@ def render(
             {
                 "is_complete": len(indices) == len(times),
                 "blade_film": "Two rotating particle-driven opacity sheets; complementary bulk weights; approximate thin coating BRDF.",
+                "film_shader_sha256": hashlib.sha256(film_shader_path.read_bytes()).hexdigest(),
+                "film_visibility": "Whole-BSDF stochastic coverage; zero-coverage triangles omitted; constant face normals.",
                 "film_settings": asdict(film_settings),
                 "state_sha256": state_hash,
                 "appearance_sha256": hashlib.sha256(profile.read_bytes()).hexdigest(),

@@ -30,6 +30,9 @@ Isaac 环境需要 Isaac Sim、NumPy、SciPy、trimesh、Pillow 和 imageio-ffmp
 逐帧报告区分 `geometry_seconds` 与 `capture_seconds`，便于区分几何更新和图像采样的开销。
 
 厚黄油由原粒子重建；刀面薄残留通过 `blade_film.py` 分配到双面透明薄层，实体与薄层使用互补的粒子体积权重。
+薄层使用随仓库提供的 `materials/blade_film.mdl`，覆盖率控制整层材质（包括反光）的可见性。
+每帧剔除无覆盖三角面并更新朝外法线，避免透明矩形轮廓与刀具移动时的反光伪影。
+该 MDL 文件也是独立运行所需文件；渲染报告记录它的哈希，最终检查核对实际使用的版本。
 薄层随真实刀具变换，透明度由局部粒子体积驱动。`blade-film/` 的几何及逐帧文件哈希写入表面清单，渲染时逐一验证。
 完整规则见 [HYBRID_ADHESION.md](HYBRID_ADHESION.md)。靠近面包的薄涂层继续使用保持粒子静止体积的各向异性核。
 `--coating-voxel 0.0001` 将已经转移到面包区域的独立黄油部分以 0.1 mm 网格重建，

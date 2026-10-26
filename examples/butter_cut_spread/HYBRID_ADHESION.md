@@ -68,6 +68,17 @@ through sparse coverage. Thick remnants retain reconstructed three-dimensional
 geometry. The renderer reads prepared film arrays and requires no simulation or
 surface-reconstruction dependencies in its Isaac environment.
 
+`materials/blade_film.mdl` applies particle coverage to the entire coating BSDF,
+including its specular component. Uncovered steel therefore receives no extra
+reflection or refraction. The coating has a small fixed specular contribution
+and diffuse tint, with stochastic geometric coverage exposing the original
+steel underneath. This deliberately avoids `UsdPreviewSurface` opacity, which
+can retain a reflective/refractive interface even at zero opacity in Isaac RTX.
+Triangles with no coverage are omitted, and each uploaded triangle receives the
+same outward blade-face normal. No rectangular transparent card follows the tool.
+See [the artifact investigation](FILM_ARTIFACT_VALIDATION.md) for the zero-coverage
+ablation and alignment measurements.
+
 The bread coating retains its normalized anisotropic reconstruction and bounded
 sampling-gap repair. Released blade particles continue into that reconstruction
 through their original identities. No permanent painted residue is left behind
