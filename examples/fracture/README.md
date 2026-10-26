@@ -39,7 +39,9 @@ python examples/fracture/pbd_vase_fracture.py --duration 3
 | `-r`, `--record` | off | Record an MP4 video of the shatter to `--output`. |
 | `--duration` | 8.0 | Simulation duration in seconds. |
 | `--output` | `pbd_vase_fracture.mp4` | Recording output path (created only with `--record`). |
-| `--fragments` | 12 | Number of pre-seeded fragments (4-64); the actual count equals sectors x bands. |
+| `--fragments` | 12 | Number of pre-seeded fragments (4–64); with `regular` the actual count equals sectors × bands. |
+| `--seed-layout` | `regular` | Fragment seed layout: `regular` (ring × sector grid) or `random` (volumetric variable-density). |
+| `--layout-seed` | 3 | RNG seed for the `random` layout; deterministic across runs. |
 
 ## Key simulation parameters (set in source)
 
@@ -54,7 +56,7 @@ initial pose, or material, edit `main()` directly.
 | `rotation_threshold` | 0.25 | Relative rotation threshold (rad) for bond failure. |
 | `seam_failure_threshold` | 1.0 | Seam damage threshold at fragment interfaces. |
 | `bond_radius_factor` | 1.15 | Bond search radius multiplier; higher = more neighbor bonds. |
-| `fragment_seeds` | set by `--fragments` | Voronoi seed layout; controlled by the `--fragments` CLI flag. |
+| `fragment_seeds` | set by `--seed-layout` + `--fragments` | Voronoi seed layout; `regular` uses a ring × sector grid, `random` samples the wall volume with variable-density Poisson-disk (see `genesis/utils/fracture_seeds.py`). |
 | `dt` | 2e-3 s | Simulation timestep per outer step. |
 | `substeps` | 10 | PBD solver iterations per outer step. |
 

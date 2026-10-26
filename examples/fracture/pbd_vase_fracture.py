@@ -5,9 +5,11 @@ import tempfile
 from pathlib import Path
 
 import numpy as np
+import trimesh
 
 import genesis as gs
 from genesis.engine.couplers.pbd_rigid_fragments import PBDRigidFragmentBridge
+from genesis.utils.fracture_seeds import sample_volume_seeds
 from genesis.utils.misc import tensor_to_array
 
 
@@ -55,12 +57,37 @@ def fragment_layout(n_fragments):
     return n_sectors, bands
 
 
+def _build_seeds(args):
+    """Return the fragment_seeds list from the requested layout."""
+    if args.seed_layout == "regular":
+        n_sectors, bands = fragment_layout(args.fragments)
+        return sector_seeds(n_sectors, bands)
+    mesh = trimesh.load(
+        os.path.join(gs.utils.get_assets_dir(), "meshes", "vase.obj"), force="mesh"
+    )
+    info = {}
+    seeds = sample_volume_seeds(
+        mesh=mesh,
+        count_range=(max(args.fragments - 6, 4), args.fragments + 6),
+        rng_seed=args.layout_seed,
+        info_out=info,
+    )
+    print(
+        f"[random layout] accepted {len(seeds)} seeds "
+        f"(requested window {max(args.fragments - 6, 4)}-{args.fragments + 6}, "
+        f"rescale {info.get('rescale_factor', 1.0)})"
+    )
+    return [tuple(s) for s in seeds]
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("-v", "--vis", action="store_true", default=False)
     parser.add_argument("-r", "--record", action="store_true", default=False, help="record an mp4 of the shatter")
     parser.add_argument("--duration", type=float, default=8.0, help="simulation duration in seconds")
     parser.add_argument("--output", type=Path, default=Path("pbd_vase_fracture.mp4"), help="recording output path")
+    parser.add_argument("--seed-layout", choices=["regular", "random"], default="regular")
+    parser.add_argument("--layout-seed", type=int, default=3, help="RNG seed for the random layout")
     parser.add_argument("--fragments", type=int, default=12,
                         help="number of pre-seeded fragments (4-64); the actual count equals sectors x bands" )
     args = parser.parse_args()
@@ -120,7 +147,7 @@ def main():
             seam_failure_threshold=1.0,
             # The seed count controls the partition granularity; denser layouts produce smaller shards
             # that may rock on their hull facets before resting (condim=3 carries no rolling friction).
-            fragment_seeds=sector_seeds(*fragment_layout(args.fragments)),
+            fragment_seeds=_build_seeds(args),
             bond_radius_factor=1.15,
         ),
         surface=gs.surfaces.Default(
