@@ -13,6 +13,7 @@
 | 茶壶倒水、扫水、海绵吸水 | [茶壶与 PBSTF](examples/multiflow/teapot/README.md) | 初始抓取、工具轨迹、壁面黏附、吸收 |
 | 双臂叠衣服 | [Scene527 叠衣服](examples/garment_folding/README.md) | 初始沉降、关节轨迹、布料接触、断点恢复 |
 | 涂抹黄油 | [黄油涂抹](examples/butter_spreading/README.md) | 刀具压入、涂抹与抬起、材料及接触 |
+| 切黄油并涂抹 | [独立运行与 Isaac 渲染](examples/butter_cut_spread/STANDALONE.md) | 自带资产、固定材质、加速模拟与薄层重建 |
 | 花瓶破碎 | [破碎示例](examples/fracture/README.md) | 初始冲击、分块、破坏阈值及碎片接触 |
 
 部分示例通过直接设置工具位姿或机器人关节位置规定运动。它们适合先验证几何、轨迹与接触；评估控制策略时还需接入执行器控制，检查实际运动与目标的偏差。

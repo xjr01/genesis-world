@@ -210,6 +210,8 @@ def _apply_contact(
                 self.momentum[b, node[0], node[1]] += wm * self.particles[f, i, b].vel
 
     for b, i in qd.ndrange(self.n_envs, (self.butter_start, self.butter_end)):
+        if not self._solver.particles_ng[f, i, b].active:
+            continue
         pos = self.particles[f, i, b].pos
         vel = self.particles[f, i, b].vel
         base, frac = _cell(pos, self)
@@ -261,7 +263,7 @@ def _apply_contact(
             blade_velocity += qd.Vector([angular_velocity[b, axis] for axis in range(3)]).cross(offset)
         closest = qd.min(qd.max(local, -self.half_blade), self.half_blade)
         delta = local - closest
-        distance = delta.norm(1.0e-12)
+        distance = delta.norm()
         blade_gap = distance - 0.5 * self.spacing
         if distance > 1.0e-6 and blade_gap < self.blade_contact_range and self.blade_stress > 0.0:
             n = delta / distance

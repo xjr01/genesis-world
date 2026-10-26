@@ -90,8 +90,9 @@ def main():
         blade_size=(0.022, 0.035, float(thickness)),
         blade_bevel_height=0.0,
         cut_offset=float(butter.extents[0] / 2 - 0.005),
-        cut_end_time=2.6,
-        spread_transition_time=100.0,
+        cut_end_time=2.9,
+        board_normal_stress=0.0,
+        board_shear_stress=0.0,
         lower_bound=(*tuple(dish.bounds[0, :2] - 0.025), -0.015),
         upper_bound=(*tuple(dish.bounds[1, :2] + 0.025), 0.14),
     )
@@ -104,6 +105,8 @@ def main():
         "knife_source_to_local_rotation": basis.tolist(),
         "blade_thickness_m": float(thickness),
         "cutting_roll_degrees": -15.0,
+        "cutting_direction": -1,
+        "lift_outward_clearance_m": 0.003,
         "blade_min_z_when_cutting_m": float(
             (Rotation.from_euler("x", -15, degrees=True) * Rotation.from_euler("y", -90, degrees=True))
             .apply(knife[-1].vertices)[:, 2]

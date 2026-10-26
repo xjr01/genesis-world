@@ -1,0 +1,27 @@
+mdl 1.8;
+
+import ::df::*;
+import ::math::*;
+import ::scene::*;
+
+// Particle coverage gates the entire BSDF, including specular reflection.
+// There is no refractive slab where coverage is zero.
+export material BladeFilm(
+    uniform color tint = color(0.96, 0.84, 0.56),
+    uniform float roughness = 0.38
+) = material(
+    thin_walled: true,
+    surface: material_surface(
+        scattering: df::weighted_layer(
+            weight: 0.02,
+            layer: df::microfacet_ggx_smith_bsdf(
+                roughness_u: roughness * roughness,
+                roughness_v: roughness * roughness
+            ),
+            base: df::diffuse_reflection_bsdf(tint: tint)
+        )
+    ),
+    geometry: material_geometry(
+        cutout_opacity: math::clamp(scene::data_lookup_float("displayOpacity", 0.0), 0.0, 1.0)
+    )
+);

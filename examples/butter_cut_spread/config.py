@@ -13,6 +13,8 @@ class Config:
     fps: int = 24
     seed: int = 17
     particle_size: float = 0.0004
+    # Fix the calibrated contact shell while varying integration quadrature density.
+    contact_particle_size: float | None = None
     bread_particle_size: float = 0.0008
     grid_density: int = 768
     blade_size: tuple[float, float, float] = (0.020, 0.048, 0.0008)
@@ -26,21 +28,17 @@ class Config:
     lower_bound: tuple[float, float, float] = (-0.18, -0.08, -0.015)
     upper_bound: tuple[float, float, float] = (0.15, 0.08, 0.115)
     cut_offset: float = 0.0354
-    normal_stress: float = 450.0
-    shear_stress: float = 1000.0
-    spread_normal_stress: float = 100.0
-    spread_shear_stress: float = 150.0
-    spread_adhesion_range: float = 0.0008
     adhesion_range: float = 0.0008
+    adhesion_capture_range: float | None = None
     board_normal_stress: float = 40.0
     board_shear_stress: float = 80.0
     cut_end_time: float = 0.95
-    spread_transition_time: float = 3.6
     spread_start_offset: float = -0.037
     spread_end_offset: float = -0.0196
     spread_start_gap: float = 0.0028
     spread_end_gap: float = 0.00254
     spread_pitch_degrees: float = 0.0
+    spread_yaw_degrees: float = 0.0
 
 
 PHASES = (

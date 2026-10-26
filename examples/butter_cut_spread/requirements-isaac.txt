@@ -1,0 +1,8 @@
+# Install in a separate Python 3.11 environment; do not install Genesis here.
+--extra-index-url https://pypi.nvidia.com
+isaacsim[all,extscache]==5.1.0
+numpy==1.26.0
+scipy==1.15.3
+trimesh==4.5.1
+Pillow==11.3.0
+imageio-ffmpeg==0.6.0

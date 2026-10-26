@@ -7,11 +7,11 @@ Blender surface shaders do not specify its mechanical properties.
 
 Pass a partial `ButterParameters` JSON through `--material` to either `asset_demo`
 or `demo`. Each output directory stores the full effective `material.json`.
-The real-asset `asset_demo` defaults to `asset_material.json` (160 Pa / 15 Pa s^0.5).
+The real-asset `asset_demo` defaults to `asset_material.json` (240 Pa / 15 Pa s^0.5).
 The primitive `demo` and `pipeline` retain the standard example material unless a
 preset is selected explicitly. Shared material and engine defaults are unchanged.
 For `asset_demo`, a partial custom file overrides the asset preset, so changing
-only consistency retains yield stress 160 Pa. For the primitive `demo` and
+only consistency retains yield stress 240 Pa. For the primitive `demo` and
 `pipeline`, omitted fields use the standard `ButterParameters` defaults. Pass the
 full `asset_material.json` to use the fitted material there.
 
@@ -25,7 +25,7 @@ trajectory so that the same mesh cannot silently acquire different mechanics.
 
 ```json
 {
-  "yield_stress": 160.0,
+  "yield_stress": 240.0,
   "consistency": 15.0
 }
 ```
@@ -35,6 +35,68 @@ trajectory so that the same mesh cannot silently acquire different mechanics.
 shear modulus 20,000 Pa, and bulk modulus 150,000 Pa. The selected preset is an
 engineering fit for the asset described below, not an experimentally measured
 material. Other dimensions, temperatures and trajectories need their own checks.
+
+## Slightly firmer slices and external trajectories
+
+First inspect the material actually passed to `HerschelBulkleyButter`. The engine
+constructor defaults to yield stress 80 Pa and consistency 25 Pa s^0.5; the asset
+demo explicitly loads 240 / 15. Importing the scene adapter, loading a mesh, or
+copying the preset beside an external program does not load that preset. An image
+alone cannot distinguish a missing preset from a material that is too soft.
+
+`configs/asset_firmer.json` is an explicit, complete six-parameter preset with
+yield stress 200 Pa and consistency 15 Pa s^0.5, retained for intermediate comparisons.
+The current 240 Pa default is 20% higher than this intermediate setting and 50%
+higher than the earlier 160 Pa preset (`configs/asset_yield_160.json`). Only yield
+stress changes between these presets. This raises the threshold for
+permanent shape change; elastic moduli, density, flow exponent, contact and
+trajectory settings stay fixed. It is a fitted option, not a measured butter
+property. Higher yield can preserve cut edges but also hinder spreading and
+release; validate it on the actual external motion before dataset production.
+
+Use the default without a material override. For comparison, select a lower-yield
+preset explicitly with the material flag, not the scene-configuration flag:
+
+```shell
+python -m examples.butter_cut_spread.asset_demo --assets out/aligned-prepared --run out/firmer-cut-spread --material examples/butter_cut_spread/configs/asset_firmer.json
+```
+
+For external integration, load the complete preset and save the effective material
+from the constructed instance. `dt` and `particle_size` below must be the actual
+simulation values; the example values match the calibrated asset workflow.
+
+```python
+from pathlib import Path
+
+import genesis as gs
+from examples.butter_spreading.config import ButterParameters
+
+parameters = ButterParameters.model_validate_json(Path("examples/butter_cut_spread/asset_material.json").read_text())
+material = gs.materials.MPM.HerschelBulkleyButter(
+    **parameters.model_dump(),
+    dt=0.000025,
+    particle_size=0.0004,
+)
+effective = ButterParameters.model_validate(
+    {name: material.model_dump()[name] for name in ButterParameters.model_fields}
+)
+Path("effective-butter-material.json").write_text(effective.model_dump_json(indent=2))
+print(effective.model_dump_json(indent=2))
+# Pass this same material instance to scene.add_entity(material=material, ...)
+```
+
+Log the effective values before comparing external runs. An 80 / 25 run has not
+loaded any asset preset; compare it explicitly with the selected 160 / 15,
+200 / 15 or default 240 / 15 material, rather than assuming that copying a JSON
+changed the mechanics. Keep adhesion, tool motion, asset size and numerical
+resolution fixed for that comparison.
+
+The local cut/lift comparison is recorded in [firmer material screening](FIRMER_VALIDATION.md).
+It supports reduced cut deformation and retained pickup on that trajectory, but
+does not establish acceptable spreading on an external trajectory.
+The current 240 Pa default has a separate
+[full authored-asset validation](DEFAULT_MATERIAL_VALIDATION.md). Do not substitute
+the 200 Pa reduced-stock screening for that full-scene result.
 
 ## Self-support before flow
 
@@ -106,14 +168,14 @@ contact settings, prescribed poses and recording times. At the end of the hold:
 | 160 | 25 | 0.550% | 86.220% |
 | 160 | 15 | 0.592% | 88.188% |
 
-Select 160 / 15 as the current engineering preset: it passes the longer support
+These earlier experiments selected 160 / 15 as an engineering preset: it passed the longer support
 hold, remains more compliant after yielding, and gave slightly more pickup in this
 single comparison. This is not a claim of a unique optimum or statistically proven
 pickup improvement. Neither candidate picks up the whole initial end slice.
 Changing viscosity alone does not guarantee complete cutting, adhesion or release.
 
-These material comparisons use one fixed control trajectory. The current asset
-trajectory separately corrects short-side cutting coverage and reaches 97.7955%
+These material comparisons use one fixed control trajectory. A later asset
+trajectory separately corrected short-side cutting coverage and reached 97.7955%
 pickup with the same 160 / 15 preset; see [validation](VALIDATION.md). This change
 in pickup is a trajectory comparison, not another material calibration result.
 
@@ -135,13 +197,13 @@ python -m examples.butter_cut_spread.particles --run out/spread-check
 python -m examples.butter_cut_spread.audit --run out/spread-check
 ```
 
-To run all three stages with the supplied fitted preset:
+To reproduce the earlier primitive compatibility run with its 160 Pa preset:
 
 ```shell
-python -m examples.butter_cut_spread.pipeline --run out/spread-fitted --material examples/butter_cut_spread/asset_material.json
+python -m examples.butter_cut_spread.pipeline --run out/spread-fitted --material examples/butter_cut_spread/configs/asset_yield_160.json
 ```
 
-The selected 160 / 15 preset also completed the full 5.75-second primitive
+The earlier 160 / 15 preset also completed the full 5.75-second primitive
 cut-and-spread operation: 230,000 steps, 720,000 butter particles, 325,404 bread
 particles, and 139 recorded frames. Its existing acceptance checks passed:
 

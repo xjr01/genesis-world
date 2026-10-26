@@ -5,7 +5,7 @@ import hashlib
 import json
 import math
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
 import numpy as np
@@ -149,7 +149,9 @@ def main():
         **wet.model_dump(exclude={"blade_normal_time"}),
         blade_normal_relaxation=0.0,
     )
-    contact = ToolContact(butter, config)
+    contact = ToolContact(butter, config, bread_contact=bread_contact)
+    # This geometric diagnostic has no deposited-film replay or mesh-anchor projection.
+    contact.parameters = replace(contact.parameters, residue_per_face=0)
     target_positions, target_quats = gs.tensor(positions), gs.tensor(quaternions)
     target_velocity = gs.tensor(np.column_stack((velocities, joint_angular)))
     centers, speeds, thetas, omegas = positions.tolist(), velocities.tolist(), angles.tolist(), angular.tolist()
