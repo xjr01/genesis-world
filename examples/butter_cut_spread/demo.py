@@ -149,7 +149,7 @@ def main():
         **wet.model_dump(exclude={"blade_normal_time"}),
         blade_normal_relaxation=0.0,
     )
-    contact = ToolContact(butter, config)
+    contact = ToolContact(butter, config, bread_contact=bread_contact)
     target_positions, target_quats = gs.tensor(positions), gs.tensor(quaternions)
     target_velocity = gs.tensor(np.column_stack((velocities, joint_angular)))
     centers, speeds, thetas, omegas = positions.tolist(), velocities.tolist(), angles.tolist(), angular.tolist()

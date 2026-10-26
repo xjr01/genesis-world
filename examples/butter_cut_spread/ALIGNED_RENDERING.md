@@ -29,7 +29,9 @@ Isaac 环境需要 Isaac Sim、NumPy、SciPy、trimesh、Pillow 和 imageio-ffmp
 三角面索引使用批量数组上传，避免逐行拼接百万面网格产生临时对象；顶点、法线、面顺序和显示精度保持不变。
 逐帧报告区分 `geometry_seconds` 与 `capture_seconds`，便于区分几何更新和图像采样的开销。
 
-黄油表面由原粒子重建，靠近面包的薄涂层使用保持粒子静止体积的各向异性核。
+厚黄油由原粒子重建；刀面薄残留通过 `blade_film.py` 分配到双面透明薄层，实体与薄层使用互补的粒子体积权重。
+薄层随真实刀具变换，透明度由局部粒子体积驱动。`blade-film/` 的几何及逐帧文件哈希写入表面清单，渲染时逐一验证。
+完整规则见 [HYBRID_ADHESION.md](HYBRID_ADHESION.md)。靠近面包的薄涂层继续使用保持粒子静止体积的各向异性核。
 `--coating-voxel 0.0001` 将已经转移到面包区域的独立黄油部分以 0.1 mm 网格重建，
 同时降低薄涂层法向核宽的下限；瓷盘中的主体仍使用 0.3 mm 网格。默认值 0.0003
 保留原重建设置。该选项只影响表面分辨率，不改变粒子、材质颜色或透明度。
@@ -63,3 +65,6 @@ ISAAC_PYTHON -m examples.butter_cut_spread.asset_render --run RUN_DIRECTORY --sa
 `--camera-target` 为世界坐标米制注视点，`--focal-length` 为毫米制焦距；省略时保留原注视点和焦距。
 相机水平/垂直光圈明确设置为 36/20.25 mm，与 1280×720 的画幅一致。取景参数写入渲染报告；
 这些选项不调整黄油材质、透明度或场景灯光。
+
+刀面近景可使用 `--frame-indices`、`--camera-eye`、`--camera-target` 和 `--output-name` 单独输出；
+指定帧的检查视频会如实标为非完整回放，原完整视频保留。

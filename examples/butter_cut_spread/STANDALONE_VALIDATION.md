@@ -1,5 +1,8 @@
 # Standalone integration validation — 2026-10-26
 
+This is the baseline record for commit `21db304a`. Subsequent symmetric adhesion
+and hybrid-film changes are described in [HYBRID_ADHESION.md](HYBRID_ADHESION.md).
+
 Validated on Windows with Python 3.11, RTX 5090 D v2, the Genesis checkout based
 on `1d3b9344`, and a separate Isaac Sim 5.1 environment. This record concerns the
 bundled fixed firm-smooth configuration and the current rendering code.

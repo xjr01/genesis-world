@@ -7,7 +7,9 @@ from examples.butter_spreading.surface import b2
 
 
 @njit(cache=True)
-def splat_density(points, origin, shape, voxel, width, volume, normal_widths=None, tangent_widths=None):
+def splat_density(
+    points, origin, shape, voxel, width, volume, normal_widths=None, tangent_widths=None, particle_weights=None
+):
     density = np.zeros(shape, dtype=np.float32)
     for i_p in range(len(points)):
         point = points[i_p]
@@ -18,6 +20,8 @@ def splat_density(points, origin, shape, voxel, width, volume, normal_widths=Non
             normal_width = normal_widths[i_p]
             tangent_width = tangent_widths[i_p]
             amplitude = volume / (tangent_width**2 * normal_width)
+        if particle_weights is not None:
+            amplitude *= particle_weights[i_p]
         low_x = max(int(np.ceil((point[0] - 1.5 * tangent_width - origin[0]) / voxel)), 0)
         low_y = max(int(np.ceil((point[1] - 1.5 * tangent_width - origin[1]) / voxel)), 0)
         low_z = max(int(np.ceil((point[2] - 1.5 * normal_width - origin[2]) / voxel)), 0)

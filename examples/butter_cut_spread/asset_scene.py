@@ -3,6 +3,7 @@
 import hashlib
 import json
 import time
+from dataclasses import asdict
 from pathlib import Path
 
 import carb
@@ -12,10 +13,11 @@ import omni.replicator.core as rep
 import omni.usd
 import trimesh
 from PIL import Image, ImageDraw
-from pxr import Gf, UsdGeom, UsdLux, UsdShade
+from pxr import Gf, Sdf, UsdGeom, UsdLux, UsdShade
 
 from examples.butter_cut_spread.aligned_scene import build_aligned_assets
 from examples.butter_cut_spread.appearance import ButterAppearance
+from examples.butter_cut_spread.film_settings import FilmSettings
 from examples.butter_cut_spread.isaac_materials import (
     box,
     configure_pathtracing,
@@ -27,7 +29,18 @@ from examples.butter_cut_spread.mesh_upload import upload_triangle_mesh
 from examples.butter_cut_spread.replay_frames import replay_indices
 
 
-def render(app, run, samples, preview, started, camera_target=None, focal_length=None):
+def render(
+    app,
+    run,
+    samples,
+    preview,
+    started,
+    camera_target=None,
+    focal_length=None,
+    camera_eye=None,
+    frame_indices=None,
+    output_name=None,
+):
     config = json.loads((run / "config.json").read_text())
     manifest = json.loads((run / "assets.json").read_text())
     with (run / "state.npz").open("rb") as source:
@@ -38,7 +51,9 @@ def render(app, run, samples, preview, started, camera_target=None, focal_length
     with np.load(run / "state.npz") as data:
         times, centers, quats = (data[k] for k in ("time_s", "knife_positions", "knife_quaternions"))
         bread_particles = data["bread_particles"] if manifest.get("is_cut_and_spread", False) else None
-    indices = replay_indices(len(times), preview)
+    indices = replay_indices(len(times), preview) if frame_indices is None else frame_indices
+    if not indices or min(indices) < 0 or max(indices) >= len(times):
+        raise ValueError("Frame indices must address the recorded trajectory.")
     available = set(report.get("frame_indices", range(report["frames"])))
     if not set(indices).issubset(available):
         raise ValueError("Required surfaces are missing; run asset_prepare without --preview for a complete video.")
@@ -80,6 +95,35 @@ def render(app, run, samples, preview, started, camera_target=None, focal_length
     butter.CreateSubdivisionSchemeAttr("none")
     butter.SetNormalsInterpolation("vertex")
     UsdShade.MaterialBindingAPI.Apply(butter.GetPrim()).Bind(materials.butter)
+    geometry_path = run / "blade-film" / "geometry.npz"
+    if hashlib.sha256(geometry_path.read_bytes()).hexdigest() != report["film_files_sha256"]["geometry.npz"]:
+        raise ValueError("Blade film geometry differs from its reconstruction manifest.")
+    with np.load(geometry_path) as geometry:
+        film_vertices, film_faces = geometry["vertices"], geometry["faces"]
+    film_settings = FilmSettings(**report["film_settings"])
+    film_material = UsdShade.Material.Define(stage, "/World/Materials/BladeFilm")
+    shader = UsdShade.Shader.Define(stage, "/World/Materials/BladeFilm/Surface")
+    shader.CreateIdAttr("UsdPreviewSurface")
+    shader.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).Set(Gf.Vec3f(*film_settings.color))
+    shader.CreateInput("roughness", Sdf.ValueTypeNames.Float).Set(film_settings.roughness)
+    shader.CreateInput("ior", Sdf.ValueTypeNames.Float).Set(1.05)
+    shader.CreateInput("opacityThreshold", Sdf.ValueTypeNames.Float).Set(0.0)
+    reader = UsdShade.Shader.Define(stage, "/World/Materials/BladeFilm/Opacity")
+    reader.CreateIdAttr("UsdPrimvarReader_float")
+    reader.CreateInput("varname", Sdf.ValueTypeNames.Token).Set("displayOpacity")
+    shader.CreateInput("opacity", Sdf.ValueTypeNames.Float).ConnectToSource(reader.ConnectableAPI(), "result")
+    film_material.CreateSurfaceOutput().ConnectToSource(shader.ConnectableAPI(), "surface")
+    film_opacity = []
+    for side_index in range(2):
+        prim = UsdGeom.Mesh.Define(stage, f"/World/Tool/ButterFilm{side_index}")
+        upload_triangle_mesh(prim, trimesh.Trimesh(film_vertices[side_index], film_faces[side_index], process=False))
+        prim.CreateSubdivisionSchemeAttr("none")
+        prim.CreateDoubleSidedAttr(False)
+        prim.SetNormalsInterpolation("vertex")
+        UsdShade.MaterialBindingAPI.Apply(prim.GetPrim()).Bind(film_material)
+        opacity = prim.CreateDisplayOpacityPrimvar(UsdGeom.Tokens.vertex)
+        opacity.Set(np.zeros(len(film_vertices[side_index]), dtype=np.float32))
+        film_opacity.append(opacity)
     create_lights(stage, 0, False)
     if bread_replay is not None:
         # Center the unchanged neutral light rig on the two-workspace layout.
@@ -88,7 +132,8 @@ def render(app, run, samples, preview, started, camera_target=None, focal_length
     if len(active_lights) != 4 or any(not path.startswith("/World/Lights/") for path in active_lights):
         raise ValueError("Only the four fixed scene lights may illuminate the assembled assets.")
     camera = UsdGeom.Camera.Define(stage, "/World/Camera")
-    camera_eye = (0.28, -0.50, 0.38) if bread_replay is not None else (0.22, -0.36, 0.27)
+    if camera_eye is None:
+        camera_eye = (0.28, -0.50, 0.38) if bread_replay is not None else (0.22, -0.36, 0.27)
     if camera_target is None:
         camera_target = (0.11, -0.025, 0.035) if bread_replay is not None else (0, -0.035, 0.035)
     if focal_length is None:
@@ -114,6 +159,8 @@ def render(app, run, samples, preview, started, camera_target=None, focal_length
     name = "asset-cut-preview" if preview else "asset-cut-isaac"
     if bread_replay is not None:
         name = "aligned-cut-spread-preview" if preview else "aligned-cut-spread-isaac"
+    if output_name is not None:
+        name = output_name
     (run / f"{name}.json").unlink(missing_ok=True)
     encoder = imageio_ffmpeg.write_frames(
         str(run / f"{name}.mp4"), (1280, 720), fps=config["fps"], codec="libx264", quality=8
@@ -125,6 +172,12 @@ def render(app, run, samples, preview, started, camera_target=None, focal_length
             tick = time.perf_counter()
             mesh = trimesh.load_mesh(run / "surfaces" / f"{i:04d}.ply", process=False)
             upload_triangle_mesh(butter, mesh)
+            film_path = run / "blade-film" / f"{i:04d}.npz"
+            if hashlib.sha256(film_path.read_bytes()).hexdigest() != report["film_files_sha256"][film_path.name]:
+                raise ValueError("Blade film frame differs from its reconstruction manifest.")
+            with np.load(film_path) as coating:
+                for side_index, opacity in enumerate(film_opacity):
+                    opacity.Set(coating["opacity"][side_index].astype(np.float32))
             translation.Set(Gf.Vec3d(*map(float, centers[i])))
             q = quats[i]
             orientation.Set(Gf.Quatf(float(q[0]), Gf.Vec3f(*map(float, q[1:]))))
@@ -159,7 +212,7 @@ def render(app, run, samples, preview, started, camera_target=None, focal_length
                 fill="white",
             )
             encoder.send(np.array(frame))
-            if preview or i % 24 == 0 or i == len(times) - 1:
+            if preview or frame_indices is not None or i % 24 == 0 or i == len(times) - 1:
                 frame.save(run / f"{name}-{i:04d}.png")
             frame_times.append(
                 {
@@ -178,7 +231,9 @@ def render(app, run, samples, preview, started, camera_target=None, focal_length
     (run / f"{name}.json").write_text(
         json.dumps(
             {
-                "is_complete": not preview,
+                "is_complete": len(indices) == len(times),
+                "blade_film": "Two rotating particle-driven opacity sheets; complementary bulk weights; approximate thin coating BRDF.",
+                "film_settings": asdict(film_settings),
                 "state_sha256": state_hash,
                 "appearance_sha256": hashlib.sha256(profile.read_bytes()).hexdigest(),
                 "samples": samples,

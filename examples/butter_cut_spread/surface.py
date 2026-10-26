@@ -31,9 +31,11 @@ def closed_density_surface(field, origin, voxel):
     raise ValueError("Density surface remains nonmanifold after bounded numerical isovalue resolution.")
 
 
-def coating_density(points, origin, shape, voxel, width, config, normal_floor_ratio=1.0):
+def coating_density(points, origin, shape, voxel, width, config, normal_floor_ratio=1.0, particle_weights=None):
     """Resolve sub-kernel coating thickness while retaining each particle's rest volume."""
-    field = splat_density(points, origin, shape, voxel, width, config.particle_size**3)
+    field = splat_density(
+        points, origin, shape, voxel, width, config.particle_size**3, particle_weights=particle_weights
+    )
     top = config.bread_center[2] + config.bread_size[2] / 2
     is_supported = np.all(
         np.abs(points[:, :2] - np.array(config.bread_center[:2])) < np.array(config.bread_size[:2]) / 2, axis=1
@@ -51,7 +53,9 @@ def coating_density(points, origin, shape, voxel, width, config, normal_floor_ra
     # Thin supported films need overlapping tangential footprints at the particle sampling scale
     tangent_width = np.where(is_supported, width + blend * config.particle_size, width)
     del field
-    field = splat_density(points, origin, shape, voxel, width, config.particle_size**3, normal_width, tangent_width)
+    field = splat_density(
+        points, origin, shape, voxel, width, config.particle_size**3, normal_width, tangent_width, particle_weights
+    )
     return repair_sampling_gaps(
         field, origin, voxel, config.particle_size, config.bread_center, config.bread_size, points
     )

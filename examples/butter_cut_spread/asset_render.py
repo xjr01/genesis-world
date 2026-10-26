@@ -15,7 +15,12 @@ def main():
     parser.add_argument("--preview", action="store_true")
     parser.add_argument("--camera-target", type=float, nargs=3, help="World-space look-at point in meters.")
     parser.add_argument("--focal-length", type=float, help="Camera focal length in millimeters.")
+    parser.add_argument("--camera-eye", type=float, nargs=3, help="World-space camera position in meters.")
+    parser.add_argument("--frame-indices", type=int, nargs="+", help="Recorded frames for close-up inspection.")
+    parser.add_argument("--output-name", help="Separate filename stem for an inspection render.")
     args = parser.parse_args()
+    if args.output_name is not None and Path(args.output_name).name != args.output_name:
+        parser.error("Output name must be a filename stem.")
     started = time.perf_counter()
     from isaacsim import SimulationApp
 
@@ -26,7 +31,18 @@ def main():
 
     completed = False
     try:
-        render(app, args.run.resolve(), args.samples, args.preview, started, args.camera_target, args.focal_length)
+        render(
+            app,
+            args.run.resolve(),
+            args.samples,
+            args.preview,
+            started,
+            args.camera_target,
+            args.focal_length,
+            args.camera_eye,
+            args.frame_indices,
+            args.output_name,
+        )
         completed = True
     finally:
         if not completed:

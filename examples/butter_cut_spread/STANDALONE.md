@@ -72,6 +72,9 @@ ISAAC_PYTHON -m examples.butter_cut_spread.asset_render --run RUN_DIRECTORY --pr
 ```
 
 两个阶段的 `--preview` 应一致；完整渲染会拒绝仅有预览帧的表面清单。
+刀面薄层会随重建生成在 `blade-film/`，渲染同时读取实体网格和双面薄层。
+黏附、残留约束和薄层分配规则见 [HYBRID_ADHESION.md](HYBRID_ADHESION.md)。
+
 主要输出为 `aligned-cut-spread-particles.mp4`、`aligned-cut-spread-isaac.mp4` 和
 `final-validation.json`。五帧预览使用 `aligned-cut-spread-preview.*` 文件名，不能作为完整视频。
 
@@ -85,5 +88,6 @@ ISAAC_PYTHON -m examples.butter_cut_spread.asset_render --run RUN_DIRECTORY --pr
 
 资产来源与校验见 [assets/NOTICE.md](assets/NOTICE.md)，性能和视觉取舍见
 [PERFORMANCE.md](PERFORMANCE.md) 与主 README 的薄层孔洞说明。
-本次干净副本、空缓存和完整物理运行的验证范围见
-[独立运行验证记录](STANDALONE_VALIDATION.md)。
+此前干净副本、空缓存和完整物理运行的验证范围见
+[独立运行验证记录](STANDALONE_VALIDATION.md)。本次双面黏附与薄层的完整对照见
+[双面黏附验证记录](HYBRID_VALIDATION.md)。

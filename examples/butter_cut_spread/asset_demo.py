@@ -276,7 +276,6 @@ def main():
     with np.load(run / "support.npz") as archive:
         support = archive["origin"], archive["spacing"], archive["heights"]
     face = BladeFace(footprint)
-    contact = ToolContact(butter, contact_config, support=support, face=face)
     bread_contact = None
     bread_frames = []
     if bread is not None:
@@ -294,8 +293,14 @@ def main():
             blade_normal_relaxation=0.0,
         )
         bread_frames.append(tensor_to_array(bread.get_particles_pos()))
+    contact = ToolContact(butter, contact_config, support=support, face=face, bread_contact=bread_contact)
     projection = MeshProjection(
-        butter, blade, Rotation.from_quat(quats[0, [1, 2, 3, 0]]).as_matrix(), config.blade_size, face=face
+        butter,
+        blade,
+        Rotation.from_quat(quats[0, [1, 2, 3, 0]]).as_matrix(),
+        config.blade_size,
+        face=face,
+        contact=contact,
     )
     initial = tensor_to_array(butter.get_particles_pos())
     slice_ids = initial[:, 0] > config.butter_center[0] + config.cut_offset + config.blade_size[2] / 2
@@ -303,6 +308,7 @@ def main():
         raise RuntimeError("Sampled particles do not match the authored asset placement.")
     samples = sorted({0, steps, *(round(i / config.fps / config.dt) for i in range(1, int(duration * config.fps) + 1))})
     frames, faces = [initial], [contact.faces()]
+    residue_frames = [contact.residue_faces()]
     knife_frames, quaternion_frames = [positions[0]], [quats[0]]
     target_positions, target_quats = gs.tensor(positions), gs.tensor(quats)
     target_rates = gs.tensor(np.column_stack((velocities, joint_angular)))
@@ -362,6 +368,7 @@ def main():
                         raise RuntimeError(f"Nonfinite bread particles at step {i + 1}")
                     bread_frames.append(bread_points)
                 faces.append(contact.faces())
+                residue_frames.append(contact.residue_faces())
                 knife_frames.append(tensor_to_array(blade.solver.get_geoms_pos([geom_index]))[0])
                 quaternion_frames.append(tensor_to_array(blade.solver.get_geoms_quat([geom_index]))[0])
             if phase_finished:
@@ -406,6 +413,7 @@ def main():
         run / "state.npz",
         particles=np.stack(frames),
         tool_faces=np.stack(faces),
+        residue_faces=np.stack(residue_frames),
         knife_positions=np.stack(knife_frames),
         knife_quaternions=np.stack(quaternion_frames),
         time_s=times[samples],
@@ -439,6 +447,10 @@ def main():
         "cpic_cutting_geom_indices": [geom.idx for geom in blade.geoms],
         "cpic_separation_checks": separation_checks,
         "material": material.model_dump(),
+        "adhesion": asdict(contact.parameters),
+        "residue_peak_particles": int(np.max(np.count_nonzero(np.stack(residue_frames), axis=1))),
+        "residue_peak_scope": "Maximum over saved frames, not every integration step.",
+        "residue_scope": "Sparse existing active particles constrained to local anchors; external kinematic adhesion with bread-contact and finite-distance release.",
         "max_contact_correction_m": projection.maximum_correction(),
         "max_tool_pose_error_m": float(np.linalg.norm(np.stack(knife_frames) - positions[samples], axis=1).max()),
         "stationary": args.stationary,

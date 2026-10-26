@@ -105,7 +105,7 @@ def main():
         commands.append(command)
         commands.append([sys.executable, "-m", "examples.butter_cut_spread.asset_particles", "--run", str(run)])
         if args.duration is None:
-            for module in ("asset_audit", "aligned_audit", "shape_audit"):
+            for module in ("asset_audit", "aligned_audit", "shape_audit", "residue_audit"):
                 commands.append([sys.executable, "-m", f"examples.butter_cut_spread.{module}", "--run", str(run)])
     if has_render:
         preview = ["--preview"] if args.preview else []

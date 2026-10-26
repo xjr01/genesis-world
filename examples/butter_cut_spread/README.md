@@ -114,19 +114,18 @@ for effective-parameter logging and the required comparison on the actual motion
 - `butter_size`, `blade_size` and `cut_offset` control slice geometry. For the
   upright cut, slice thickness is `butter_size[0]/2 - cut_offset - blade_size[2]/2`.
   Keep it several particle spacings thick and fit the cut face within the blade.
-- `normal_stress` and `shear_stress` govern finite pickup adhesion. Increasing
-  them can retain more butter but also distort it or prevent release.
-- `spread_normal_stress`, `spread_shear_stress` and `spread_adhesion_range` govern
-  wet contact on both broad faces during spreading. Visual steel roughness has
-  no role in these forces. Excess range can stretch deposited butter into strands.
+- [Symmetric adhesion and thin films](HYBRID_ADHESION.md) explains the shared
+  two-face contact law, local transfer events, bounded kinematic residue and
+  complementary bulk/film rendering. `contact.py:AdhesionParameters` is the
+  authoritative contact parameter set.
 - `spread_start_gap`, `spread_end_gap` and the start/end offsets control compression
   and stroke length. Match travel to available slice volume rather than stretching
   it into a layer thinner than the numerical resolution can represent.
 - `board_normal_stress` and `board_shear_stress` control adhesion to the cutting
   board. Excess adhesion can leave the bottom of the slice behind.
 - Changes to time step, resolution, motion or adhesion require another complete
-  run and physical review. No inactive-particle residue or permanently pinned
-  butter is used in this example.
+  run and physical review. The authored pipeline records its sparse, releasable
+  kinematic residue constraints while keeping every butter particle active.
 
 The integration seam is the loop in `demo.py`: prescribe tool pose and velocity,
 apply bread and tool contact, call `scene.step`, then apply the unilateral tool
@@ -139,10 +138,9 @@ The contact frame supports pitch, yaw and an optional world-X roll. Replacing th
 matching the convex collision mesh, contact halfspaces and broad-face bounds.
 Board contact and box initialization use the configured board bounds and top height.
 Curved supports require the sampled height map used by the asset example below.
-The contact recipe changes from anchored pickup to wet spreading
-during 3.6-4.0 s, with a cutting shear cap before 0.95 s. When changing phase timing
-or importing an external trajectory, adapt these controls together; changing only
-the pose samples is insufficient. Material strengths are fitted demonstration
+The contact recipe follows local separation, slip, column thickness and actual
+bread contact. The same rule operates throughout an external trajectory and on
+both blade faces. Material strengths are fitted demonstration
 settings, not measured traction labels for a specific butter product.
 
 ## Authored Blender assets

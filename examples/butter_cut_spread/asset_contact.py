@@ -12,7 +12,9 @@ qd = gs.qd
 
 
 class MeshProjection:
-    def __init__(self, butter, blade, rotation, blade_size, face=None):
+    def __init__(self, butter, blade, rotation, blade_size, face=None, contact=None):
+        self.contact = contact
+        self.has_residue = contact is not None
         self.mpm = butter.solver
         self.rigid = blade.solver
         self.start, self.count = butter.particle_start, butter.n_particles
@@ -150,3 +152,15 @@ def project_mesh(
             self.mpm.particles[f, p, 0].pos = point
             self.mpm.particles[f, p, 0].vel = surface_velocity + relative
             qd.atomic_max(self.maximum[0], correction)
+
+        if qd.static(self.has_residue):  # noqa: SIM102
+            if self.contact.film_side[i] != 0:
+                target = center + rotation @ self.contact.film_anchor[i]
+                if (target - point).norm() < self.contact.parameters.residue_release_distance:
+                    self.mpm.particles[f, p, 0].pos = target
+                    self.mpm.particles[f, p, 0].vel = velocity + qd.Vector([wx, wy, wz]).cross(target - center)
+                else:
+                    side = qd.select(self.contact.film_side[i] > 0, 1, 0)
+                    qd.atomic_add(self.contact.film_count[side], -1)
+                    self.contact.film_side[i] = 0
+                    self.contact.cooldown[i] = self.contact.parameters.residue_cooldown

@@ -93,7 +93,6 @@ def main():
         cut_end_time=2.9,
         board_normal_stress=0.0,
         board_shear_stress=0.0,
-        spread_transition_time=100.0,
         lower_bound=(*tuple(dish.bounds[0, :2] - 0.025), -0.015),
         upper_bound=(*tuple(dish.bounds[1, :2] + 0.025), 0.14),
     )

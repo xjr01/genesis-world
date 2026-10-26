@@ -6,7 +6,7 @@ import json
 import os
 import time
 from concurrent.futures import ProcessPoolExecutor
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from multiprocessing.shared_memory import SharedMemory
 from pathlib import Path
 
@@ -14,6 +14,7 @@ import numpy as np
 import trimesh
 from scipy.spatial.transform import Rotation
 
+from examples.butter_cut_spread.blade_film import BladeFilm
 from examples.butter_cut_spread.config import Config
 from examples.butter_cut_spread.density import splat_density
 from examples.butter_cut_spread.replay_frames import replay_indices
@@ -50,11 +51,24 @@ def reconstruct_frames(run, particles, positions, quats, indices, coating_voxel)
     if isinstance(particles, ParticleBuffer):
         shared = SharedMemory(name=particles.name)
         particles = np.ndarray(particles.shape, dtype=particles.dtype, buffer=shared.buf)
+    film = BladeFilm(run, config["particle_size"], config["blade_size"][2])
+    film_output = run / "blade-film"
+    film_output.mkdir(exist_ok=True)
     volumes = []
     try:
         for index in indices:
             points = particles[index]
-            groups = [(points, bulk_voxel, 1.0)]
+            partition = film.partition(points, positions[index], quats[index])
+            weights = partition.bulk_weights
+            np.savez(
+                film_output / f"{index:04d}.npz",
+                opacity=film.opacity(partition.thickness),
+                counts=partition.counts,
+                volumes_m3=partition.volumes,
+                sheet_volumes_m3=partition.thickness.sum(axis=(1, 2)) * film.settings.pixel**2,
+                bulk_volume_m3=weights.sum() * config["particle_size"] ** 3,
+            )
+            groups = [(points, weights, bulk_voxel, 1.0)]
             if coating is not None and coating_voxel < bulk_voxel:
                 bread_left = config["bread_center"][0] - config["bread_size"][0] / 2
                 bread_top = config["bread_center"][2] + config["bread_size"][2] / 2
@@ -67,20 +81,40 @@ def reconstruct_frames(run, particles, positions, quats, indices, coating_voxel)
                         and np.quantile(right[:, 2], 0.95) < bread_top + 0.025
                     ):
                         groups = [
-                            (left, bulk_voxel, 1.0),
-                            (right, coating_voxel, coating_voxel / config["particle_size"]),
+                            (left, weights[~near], bulk_voxel, 1.0),
+                            (right, weights[near], coating_voxel, coating_voxel / config["particle_size"]),
                         ]
+            separated_groups = []
+            for group, group_weights, voxel, normal_floor in groups:
+                has_bulk = group_weights > 0
+                group, group_weights = group[has_bulk], group_weights[has_bulk]
+                if not len(group):
+                    continue
+                if coating is not None:
+                    top = coating.bread_center[2] + coating.bread_size[2] / 2
+                    is_high = group[:, 2] > top + 0.015
+                    if is_high.any() and (~is_high).any():
+                        gap = group[is_high, 2].min() - group[~is_high, 2].max()
+                        if gap > 4 * (width + config["particle_size"]):
+                            separated_groups.extend(
+                                (group[mask], group_weights[mask], voxel, normal_floor) for mask in (is_high, ~is_high)
+                            )
+                            continue
+                separated_groups.append((group, group_weights, voxel, normal_floor))
             meshes = []
-            for group, voxel, normal_floor in groups:
+            for group, group_weights, voxel, normal_floor in separated_groups:
                 padding = max(2 * width, 1.5 * (width + config["particle_size"])) if coating else 2 * width
                 origin = np.floor((group.min(0) - padding) / voxel) * voxel
                 shape = tuple(np.ceil((group.max(0) + padding - origin) / voxel).astype(int) + 1)
                 density = (
-                    splat_density(group, origin, shape, voxel, width, config["particle_size"] ** 3)
+                    splat_density(
+                        group, origin, shape, voxel, width, config["particle_size"] ** 3, particle_weights=group_weights
+                    )
                     if coating is None
-                    else coating_density(group, origin, shape, voxel, width, coating, normal_floor)
+                    else coating_density(group, origin, shape, voxel, width, coating, normal_floor, group_weights)
                 )
-                meshes.append(closed_density_surface(density, origin, voxel).mesh)
+                if density.max() > 0.5:
+                    meshes.append(closed_density_surface(density, origin, voxel).mesh)
             surface = trimesh.util.concatenate(meshes)
             tool = blade.copy()
             tool.vertices = Rotation.from_quat(quats[index, [1, 2, 3, 0]]).apply(blade.vertices) + positions[index]
@@ -124,6 +158,11 @@ def main():
         particles, times, positions, quats = (
             data[k] for k in ("particles", "time_s", "knife_positions", "knife_quaternions")
         )
+    particle_count = particles.shape[1]
+    config = json.loads((run / "config.json").read_text())
+    film = BladeFilm(run, config["particle_size"], config["blade_size"][2])
+    (run / "blade-film").mkdir(exist_ok=True)
+    np.savez(run / "blade-film" / "geometry.npz", vertices=film.vertices, faces=film.faces)
     indices = replay_indices(len(times), args.preview)
     workers = min(args.workers, len(indices))
     if workers == 1:
@@ -152,6 +191,23 @@ def main():
             shared.close()
             shared.unlink()
     volumes = [volume for _, volume in sorted(records)]
+    film_files = ["geometry.npz", *(f"{index:04d}.npz" for index in indices)]
+    film_hashes = {name: hashlib.sha256((run / "blade-film" / name).read_bytes()).hexdigest() for name in film_files}
+    partition_errors, sheet_errors = [], []
+    for index in indices:
+        with np.load(run / "blade-film" / f"{index:04d}.npz") as data:
+            total_volume = particle_count * config["particle_size"] ** 3
+            partition_errors.append(abs((data["bulk_volume_m3"] + data["volumes_m3"].sum()) / total_volume - 1))
+            sheet_errors.append(float(np.max(abs(data["sheet_volumes_m3"] - data["volumes_m3"]))))
+            opacity = data["opacity"]
+            if (
+                opacity.shape != (2, len(film.vertices[0]))
+                or not np.isfinite(opacity).all()
+                or np.any((opacity < 0) | (opacity > 1))
+            ):
+                raise ValueError("Blade film opacity has invalid geometry correspondence or values.")
+    if max(partition_errors) > 1e-12 or max(sheet_errors) > 1e-15:
+        raise ValueError("Complementary blade-film volume accounting failed.")
     with (run / "state.npz").open("rb") as source:
         state_hash = hashlib.file_digest(source, "sha256").hexdigest()
     (run / "surface-report.json").write_text(
@@ -163,6 +219,11 @@ def main():
                 "elapsed_seconds": time.perf_counter() - started,
                 "state_sha256": state_hash,
                 "volumes_m3": volumes,
+                "film_files_sha256": film_hashes,
+                "film_settings": asdict(film.settings),
+                "film_partition_max_relative_error": float(max(partition_errors)),
+                "film_sheet_max_volume_error_m3": max(sheet_errors),
+                "blade_film": "Complementary particle-volume partition on both local blade faces.",
                 "supported_coating_reconstruction": assets.get("is_cut_and_spread", False),
                 "workers": workers,
                 "coating_voxel_m": args.coating_voxel,

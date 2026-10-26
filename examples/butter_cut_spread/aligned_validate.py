@@ -55,6 +55,10 @@ def main():
         and matches
         and is_sampling_verified
         and surface["frames"] == simulation["frames"]
+        and surface["film_partition_max_relative_error"] < 1e-12
+        and surface["film_sheet_max_volume_error_m3"] < 1e-15
+        and len(surface["film_files_sha256"]) == simulation["frames"] + 1
+        and rendering["film_settings"] == surface["film_settings"]
         and [frame["index"] for frame in rendering["frames"]] == list(range(simulation["frames"]))
         and all(report["frames"] == simulation["frames"] for report in video_reports.values())
         and all(report["fps"] == config["fps"] for report in video_reports.values())
@@ -81,6 +85,9 @@ def main():
         "asset_display_check": display,
         "active_lights": rendering["active_lights"],
         "coating_voxel_m": surface["coating_voxel_m"],
+        "film_partition_max_relative_error": surface["film_partition_max_relative_error"],
+        "film_sheet_max_volume_error_m3": surface["film_sheet_max_volume_error_m3"],
+        "film_settings": rendering["film_settings"],
         "simulation_seconds": simulation["elapsed_seconds"],
         "physical_run_reused": simulation.get("repack", {}).get("physical_run_reused", False),
         "surface_seconds": surface["elapsed_seconds"],
