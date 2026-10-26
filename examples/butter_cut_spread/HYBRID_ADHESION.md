@@ -32,22 +32,32 @@ slice. It is a demo-preserving contact approximation, evaluated identically on
 both faces, rather than a measured material law. Its depth thresholds and force
 limits remain fixed throughout the run.
 
-The explicit kinematic residue fallback selects existing particle IDs, capped at
-128 particles per face (55.3 cubic millimeters total at the default spacing).
-Capture requires sustained near-face contact, bounded slip speed and a thin local
-material column, including neighboring columns. The local thickness grid is
-refreshed every ten integration steps. A thick slice or stock surface therefore
-cannot become a set of kinematic handles. Captured particles remain active in
-the material point method and retain their identity and mass. After integration,
-their local anchors follow the measured rigid blade pose. Bread contact, excessive
-separation, loss of the face footprint or incoming thick material releases them.
-A cooldown prevents immediate recapture.
+The explicit deposition fallback selects original particle IDs after sustained
+near-face contact and outward relative separation above 0.01 m/s. Static contact
+alone does not deposit material. Each face has a fixed capacity of 512 particles,
+with at most one particle per square cell of width two particle spacings. Both faces use the
+same contact duration, outline clearance, capacity and release conditions.
+Capture does not require the neighboring bulk column to have become thin.
 
-This fallback is an explicit external position/velocity constraint. Its forces
-and work are not an independently measured physical adhesion model. Recorded
-`residue_faces` and the peak constrained count over saved frames make its
-contribution auditable; the recorded peak does not sample every integration step.
+Deposited film keeps its original particle ID and represented volume, but is
+excluded from material point method (MPM) transfers while attached. Its local
+anchor follows the actual blade pose. During downward insertion into a thick
+column, the tangential component of downward motion slips past the coating.
+This permits a continuous wipe without using fixed particles to drag the stock.
+No clock time or named demo phase selects a different rule.
+
+Bread contact, loss of the face footprint or excessive separation releases the
+particle back into MPM. Released film has relaxed elastic deformation and affine
+velocity; a cooldown prevents immediate recapture. This is an explicit dissipative
+deposition approximation, not a measured adhesion or energy-conserving model.
+Recorded `particle_active` and `residue_faces` must agree exactly: each original
+butter particle is either active bulk or attached film. No particle is deleted,
+duplicated or painted onto the knife without represented material volume.
+The peak film count is measured over saved frames, not every integration step.
 The native collision projection remains responsible for steel nonpenetration.
+The primitive diagnostic `demo` keeps deposition disabled because it has no
+authored-film replay or mesh-anchor projection; the authored cutting and spreading
+stages share the complete deposition law.
 
 ## Hybrid rendering
 
@@ -59,7 +69,9 @@ The partition changes rendering weights; it changes no physics or material value
 
 Both films reuse the earlier standalone cutting demo's pale transparent film
 appearance: color (0.96, 0.84, 0.56), roughness 0.38 and optical depth 0.28 per
-particle layer. Bulk butter retains the approved yellow appearance.
+0.4 mm reference layer. Optical extinction uses physical thickness rather than
+the current simulation spacing, so a sampling change does not change the color
+of the same amount of coating. Bulk butter retains the approved yellow appearance.
 Per-vertex opacity derives from normalized particle-volume splats. A transparent
 surface lies 8 micrometers outside each broad steel face, follows the actual blade
 transform and respects the authored outline. This is an approximate thin-coating
@@ -67,6 +79,11 @@ bidirectional reflectance distribution function (BRDF): metal remains visible
 through sparse coverage. Thick remnants retain reconstructed three-dimensional
 geometry. The renderer reads prepared film arrays and requires no simulation or
 surface-reconstruction dependencies in its Isaac environment.
+
+The sheet uses a 1.5 mm quadratic kernel to connect the coarse deposited samples
+into a thin wipe. The 0.9 mm kernel for detecting thick columns is unchanged.
+This optical smoothing preserves the sheet volume and complementary bulk weights;
+it creates neither additional butter nor a fixed rectangular coverage mask.
 
 `materials/blade_film.mdl` applies particle coverage to the entire coating BSDF,
 including its specular component. Uncovered steel therefore receives no extra

@@ -7,7 +7,10 @@
 
 One Genesis scene simulates cutting an end slice from a butter bar, carrying it on
 a blade, and spreading it left to right on deformable bread. The same material
-points remain active throughout; there is no particle replacement or state handoff.
+point identities persist throughout. In the authored pipeline, deposited blade
+film temporarily leaves the bulk solver and returns on release; its IDs and
+activity are recorded alongside the bulk. The primitive diagnostic keeps all
+particles active and has no deposited-film replay.
 The material point method (MPM) uses the engine's enabled CPIC cutting capability,
 the repository's Herschel-Bulkley butter material, and its porous-bread material.
 Finite cohesive contact and a unilateral blade correction supplement native coupling.

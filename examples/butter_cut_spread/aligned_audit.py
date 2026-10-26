@@ -27,6 +27,15 @@ def main():
         particles, bread, times, centers, quaternions = (
             archive[key] for key in ("particles", "bread_particles", "time_s", "knife_positions", "knife_quaternions")
         )
+        active = archive.get("particle_active")
+        residue = archive.get("residue_faces")
+    is_accounted = simulation["all_particles_active"]
+    if active is not None and residue is not None:
+        is_accounted = bool(
+            active.shape == residue.shape == particles.shape[:2]
+            and np.isin(residue, [-1, 0, 1]).all()
+            and np.array_equal(active, residue == 0)
+        )
     slice_ids = particles[0, :, 0] > config["butter_center"][0] + config["cut_offset"] + config["blade_size"][2] / 2
     lift_index = np.argmin(abs(times - 3.7))
     original_top = np.max(particles[0, :, 2])
@@ -53,11 +62,34 @@ def main():
         with np.load(run / "blade-face.npz") as archive:
             face_origin, face_spacing, face_distances = (archive[name] for name in ("origin", "spacing", "distance"))
     crossings = []
+    film_normal_errors = []
+    film_outside_count = 0
+    is_film_capacity_valid = True
+    if residue is not None:
+        is_film_capacity_valid = bool(
+            max(np.count_nonzero(residue == side, axis=1).max() for side in (-1, 1))
+            <= simulation["adhesion"]["residue_per_face"]
+        )
     board = trimesh.load_mesh(run / "board-collision.obj", process=False)
     bread_sample_ids = np.arange(0, bread.shape[1], max(1, bread.shape[1] // 3000))
     board_penetrations = []
     for index, points in enumerate(particles):
         local = Rotation.from_quat(quaternions[index, [1, 2, 3, 0]]).inv().apply(points - centers[index])
+        if active is not None:
+            film_local = local[~active[index]]
+            if len(film_local):
+                film_normal_errors.append(
+                    float(np.max(np.abs(np.abs(film_local[:, 2]) - half[2] - config["particle_size"] / 2)))
+                )
+                if face_distances is not None:
+                    film_edges = map_coordinates(
+                        face_distances,
+                        ((film_local[:, :2] - face_origin) / face_spacing).T,
+                        order=1,
+                        mode="constant",
+                        cval=-1,
+                    )
+                    film_outside_count += int(np.count_nonzero(film_edges < 0))
         if previous_local is not None:
             inside = np.abs(local[:, 2]) < half[2] + 0.001
             inside &= np.abs(previous_local[:, 2]) < half[2] + 0.001
@@ -98,6 +130,10 @@ def main():
         "state_sha256": file_digest(run / "state.npz"),
         "is_complete": simulation["is_complete"],
         "all_particles_active": simulation["all_particles_active"],
+        "all_particles_accounted_for": is_accounted,
+        "is_film_capacity_valid": is_film_capacity_valid,
+        "film_max_normal_anchor_error_m": max(film_normal_errors, default=0.0),
+        "film_outside_face_count": film_outside_count,
         "all_particles_finite": is_finite,
         "frames": len(times),
         "particle_video_frames": video_frames,
@@ -120,7 +156,10 @@ def main():
     }
     report["is_passed"] = bool(
         simulation["is_complete"]
-        and simulation["all_particles_active"]
+        and is_accounted
+        and is_film_capacity_valid
+        and max(film_normal_errors, default=0.0) < 0.00001
+        and film_outside_count == 0
         and is_finite
         and is_tool_only
         and video_frames == len(times)

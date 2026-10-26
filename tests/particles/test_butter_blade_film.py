@@ -1,9 +1,12 @@
+from dataclasses import replace
+
 import numpy as np
 import pytest
 from scipy.spatial.transform import Rotation
 
 from examples.butter_cut_spread.blade_film import BladeFilm
 from examples.butter_cut_spread.density import splat_density
+from tests.utils import assert_allclose
 
 
 @pytest.mark.parametrize("backend", [None])
@@ -23,6 +26,14 @@ def test_blade_film_conserves_volume_and_rotates_both_faces(backend, tmp_path):
     np.testing.assert_allclose(result.bulk_weights, 0)
     np.testing.assert_allclose(result.thickness.sum(axis=(1, 2)) * film.settings.pixel**2, film.spacing**3, rtol=0.001)
     np.testing.assert_allclose(result.volumes[0], result.volumes[1])
+    narrow = BladeFilm(tmp_path, film.spacing, 2 * film.half, replace(film.settings, sheet_kernel=film.settings.kernel))
+    narrow_result = narrow.partition(points, np.zeros(3), identity)
+    assert_allclose(result.bulk_weights, narrow_result.bulk_weights, atol=1e-14)
+    assert_allclose(result.volumes, narrow_result.volumes, atol=1e-18)
+    assert result.thickness.max() < narrow_result.thickness.max()
+    assert np.count_nonzero(film.opacity(result.thickness)) > np.count_nonzero(narrow.opacity(narrow_result.thickness))
+    refined = BladeFilm(tmp_path, film.spacing / 2, 2 * film.half)
+    assert_allclose(refined.opacity(result.thickness), film.opacity(result.thickness), atol=1e-15)
     orientation = Rotation.from_euler("xyz", [0.8, -1.1, 2.3])
     center = np.array([0.1, -0.3, 0.6])
     rotated = film.partition(orientation.apply(points) + center, center, orientation.as_quat()[[3, 0, 1, 2]])

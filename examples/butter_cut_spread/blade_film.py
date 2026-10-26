@@ -53,7 +53,7 @@ class BladeFilm:
             self.face_origin = data["origin"]
             self.face_spacing = float(data["spacing"])
             self.distance = data["distance"]
-        padding = 2 * settings.kernel
+        padding = 2 * max(settings.kernel, settings.sheet_kernel)
         self.origin = self.face_origin - padding
         extent = (np.array(self.distance.shape) - 1) * self.face_spacing + 2 * padding
         self.shape = tuple(np.ceil(extent / settings.pixel).astype(int) + 1)
@@ -98,11 +98,15 @@ class BladeFilm:
             blend = np.clip((layers - s.thin_layers) / (s.thick_layers - s.thin_layers), 0, 1)
             film_weight = 1 - blend**2 * (3 - 2 * blend)
             weights[is_near] -= film_weight
-            sheets.append(splat_sheet(near, film_weight, self.origin, self.shape, s.pixel, s.kernel, self.spacing**3))
+            sheets.append(
+                splat_sheet(near, film_weight, self.origin, self.shape, s.pixel, s.sheet_kernel, self.spacing**3)
+            )
             counts.append(int(np.count_nonzero(film_weight > 0)))
             volumes.append(float(film_weight.sum() * self.spacing**3))
         return FilmFrame(weights, np.stack(sheets), tuple(counts), tuple(volumes))
 
     def opacity(self, thickness):
-        opacity = 1 - np.exp(-self.settings.optical_depth_per_layer * thickness / self.spacing)
+        opacity = 1 - np.exp(
+            -self.settings.optical_depth_per_layer * thickness / self.settings.optical_reference_spacing
+        )
         return opacity.reshape(2, -1) * self.is_inside

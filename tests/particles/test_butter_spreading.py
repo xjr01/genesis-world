@@ -63,14 +63,14 @@ def test_butter_knife_trajectory_is_continuous():
 
 @pytest.mark.parametrize("n_envs", [0, 2])
 def test_butter_contact_conserves_batched_momentum(n_envs, tol):
-    bread_positions = torch.tensor(
+    bread_positions = gs.tensor(
         [
             [[-0.001, -0.001, 0.0], [-0.001, 0.001, 0.0], [0.001, -0.001, 0.0], [0.001, 0.001, 0.0]],
             [[-0.001, -0.001, 0.0], [-0.001, 0.001, 0.0], [0.001, -0.001, 0.0], [0.001, 0.001, 0.0]],
         ]
     )
-    butter_positions = torch.tensor([[[0.0, 0.0, 0.002]], [[0.0, 0.0, 0.002]]])
-    butter_velocities = torch.tensor([[[1.0, 0.0, 0.0]], [[1.0, 0.0, 0.0]]])
+    butter_positions = gs.tensor([[[0.0, 0.0, 0.002]], [[0.0, 0.0, 0.002]]])
+    butter_velocities = gs.tensor([[[1.0, 0.0, 0.0]], [[1.0, 0.0, 0.0]]])
     if n_envs == 0:
         bread_positions = bread_positions[0]
         butter_positions = butter_positions[0]
@@ -133,6 +133,11 @@ def test_butter_contact_conserves_batched_momentum(n_envs, tol):
         is_equilibrium_adhesion=True,
     )
 
+    butter.set_particles_active(False)
+    contact.apply()
+    assert_equal(butter.get_particles_vel(), butter_velocities)
+    assert_equal(bread.get_particles_vel(), torch.zeros_like(bread_positions))
+    butter.set_particles_active(True)
     contact.apply()
 
     assert (butter.get_particles_vel()[..., 0] < 1.0).all()

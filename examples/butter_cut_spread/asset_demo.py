@@ -309,6 +309,7 @@ def main():
     samples = sorted({0, steps, *(round(i / config.fps / config.dt) for i in range(1, int(duration * config.fps) + 1))})
     frames, faces = [initial], [contact.faces()]
     residue_frames = [contact.residue_faces()]
+    active_frames = [tensor_to_array(butter.get_particles_active())]
     knife_frames, quaternion_frames = [positions[0]], [quats[0]]
     target_positions, target_quats = gs.tensor(positions), gs.tensor(quats)
     target_rates = gs.tensor(np.column_stack((velocities, joint_angular)))
@@ -369,6 +370,12 @@ def main():
                     bread_frames.append(bread_points)
                 faces.append(contact.faces())
                 residue_frames.append(contact.residue_faces())
+                active = tensor_to_array(butter.get_particles_active())
+                if not np.array_equal(active, residue_frames[-1] == 0):
+                    raise RuntimeError("Inactive butter must be accounted for by deposited blade film.")
+                if bread is not None and not tensor_to_array(bread.get_particles_active()).all():
+                    raise RuntimeError("Bread particles must remain active.")
+                active_frames.append(active)
                 knife_frames.append(tensor_to_array(blade.solver.get_geoms_pos([geom_index]))[0])
                 quaternion_frames.append(tensor_to_array(blade.solver.get_geoms_quat([geom_index]))[0])
             if phase_finished:
@@ -414,6 +421,7 @@ def main():
         particles=np.stack(frames),
         tool_faces=np.stack(faces),
         residue_faces=np.stack(residue_frames),
+        particle_active=np.stack(active_frames),
         knife_positions=np.stack(knife_frames),
         knife_quaternions=np.stack(quaternion_frames),
         time_s=times[samples],
@@ -435,6 +443,7 @@ def main():
         "bread_particles": 0 if bread is None else bread.n_particles,
         "all_particles_active": bool(tensor_to_array(butter.get_particles_active()).all())
         and (bread is None or bool(tensor_to_array(bread.get_particles_active()).all())),
+        "all_particles_accounted_for": bool(np.array_equal(np.stack(active_frames), np.stack(residue_frames) == 0)),
         "initialization_seconds": init_seconds,
         "startup_seconds": startup.seconds,
         "native_sdf": caches_before_build,
@@ -450,7 +459,7 @@ def main():
         "adhesion": asdict(contact.parameters),
         "residue_peak_particles": int(np.max(np.count_nonzero(np.stack(residue_frames), axis=1))),
         "residue_peak_scope": "Maximum over saved frames, not every integration step.",
-        "residue_scope": "Sparse existing active particles constrained to local anchors; external kinematic adhesion with bread-contact and finite-distance release.",
+        "residue_scope": "Original particle IDs deposited as passive blade film, excluded from MPM while attached, reactivated on bread contact or release. One particle per spatial cell, same rule on both faces; relaxed elastic/affine state on release.",
         "max_contact_correction_m": projection.maximum_correction(),
         "max_tool_pose_error_m": float(np.linalg.norm(np.stack(knife_frames) - positions[samples], axis=1).max()),
         "stationary": args.stationary,

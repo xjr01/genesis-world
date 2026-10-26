@@ -4,6 +4,7 @@ import numpy as np
 
 import genesis as gs
 import genesis.utils.array_class as arrays
+from examples.butter_cut_spread.contact import release_residue
 from examples.butter_cut_spread.face_footprint import face_distance
 from genesis.utils import sdf
 from genesis.utils.misc import qd_to_numpy
@@ -113,6 +114,14 @@ def project_mesh(
     rotation = qd.Matrix([[r00, r01, r02], [r10, r11, r12], [r20, r21, r22]])
     for i in range(self.count):
         p = self.start + i
+        if qd.static(self.has_residue):  # noqa: SIM102
+            if self.contact.film_side[i] != 0:
+                target = center + rotation @ self.contact.film_anchor[i]
+                if (target - self.mpm.particles[f, p, 0].pos).norm() < self.contact.parameters.residue_release_distance:
+                    self.mpm.particles[f, p, 0].pos = target
+                    self.mpm.particles[f, p, 0].vel = velocity + qd.Vector([wx, wy, wz]).cross(target - center)
+                    continue
+                release_residue(f, i, self.contact)
         original = self.mpm.particles[f, p, 0].pos
         point = original
         local = rotation.transpose() @ (point - center)
@@ -152,15 +161,3 @@ def project_mesh(
             self.mpm.particles[f, p, 0].pos = point
             self.mpm.particles[f, p, 0].vel = surface_velocity + relative
             qd.atomic_max(self.maximum[0], correction)
-
-        if qd.static(self.has_residue):  # noqa: SIM102
-            if self.contact.film_side[i] != 0:
-                target = center + rotation @ self.contact.film_anchor[i]
-                if (target - point).norm() < self.contact.parameters.residue_release_distance:
-                    self.mpm.particles[f, p, 0].pos = target
-                    self.mpm.particles[f, p, 0].vel = velocity + qd.Vector([wx, wy, wz]).cross(target - center)
-                else:
-                    side = qd.select(self.contact.film_side[i] > 0, 1, 0)
-                    qd.atomic_add(self.contact.film_count[side], -1)
-                    self.contact.film_side[i] = 0
-                    self.contact.cooldown[i] = self.contact.parameters.residue_cooldown

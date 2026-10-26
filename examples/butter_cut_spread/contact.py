@@ -34,8 +34,9 @@ class AdhesionParameters:
     slip_speed: float = 0.003
     rebond_time: float = 0.006
     elastic_slip: float = 0.0003
-    residue_per_face: int = 128
-    residue_capture_time: float = 0.012
+    residue_per_face: int = 512
+    residue_capture_time: float = 0.004
+    residue_separation_speed: float = 0.01
     residue_release_distance: float = 0.0012
     residue_cooldown: float = 0.08
 
@@ -107,6 +108,12 @@ class ToolContact:
         self.film_count.fill(0)
         self.film_side = qd.field(gs.qd_int, shape=self.count)
         self.film_anchor = qd.Vector.field(3, gs.qd_float, shape=self.count)
+        self.film_cell = 2 * self.material_spacing
+        self.film_shape = tuple(np.ceil(extent / self.film_cell).astype(int) + 1)
+        self.film_owner = qd.field(gs.qd_int, shape=(2, *self.film_shape))
+        self.film_candidate = qd.field(gs.qd_int, shape=(2, *self.film_shape))
+        self.film_owner.fill(self.count)
+        self.film_candidate.fill(self.count)
         self.cooldown = qd.field(gs.qd_float, shape=self.count)
         self.film_side.fill(0)
         self.film_anchor.fill(0)
@@ -130,6 +137,10 @@ class ToolContact:
                 measure_coating(self.solver.sim.cur_substep_local, *center, *angles, roll, self)
             self.measure_step += 1
         contact(self.solver.sim.cur_substep_local, *center, *velocity, *angles, roll, *omega, time_s, project, self)
+        if not project and self.parameters.residue_per_face > 0:
+            prepare_residue(self.solver.sim.cur_substep_local, *center, *velocity, *angles, roll, *omega, self)
+            choose_residue(self.solver.sim.cur_substep_local, *center, *velocity, *angles, roll, *omega, self)
+            capture_residue(self.solver.sim.cur_substep_local, *center, *velocity, *angles, roll, *omega, self)
 
     def faces(self):
         return qd_to_numpy(self.side, transpose=True, copy=True)
@@ -139,6 +150,161 @@ class ToolContact:
 
     def max_correction(self):
         return float(qd_to_numpy(self.maximum_correction, transpose=True, copy=True)[0])
+
+
+@qd.func
+def residue_edge(local, self: qd.template()):
+    edge = qd.min(self.half[0] - qd.abs(local[0]), self.half[1] - qd.abs(local[1]))
+    edge = qd.min(edge, local[0] + self.half[0] - self.bevel)
+    if qd.static(self.has_face):
+        edge = face_distance(local[0], local[1], self.face)
+    return edge
+
+
+@qd.func
+def release_residue(f, i, self: qd.template()):
+    side = qd.select(self.film_side[i] > 0, 1, 0)
+    qd.atomic_add(self.film_count[side], -1)
+    self.film_side[i] = 0
+    self.side[i] = 0
+    self.age[i] = 0.0
+    self.cooldown[i] = self.parameters.residue_cooldown
+    self.solver.particles_ng[f, self.start + i, 0].active = True
+    # Deposited film has relaxed while attached; release without stored elastic or affine impulses.
+    self.particles[f, self.start + i, 0].F = qd.Matrix.identity(gs.qd_float, 3)
+    self.particles[f, self.start + i, 0].C = qd.Matrix.zero(gs.qd_float, 3, 3)
+
+
+@qd.kernel
+def prepare_residue(
+    f: qd.i32,
+    cx: float,
+    cy: float,
+    cz: float,
+    vx: float,
+    vy: float,
+    vz: float,
+    theta: float,
+    yaw: float,
+    roll: float,
+    wx: float,
+    wy: float,
+    wz: float,
+    self: qd.template(),
+):
+    for node in qd.grouped(self.film_owner):
+        self.film_owner[node] = self.count
+        self.film_candidate[node] = self.count
+    R = blade_rotation(theta, yaw, roll)
+    center, velocity = qd.Vector([cx, cy, cz]), qd.Vector([vx, vy, vz])
+    for i in range(self.count):
+        self.cooldown[i] = qd.max(0.0, self.cooldown[i] - self.dt)
+        if self.film_side[i] != 0:
+            anchor = self.film_anchor[i]
+            world = center + R @ anchor
+            surface_velocity = velocity + qd.Vector([wx, wy, wz]).cross(world - center)
+            if local_coating_depth(anchor, self) > 3 * self.material_spacing:
+                slip = R.transpose() @ qd.Vector([0.0, 0.0, -qd.min(0.0, surface_velocity[2])])
+                anchor[0] += slip[0] * self.dt
+                anchor[1] += slip[1] * self.dt
+            world = center + R @ anchor
+            bread_gap = 1.0
+            if qd.static(self.has_bread):
+                bread_gap = supported_gap(world, self.bread_contact)
+            if residue_edge(anchor, self) < self.material_spacing / 2 or bread_gap < self.material_spacing:
+                release_residue(f, i, self)
+            else:
+                self.film_anchor[i] = anchor
+                cell = qd.cast(
+                    qd.floor((qd.Vector([anchor[0], anchor[1]]) - self.coating_origin) / self.film_cell), qd.i32
+                )
+                side = qd.select(self.film_side[i] > 0, 1, 0)
+                if 0 <= cell[0] < self.film_shape[0] and 0 <= cell[1] < self.film_shape[1]:
+                    qd.atomic_min(self.film_owner[side, cell[0], cell[1]], i)
+
+
+@qd.kernel
+def choose_residue(
+    f: qd.i32,
+    cx: float,
+    cy: float,
+    cz: float,
+    vx: float,
+    vy: float,
+    vz: float,
+    theta: float,
+    yaw: float,
+    roll: float,
+    wx: float,
+    wy: float,
+    wz: float,
+    self: qd.template(),
+):
+    R = blade_rotation(theta, yaw, roll)
+    center = qd.Vector([cx, cy, cz])
+    for i in range(self.count):
+        local = R.transpose() @ (self.particles[f, self.start + i, 0].pos - center)
+        if self.film_side[i] != 0:
+            local = self.film_anchor[i]
+        cell = qd.cast(qd.floor((qd.Vector([local[0], local[1]]) - self.coating_origin) / self.film_cell), qd.i32)
+        side = qd.select(local[2] >= 0, 1, 0)
+        if 0 <= cell[0] < self.film_shape[0] and 0 <= cell[1] < self.film_shape[1]:
+            if self.film_side[i] != 0:
+                if self.film_owner[side, cell[0], cell[1]] != i:
+                    release_residue(f, i, self)
+            elif self.cooldown[i] == 0 and self.side[i] != 0 and self.age[i] >= self.parameters.residue_capture_time:
+                gap = qd.abs(local[2]) - self.half[2]
+                surface_velocity = qd.Vector([vx, vy, vz]) + qd.Vector([wx, wy, wz]).cross(R @ local)
+                relative = R.transpose() @ (self.particles[f, self.start + i, 0].vel - surface_velocity)
+                separating_speed = (2 * side - 1) * relative[2]
+                bread_gap = 1.0
+                if qd.static(self.has_bread):
+                    bread_gap = supported_gap(self.particles[f, self.start + i, 0].pos, self.bread_contact)
+                if (
+                    0 <= gap <= self.material_spacing
+                    and residue_edge(local, self) > self.material_spacing / 2
+                    and bread_gap > 2 * self.material_spacing
+                    and separating_speed > self.parameters.residue_separation_speed
+                    and self.film_owner[side, cell[0], cell[1]] == self.count
+                ):
+                    qd.atomic_min(self.film_candidate[side, cell[0], cell[1]], i)
+
+
+@qd.kernel
+def capture_residue(
+    f: qd.i32,
+    cx: float,
+    cy: float,
+    cz: float,
+    vx: float,
+    vy: float,
+    vz: float,
+    theta: float,
+    yaw: float,
+    roll: float,
+    wx: float,
+    wy: float,
+    wz: float,
+    self: qd.template(),
+):
+    R = blade_rotation(theta, yaw, roll)
+    center, velocity = qd.Vector([cx, cy, cz]), qd.Vector([vx, vy, vz])
+    for side, x, y in self.film_candidate:
+        i = self.film_candidate[side, x, y]
+        if i < self.count:
+            slot = qd.atomic_add(self.film_count[side], 1)
+            if slot < self.parameters.residue_per_face:
+                p = self.start + i
+                local = R.transpose() @ (self.particles[f, p, 0].pos - center)
+                sign = 2 * side - 1
+                local[2] = sign * (self.half[2] + self.material_spacing / 2)
+                self.film_side[i] = sign
+                self.film_anchor[i] = local
+                self.solver.particles_ng[f, p, 0].active = False
+                self.particles[f, p, 0].pos = center + R @ local
+                self.particles[f, p, 0].vel = velocity + qd.Vector([wx, wy, wz]).cross(R @ local)
+            else:
+                qd.atomic_add(self.film_count[side], -1)
 
 
 @qd.kernel
@@ -164,6 +330,8 @@ def contact(
     center, velocity = qd.Vector([cx, cy, cz]), qd.Vector([vx, vy, vz])
     for i in range(self.count):
         p = self.start + i
+        if self.film_side[i] != 0:
+            continue
         world = self.particles[f, p, 0].pos
         local = R.transpose() @ (world - center)
         surface_velocity = velocity + qd.Vector([wx, wy, wz]).cross(world - center)
@@ -273,7 +441,6 @@ def contact(
                 impulse *= qd.min(1.0, limit / qd.max(impulse.norm(), 1e-12))
                 relative[0] += impulse[0]
                 relative[1] += impulse[1]
-            self.cooldown[i] = qd.max(0.0, self.cooldown[i] - self.dt)
             if self.transferred[i] != 0:
                 relative = initial_relative
                 if edge > 0 and -self.spacing < gap < self.parameters.transferred_range:
@@ -293,32 +460,6 @@ def contact(
                             -gap / self.parameters.normal_relaxation_time, self.parameters.max_separation_speed
                         )
                         relative[2] += sign * qd.max(0.0, target_speed - sign * relative[2])
-            if self.film_side[i] != 0:
-                detached = (local - self.film_anchor[i]).norm() > self.parameters.residue_release_distance
-                detached = detached or edge <= 0 or sign != self.film_side[i]
-                detached = detached or bread_gap < self.spacing * 2
-                detached = detached or coating_depth > 3 * self.material_spacing
-                if detached:
-                    qd.atomic_add(self.film_count[qd.select(self.film_side[i] > 0, 1, 0)], -1)
-                    self.film_side[i] = 0
-                    self.cooldown[i] = self.parameters.residue_cooldown
-            elif self.cooldown[i] == 0:
-                speed = qd.Vector([relative[0], relative[1]]).norm()
-                if (
-                    self.age[i] >= self.parameters.residue_capture_time
-                    and edge > self.spacing
-                    and qd.abs(gap) < self.spacing
-                    and speed < 0.15
-                    and bread_gap > self.spacing * 2
-                    and coating_depth < 1.5 * self.material_spacing
-                ):
-                    face_index = qd.select(sign > 0, 1, 0)
-                    slot = qd.atomic_add(self.film_count[face_index], 1)
-                    if slot < self.parameters.residue_per_face:
-                        self.film_side[i] = sign
-                        self.film_anchor[i] = local
-                    else:
-                        qd.atomic_add(self.film_count[face_index], -1)
             self.particles[f, p, 0].vel = surface_velocity + R @ relative
             # Finite stationary board adhesion acts only on the cutting board.
             uv = (qd.Vector([world[0], world[1]]) - self.support_origin) / self.support_spacing

@@ -3,7 +3,6 @@
 import hashlib
 import json
 import time
-from dataclasses import asdict
 from pathlib import Path
 
 import carb
@@ -259,7 +258,7 @@ def render(
                 "blade_film": "Two rotating particle-driven opacity sheets; complementary bulk weights; approximate thin coating BRDF.",
                 "film_shader_sha256": hashlib.sha256(film_shader_path.read_bytes()).hexdigest(),
                 "film_visibility": "Whole-BSDF stochastic coverage; zero-coverage triangles omitted; constant face normals.",
-                "film_settings": asdict(film_settings),
+                "film_settings": report["film_settings"],
                 "state_sha256": state_hash,
                 "appearance_sha256": hashlib.sha256(profile.read_bytes()).hexdigest(),
                 "samples": samples,

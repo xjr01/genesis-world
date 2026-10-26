@@ -218,7 +218,7 @@ def test_end_slice_trajectory_preserves_loaded_face_and_collision_clearance(back
 
 
 @pytest.mark.parametrize("backend", [gs.gpu])
-def test_two_sided_contact_has_time_independent_sliding_and_finite_range(backend, asset_tmp_path):
+def test_two_sided_contact_has_time_independent_sliding_and_finite_range(backend, asset_tmp_path, show_viewer):
     config = Config()
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(dt=config.dt, gravity=(0, 0, 0)),
@@ -228,7 +228,8 @@ def test_two_sided_contact_has_time_independent_sliding_and_finite_range(backend
             grid_density=64,
             particle_size=config.particle_size,
         ),
-        show_viewer=False,
+        viewer_options=gs.options.ViewerOptions(camera_pos=(0.1, -0.1, 0.1), camera_lookat=(0, 0, 0)),
+        show_viewer=show_viewer,
     )
     butter = scene.add_entity(
         morph=gs.morphs.Box(size=(2 * config.particle_size, config.particle_size, config.particle_size)),
@@ -306,6 +307,7 @@ def test_two_sided_contact_has_time_independent_sliding_and_finite_range(backend
             assert_allclose(result[1], 0, atol=1e-8)
         assert_allclose(tensor_to_array(butter.get_particles_pos()), capture_positions, atol=1e-9)
     contact = ToolContact(butter, config)
+    contact.parameters = replace(contact.parameters, residue_per_face=0)
     signs = np.array([-1, 1])
     gap = 0.0002
     positions = np.zeros((2, 3))
@@ -429,15 +431,17 @@ def test_two_sided_contact_has_time_independent_sliding_and_finite_range(backend
     residue_contact.film_side.from_numpy(signs.astype(gs.np_int))
     residue_contact.film_count.fill(1)
     residue_contact.film_anchor.from_numpy(outside.astype(gs.np_float))
+    butter.set_particles_active(False)
     butter.set_particles_pos(outside)
     residue_projection.record((0, 0, 0))
     butter.set_particles_pos(outside + (0.0001, 0, 0))
     residue_projection.apply((0, 0, 0), (0, 0, 0))
     assert_allclose(tensor_to_array(butter.get_particles_pos()), outside, atol=1e-8)
-    assert tensor_to_array(butter.get_particles_active()).all()
+    assert not tensor_to_array(butter.get_particles_active()).any()
     butter.set_particles_pos(outside + (0.003, 0, 0))
     residue_projection.apply((0, 0, 0), (0, 0, 0))
     assert not residue_contact.residue_faces().any()
+    assert tensor_to_array(butter.get_particles_active()).all()
 
     assert not qd_to_numpy(residue_contact.film_count, transpose=True, copy=True).any()
     capped_residue = ToolContact(butter, config)
@@ -448,6 +452,7 @@ def test_two_sided_contact_has_time_independent_sliding_and_finite_range(backend
         if not same_face:
             capture[1, 2] *= -1
         butter.set_particles_pos(capture)
+        butter.set_particles_active(True)
         butter.set_particles_vel(np.zeros((2, 3)))
         capped_residue.side.from_numpy(np.sign(capture[:, 2]).astype(gs.np_int))
         capped_residue.age.fill(1)
@@ -456,8 +461,32 @@ def test_two_sided_contact_has_time_independent_sliding_and_finite_range(backend
         capped_residue.cooldown.fill(0)
         capped_residue.measure_step = 0
         capped_residue.apply((0, 0, 0), (0, 0, 0), (0, 0), (0, 0, 0), 0.0)
+        assert not capped_residue.residue_faces().any()
+        assert tensor_to_array(butter.get_particles_active()).all()
+        separating_velocity = np.zeros((2, 3))
+        separating_velocity[:, 2] = np.sign(capture[:, 2]) * 0.1
+        butter.set_particles_vel(separating_velocity)
+        capped_residue.apply((0, 0, 0), (0, 0, 0), (0, 0), (0, 0, 0), 0.0)
         assert np.count_nonzero(capped_residue.residue_faces()) == (1 if same_face else 2)
         assert np.max(qd_to_numpy(capped_residue.film_count, transpose=True, copy=True)) == 1
+        assert_equal(tensor_to_array(butter.get_particles_active()), capped_residue.residue_faces() == 0)
+
+    attached = tensor_to_array(butter.get_particles_pos())
+    scene.step()
+    assert_allclose(tensor_to_array(butter.get_particles_pos()), attached, atol=1e-9)
+    assert not tensor_to_array(butter.get_particles_active()).any()
+    attached_projection = MeshProjection(butter, blade, np.eye(3), config.blade_size, contact=capped_residue)
+    tilted = Rotation.from_euler("y", 20, degrees=True).as_matrix()
+    attached_projection.apply((0.0001, 0, 0), (0.01, 0, 0), tilted.tolist())
+    assert_allclose(tensor_to_array(butter.get_particles_pos()), attached @ tilted.T + (0.0001, 0, 0), atol=1e-8)
+    assert_allclose(tensor_to_array(butter.get_particles_vel()), np.tile((0.01, 0, 0), (2, 1)), atol=1e-8)
+    exited = attached.copy()
+    exited[:, 0] = config.blade_size[0]
+    capped_residue.film_anchor.from_numpy(exited.astype(gs.np_float))
+    butter.set_particles_pos(exited)
+    capped_residue.apply((0, 0, 0), (0, 0, 0), (0, 0), (0, 0, 0), 0.0)
+    assert tensor_to_array(butter.get_particles_active()).all()
+    assert not capped_residue.residue_faces().any()
 
     # Previous/current local coordinates must follow the same particle IDs as the tool rotates.
     tilted = Rotation.from_euler("y", 80, degrees=True)

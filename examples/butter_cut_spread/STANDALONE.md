@@ -45,6 +45,10 @@ python -m examples.butter_cut_spread.asset_pipeline --run out/firm-smooth --isaa
 稠度 25、流动指数 0.5、密度 900 kg/m³，整个过程固定，不做分阶段软化或参数渐变。
 这是演示校准参数；有限变形、涂抹边缘缺口和细小三维通道仍可能出现。
 
+双面刀片使用一致的接触与沉积规则。薄层保留原粒子 ID，黏在刀面时暂时退出
+体积求解，释放后重新参与模拟；薄层颜色按实际厚度标定，保持淡色、透出金属。
+实现与完整对照见 [黏附说明](HYBRID_ADHESION.md) 和 [沉积薄层验证](COHERENT_FILM_VALIDATION.md)。
+
 只检查五个渲染时刻可加 `--preview`，物理过程仍完整。只需物理结果可加 `--physics-only`，
 此时无需安装 Isaac。`--duration 0.01 --physics-only` 用于短运行检查，不代表完整效果验收。
 
