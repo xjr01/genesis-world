@@ -125,6 +125,10 @@ class DEMSolver(Solver):
             self.init_particle_fields()
             for entity in self._entities:
                 entity._add_to_solver()
+            # per-grain freeze flag for the tray-scenery optimization (AGSIM_FREEZE_TRAY_AFTER_LEAVE):
+            # frozen grains have active=0 (skipped by every physics kernel) but stay visible in renders
+            self.frozen = qd.field(gs.qd_int, shape=(self._n_particles, self._B))
+            self.frozen.fill(0)
 
             if self._bond_enable:
                 # Per-grain directed adjacency. Keep batch as the second dimension, matching every
@@ -498,7 +502,8 @@ class DEMSolver(Solver):
             assert sum(self._sdfo_reserved) <= SDFO_MAX_CELLS, (
                 f"sdfo pool overrun: reserved {self._sdfo_reserved} > capacity {SDFO_MAX_CELLS}"
             )
-            self._sdfo_offset[slot] = sum(self._sdfo_reserved[:slot])
+            # Registration order is arbitrary; append new grids after every reserved region.
+            self._sdfo_offset[slot] = sum(self._sdfo_reserved) - val.size
         else:
             assert val.size <= self._sdfo_reserved[slot], (
                 f"slot {slot} replacement size {val.size} exceeds its reserved {self._sdfo_reserved[slot]}"
@@ -885,13 +890,22 @@ class DEMSolver(Solver):
         ratio_min: qd.f32,
         max_slots: qd.i32,
         radius_factor: qd.f32,
+        region_center: qd.types.ndarray(),
+        region_half: qd.types.ndarray(),
     ):
-        # One-shot directed adjacency over wet grains. Each particle writes only its own row; the
-        # reverse direction is created by the neighbour's own traversal. This avoids the previous
-        # pair-doubling race (i->j inserted both directions, then j->i inserted both again), which
-        # consumed four slots per physical pair and made the result launch-order dependent.
+        # One-shot directed adjacency over wet grains inside the optional region box. Each particle
+        # writes only its own row; the reverse direction is created by the neighbour's own traversal.
+        # This avoids the previous pair-doubling race (i->j inserted both directions, then j->i
+        # inserted both again), which consumed four slots per physical pair and made the result
+        # launch-order dependent.
         for i_p, i_b in qd.ndrange(self._n_particles, self._B):
             if self.particles[i_p, i_b].active and self.particles[i_p, i_b].ratio > ratio_min:
+                inside = True
+                for a in qd.static(range(3)):
+                    if abs(self.particles[i_p, i_b].pos[a] - region_center[a]) > region_half[a]:
+                        inside = False
+                if not inside:
+                    continue
                 base = self.sh.pos_to_grid(self.particles[i_p, i_b].pos)
                 candidates = gs.qd_int(0)
                 for offset in qd.grouped(qd.ndrange((-1, 2), (-1, 2), (-1, 2))):
@@ -1382,7 +1396,9 @@ class DEMSolver(Solver):
     def _kernel_update_render_fields(self, f: qd.i32):
         for i_p, i_b in qd.ndrange(self._n_particles, self._B):
             self.particles_render[i_p, i_b].pos = self.particles[i_p, i_b].pos
-            self.particles_render[i_p, i_b].active = self.particles[i_p, i_b].active
+            # frozen grains keep active=0 in physics but must stay visible in renders
+            self.particles_render[i_p, i_b].active = (
+                1 if (self.particles[i_p, i_b].active != 0 or self.frozen[i_p, i_b] != 0) else 0)
 
     # ------------------------------------------------------------------------------------
     # ------------------------------------ stepping --------------------------------------
@@ -1586,16 +1602,22 @@ class DEMSolver(Solver):
         self._kernel_enforce_boundary(f, self._particle_radius, tan_fric, inv_mass, k_norm, k_tang, c_norm, tan_fric_b)
         self._kernel_integrate(f, ddt)
 
-    def create_wet_bonds(self, ratio_min: float = 0.0, radius_factor: float = 1.025):
+    def create_wet_bonds(self, ratio_min: float = 0.0, radius_factor: float = 1.025,
+                         region_center=None, region_half=None):
         """One-shot unbreakable bond creation over wet grains (AGSIM_DEM_BOND_ENABLE debug extreme).
 
         Scans the spatial hash for wet active neighbors within ``radius_factor * 2r`` and connects
         each pair with an axial elastic spring at the current distance (no breakage criterion).
-        Rebuilding is idempotent: the previous adjacency is cleared first.
+        ``region_center``/``region_half`` optionally restrict the scan to an axis-aligned world box
+        (e.g. the bowl volume at scoop end). Rebuilding is idempotent: the previous adjacency is
+        cleared first.
         """
         if not self._bond_enable:
             print("BOND_CREATE skipped: AGSIM_DEM_BOND_ENABLE is off")
             return
+        if region_center is None:
+            region_center = (0.0, 0.0, 0.0)
+            region_half = (1e9, 1e9, 1e9)
         self.bond_other.fill(-1)
         self.bond_rest.fill(0)
         self.bond_slot_n.fill(0)
@@ -1604,7 +1626,8 @@ class DEMSolver(Solver):
         # hash and canonical<->reordered map from that new state before scanning neighbours.
         self._kernel_reorder_particles(0)
         self._kernel_create_wet_bonds(
-            0, self._particle_radius, float(ratio_min), BOND_MAX_SLOTS, float(radius_factor)
+            0, self._particle_radius, float(ratio_min), BOND_MAX_SLOTS, float(radius_factor),
+            np.asarray(region_center, dtype=np.float32), np.asarray(region_half, dtype=np.float32)
         )
         # Symplectic Euler is stable for dt < 2/sqrt(lambda_max).  For the equal-mass axial-spring
         # graph, Gershgorin gives lambda_max <= 2 * degree_max * k_bond / mass, hence the bound
@@ -1661,6 +1684,35 @@ class DEMSolver(Solver):
                 "mean_degree": float(degrees.mean()) if degrees.size else 0.0,
                 "max_rest_error_m": max_rest_error, "capacity": BOND_MAX_SLOTS,
                 "bond_ddt_limit_s": self._bond_ddt_limit}
+
+    @qd.kernel
+    def _kernel_freeze_in_box(self, center: qd.types.ndarray(), half: qd.types.ndarray()):
+        # Tray-scenery freeze (AGSIM_FREEZE_TRAY_AFTER_LEAVE): grains inside the box keep their
+        # position forever (active=0 skips every physics kernel) and stay render-visible via the
+        # frozen flag. Their current reordered row is deactivated so the next compaction cannot
+        # leave a stale active row behind.
+        for i_p, i_b in qd.ndrange(self._n_particles, self._B):
+            if self.particles[i_p, i_b].active:
+                inside = True
+                for a in qd.static(range(3)):
+                    if abs(self.particles[i_p, i_b].pos[a] - center[a]) > half[a]:
+                        inside = False
+                if inside:
+                    j_r = self.particles_ng[i_p, i_b].reordered_idx
+                    self.particles_reordered[j_r, i_b].active = 0
+                    self.particles[i_p, i_b].vel = qd.Vector.zero(gs.qd_float, 3)
+                    self.particles[i_p, i_b].active = 0
+                    self.frozen[i_p, i_b] = 1
+
+    def freeze_in_box(self, center, half):
+        """Deactivate grains inside the world box (center, half) as frozen scenery (debug/utility).
+
+        Frozen grains keep their position, are skipped by every physics kernel, and remain visible
+        in renders. Un-frozen only by a state restore (the frozen flag is not part of get_state).
+        """
+        self._kernel_freeze_in_box(
+            np.asarray(center, dtype=np.float32), np.asarray(half, dtype=np.float32)
+        )
 
     def substep_pre_coupling(self, f):
         if not self.is_active or self._coupled:
