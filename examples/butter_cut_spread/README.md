@@ -339,12 +339,12 @@ for the complete local validation and the same-material fine-sampling comparison
 
 For a firmer cut with easier spreading using **one material throughout**, use
 `configs/asset_firm_smooth.json` in place of `asset_hard.json`. Its fixed parameters
-are G=80 kPa, K=150 kPa, yield=600 Pa, consistency=15 and flow exponent=0.5.
+match `51c83edc`: G=80 kPa, K=150 kPa, yield=600 Pa, consistency=25 and flow exponent=0.5.
 The matching symmetric contact defaults use 1500 Pa normal traction and a 60 Pa
 thick-column limit. See [trajectory sensitivity measurements](PARAMETER_ROBUSTNESS.md).
 There is no time-dependent material interpolation or phase switch. The historical
-run `out/firm-smooth-full` below used consistency=25; its measurements describe
-that earlier calibration, using the existing 50 microsecond prepared assets:
+run `out/firm-smooth-full` below used the same material with earlier contact settings;
+its measurements describe that earlier contact calibration, using 50 microsecond prepared assets:
 
 ```shell
 python -m examples.butter_cut_spread.asset_demo --assets out/firm-50us-prepared --run out/firm-smooth-new --material examples/butter_cut_spread/configs/asset_firm_smooth.json

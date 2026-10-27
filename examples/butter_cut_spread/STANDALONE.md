@@ -43,6 +43,8 @@ python -m examples.butter_cut_spread.asset_pipeline --run out/firm-smooth --isaa
 
 默认材质为 `configs/asset_firm_smooth.json`：G=80 kPa、K=150 kPa、屈服应力 600 Pa、
 稠度 25、流动指数 0.5、密度 900 kg/m³，整个过程固定，不做分阶段软化或参数渐变。
+材料参数与 `51c83edc` 完全一致；刀面法向黏附为 1500 Pa，厚层黏附上限为 60 Pa。
+完整原轨迹与加速刀路的对照结果见 [参数验证](PARAMETER_ROBUSTNESS.md)。
 这是演示校准参数；有限变形、涂抹边缘缺口和细小三维通道仍可能出现。
 
 双面刀片使用一致的接触与沉积规则。薄层保留原粒子 ID，黏在刀面时暂时退出
