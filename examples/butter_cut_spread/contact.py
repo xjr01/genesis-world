@@ -17,8 +17,8 @@ qd = gs.qd
 class AdhesionParameters:
     """Fixed, symmetric cohesive contact with velocity-triggered sliding and rebonding."""
 
-    normal_stress: float = 2000.0
-    bulk_normal_stress: float = 200.0
+    normal_stress: float = 1500.0
+    bulk_normal_stress: float = 60.0
     thin_column_depth: float = 0.0112
     bulk_column_depth: float = 0.0118
     transferred_normal_stress: float = 40.0
