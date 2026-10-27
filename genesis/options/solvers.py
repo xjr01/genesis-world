@@ -1544,6 +1544,8 @@ class DEMOptions(Options):
     # the reference's DEMForce::getForce has no damping; added on user request 2026-08-22 to calm
     # the scoop first-touch splash)
 
+    extra_normal_damping: NonNegativeFloat = 0.0  # additional normal damping coefficient in N*s/m; 0 = reference behavior
+
     sdf_obstacle_force_contact: bool = False  # experimental force-based mesh-SDF obstacle contact
 
     boundary_force_contact: bool = False  # experimental force-based domain box/cylinder contact

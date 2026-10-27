@@ -100,6 +100,7 @@ class DEMSolver(Solver):
         # experimental unbreakable wet-grain bonds (debug/visualization extreme; beyond the C++
         # reference, which has no bond mechanism). AGSIM_DEM_BOND_ENABLE switches it on; bonds are
         # created only by an explicit create_wet_bonds() call (one-shot, e.g. after a state restore).
+        self._extra_normal_damping = options.extra_normal_damping
         self._bond_enable = options.bond_enable
         self._bond_breakable = options.bond_break_strain is not None
         self._bond_break_strain = float(options.bond_break_strain or 0.0)
@@ -1740,6 +1741,7 @@ class DEMSolver(Solver):
             L = -math.log(e)
             xi = L / math.sqrt(math.pi * math.pi + L * L)
             c_norm = float(2.0 * xi * math.sqrt(k_norm * 0.5 * mass))
+        c_norm += self._extra_normal_damping
         # squared contact gate: beyond 2r + d_rupture (the liquid-bridge rupture distance of
         # _func_capillary_force) both force terms are exactly zero, so the pair loop may skip such
         # pairs before its sqrt and force work; the relative slack keeps the fp-rounded squared
@@ -1757,6 +1759,15 @@ class DEMSolver(Solver):
         ddt = min(2.0 * self._particle_radius / speed, self._m_ddt) * self._ddt_safety
         if self._bond_ddt_limit is not None:
             ddt = min(ddt, self._bond_ddt_limit)
+        inv_mass, k_norm, _, _, c_norm, _, _ = self._material_constants()
+        if c_norm > 0.0:
+            gamma = c_norm * inv_mass
+            omega2 = 2.0 * k_norm * inv_mass
+            if gamma * gamma >= omega2:
+                damping_limit = 1.0 / (gamma + math.sqrt(gamma * gamma - omega2))
+            else:
+                damping_limit = c_norm / k_norm
+            ddt = min(ddt, damping_limit)
         return ddt
 
     def _advance(self, dt_total, f):
