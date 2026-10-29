@@ -1,0 +1,114 @@
+base_gpu_first.log
+____________________ test_ground_and_self_contact[False-0] ____________________
+tests\deformable\test_vbd.py:405: in test_ground_and_self_contact
+E   AssertionError: 
+E    [0]: 0.011280499398708344 (ACTUAL), 0.011301120000000001 (DESIRED)
+E   Max absolute difference among violations: 2.06206013e-05
+======================== 1 failed in 77.03s (0:01:17) =========================
+
+final_gpu_tests.log
+____________________ test_ground_and_self_contact[True-0] _____________________
+tests\deformable\test_vbd.py:349: in test_ground_and_self_contact
+E   UserWarning: [PURE.VIOLATION] WARNING: Accessing global var EPS from outside function scope within pure kernel gs is in global vars, therefore violates pure
+E   UserWarning: [PURE.VIOLATION] WARNING: Accessing global var EPS from outside function scope within pure kernel gs is in global vars, therefore violates pure
+____________________ test_ground_and_self_contact[True-2] _____________________
+tests\deformable\test_vbd.py:349: in test_ground_and_self_contact
+E   UserWarning: [PURE.VIOLATION] WARNING: Accessing global var EPS from outside function scope within pure kernel gs is in global vars, therefore violates pure
+E   UserWarning: [PURE.VIOLATION] WARNING: Accessing global var EPS from outside function scope within pure kernel gs is in global vars, therefore violates pure
+____________________ test_ground_and_self_contact[False-0] ____________________
+tests\deformable\test_vbd.py:463: in test_ground_and_self_contact
+E   AssertionError: 
+E    [0]: 0.011280499398708344 (ACTUAL), 0.011301120000000001 (DESIRED)
+E   Max absolute difference among violations: 2.06206013e-05
+____________________ test_ground_and_self_contact[False-2] ____________________
+tests\deformable\test_vbd.py:463: in test_ground_and_self_contact
+E   AssertionError: 
+E    [0]: 0.011280499398708344 (ACTUAL), 0.011301120000000001 (DESIRED)
+E    [1]: 0.011280499398708344 (ACTUAL), 0.011301120000000001 (DESIRED)
+E   Max absolute difference among violations: 2.06206013e-05
+_____________________ test_material_response[0.0-True-2] ______________________
+tests\deformable\test_vbd.py:668: in test_material_response
+E   UserWarning: [PURE.VIOLATION] WARNING: Accessing global var EPS from outside function scope within pure kernel gs is in global vars, therefore violates pure
+E   UserWarning: [PURE.VIOLATION] WARNING: Accessing global var EPS from outside function scope within pure kernel gs is in global vars, therefore violates pure
+_____________________ test_material_response[0.0-True-0] ______________________
+tests\deformable\test_vbd.py:668: in test_material_response
+E   UserWarning: [PURE.VIOLATION] WARNING: Accessing global var EPS from outside function scope within pure kernel gs is in global vars, therefore violates pure
+E   UserWarning: [PURE.VIOLATION] WARNING: Accessing global var EPS from outside function scope within pure kernel gs is in global vars, therefore violates pure
+____________________ test_material_response[1e-07-True-2] _____________________
+tests\deformable\test_vbd.py:668: in test_material_response
+E   UserWarning: [PURE.VIOLATION] WARNING: Accessing global var EPS from outside function scope within pure kernel gs is in global vars, therefore violates pure
+E   UserWarning: [PURE.VIOLATION] WARNING: Accessing global var EPS from outside function scope within pure kernel gs is in global vars, therefore violates pure
+____________________ test_material_response[1e-07-True-0] _____________________
+tests\deformable\test_vbd.py:668: in test_material_response
+E   UserWarning: [PURE.VIOLATION] WARNING: Accessing global var EPS from outside function scope within pure kernel gs is in global vars, therefore violates pure
+E   UserWarning: [PURE.VIOLATION] WARNING: Accessing global var EPS from outside function scope within pure kernel gs is in global vars, therefore violates pure
+================== 8 failed, 10 passed in 237.80s (0:03:57) ===================
+
+final_cpu_tests.log
+____________________ test_ground_and_self_contact[True-0] _____________________
+tests\deformable\test_vbd.py:349: in test_ground_and_self_contact
+E   UserWarning: [PURE.VIOLATION] WARNING: Accessing global var EPS from outside function scope within pure kernel gs is in global vars, therefore violates pure
+E   UserWarning: [PURE.VIOLATION] WARNING: Accessing global var EPS from outside function scope within pure kernel gs is in global vars, therefore violates pure
+____________________ test_ground_and_self_contact[True-2] _____________________
+tests\deformable\test_vbd.py:349: in test_ground_and_self_contact
+E   UserWarning: [PURE.VIOLATION] WARNING: Accessing global var EPS from outside function scope within pure kernel gs is in global vars, therefore violates pure
+E   UserWarning: [PURE.VIOLATION] WARNING: Accessing global var EPS from outside function scope within pure kernel gs is in global vars, therefore violates pure
+_____________________ test_material_response[0.0-True-0] ______________________
+tests\deformable\test_vbd.py:668: in test_material_response
+E   UserWarning: [PURE.VIOLATION] WARNING: Accessing global var EPS from outside function scope within pure kernel gs is in global vars, therefore violates pure
+E   UserWarning: [PURE.VIOLATION] WARNING: Accessing global var EPS from outside function scope within pure kernel gs is in global vars, therefore violates pure
+_____________________ test_material_response[0.0-True-2] ______________________
+tests\deformable\test_vbd.py:668: in test_material_response
+E   UserWarning: [PURE.VIOLATION] WARNING: Accessing global var EPS from outside function scope within pure kernel gs is in global vars, therefore violates pure
+E   UserWarning: [PURE.VIOLATION] WARNING: Accessing global var EPS from outside function scope within pure kernel gs is in global vars, therefore violates pure
+____________________ test_material_response[1e-07-True-2] _____________________
+tests\deformable\test_vbd.py:668: in test_material_response
+E   UserWarning: [PURE.VIOLATION] WARNING: Accessing global var EPS from outside function scope within pure kernel gs is in global vars, therefore violates pure
+E   UserWarning: [PURE.VIOLATION] WARNING: Accessing global var EPS from outside function scope within pure kernel gs is in global vars, therefore violates pure
+____________________ test_material_response[1e-07-True-0] _____________________
+tests\deformable\test_vbd.py:668: in test_material_response
+E   UserWarning: [PURE.VIOLATION] WARNING: Accessing global var EPS from outside function scope within pure kernel gs is in global vars, therefore violates pure
+E   UserWarning: [PURE.VIOLATION] WARNING: Accessing global var EPS from outside function scope within pure kernel gs is in global vars, therefore violates pure
+================== 6 failed, 12 passed in 235.03s (0:03:55) ===================
+
+final_gpu_line_search_tests.log
+____________________ test_ground_and_self_contact[True-2] _____________________
+tests\deformable\test_vbd.py:463: in test_ground_and_self_contact
+E   AssertionError: 
+E    [0]: 0.011335650458931923 (ACTUAL), 0.011301120000000001 (DESIRED)
+E    [1]: 0.011335650458931923 (ACTUAL), 0.011301120000000001 (DESIRED)
+E   Max absolute difference among violations: 3.45304589e-05
+____________________ test_ground_and_self_contact[True-0] _____________________
+tests\deformable\test_vbd.py:463: in test_ground_and_self_contact
+E   AssertionError: 
+E    [0]: 0.011335650458931923 (ACTUAL), 0.011301120000000001 (DESIRED)
+E   Max absolute difference among violations: 3.45304589e-05
+=================== 2 failed, 4 passed in 187.45s (0:03:07) ===================
+
+final_cpu_line_search_tests.log
+======================== 6 passed in 174.39s (0:02:54) ========================
+
+baseline_line_search.log
+____________________ test_ground_and_self_contact[True-0] _____________________
+tests\deformable\test_vbd.py:463: in test_ground_and_self_contact
+E   AssertionError: 
+E    [0]: 0.011335650458931923 (ACTUAL), 0.011301120000000001 (DESIRED)
+E   Max absolute difference among violations: 3.45304589e-05
+======================== 1 failed in 118.48s (0:01:58) ========================
+
+missing_face_bound.log
+======================== 1 passed in 72.39s (0:01:12) =========================
+
+missing_edge_bound.log
+____________________ test_ground_and_self_contact[False-0] ____________________
+tests\deformable\test_vbd.py:382: in test_ground_and_self_contact
+E   AssertionError: assert tensor(False, device='cuda:0')
+E    +    where <built-in method all of Tensor object at 0x0000023B9A4DA5D0> = tensor([-0.0021], device='cuda:0') >= (0.00025 - 2e-07).all
+============================= 1 failed in 47.15s ==============================
+
+missing_bound_gather.log
+____________________ test_ground_and_self_contact[False-0] ____________________
+tests\deformable\test_vbd.py:382: in test_ground_and_self_contact
+E   AssertionError: assert tensor(False, device='cuda:0')
+E    +    where <built-in method all of Tensor object at 0x000001B9BB1799F0> = tensor([[-0.0024,  0.0010,  0.0010]], device='cuda:0') >= (0.00025 - 2e-07).all
+============================= 1 failed in 44.94s ==============================

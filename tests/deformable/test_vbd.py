@@ -34,6 +34,30 @@ def test_vertex_controls_and_state(n_envs, has_shell, show_viewer):
         material=gs.materials.VBD.Elastic(),
     )
     if has_shell:
+        translating = scene.add_entity(
+            morph=gs.morphs.MeshSet(
+                files=(
+                    trimesh.Trimesh(
+                        vertices=(
+                            (0.0, 0.0, 0.05),
+                            (0.1, 0.0, 0.05),
+                            (0.0, 0.1, 0.05),
+                            (0.0, 0.0, 0.0512),
+                            (0.1, 0.0, 0.0512),
+                            (0.0, 0.1, 0.0512),
+                            (-0.2, 0.0, 0.05),
+                            (-0.1, 0.0, 0.05),
+                            (-0.2, 0.1, 0.05),
+                        ),
+                        faces=((0, 1, 2), (3, 4, 5), (6, 7, 8)),
+                        process=False,
+                    ),
+                ),
+            ),
+            material=gs.materials.VBD.Cloth(
+                E=10000000.0,
+            ),
+        )
         constrained = scene.add_entity(
             morph=gs.morphs.MeshSet(
                 files=(
@@ -58,11 +82,24 @@ def test_vertex_controls_and_state(n_envs, has_shell, show_viewer):
     scene.build(n_envs=n_envs)
     initial = scene.get_state()
     initial_pos = free.get_state().pos
+    if has_shell:
+        initial_shell_pos = translating.get_state().pos
     fixed_pos = constrained.get_state().pos[:, 0]
     scene.step()
     expected = np.array(gravity) * (dt / 2) ** 2 * 3
     assert_allclose(free.get_state().pos - initial_pos, np.broadcast_to(expected, initial_pos.shape), atol=2e-6)
     assert_allclose(free.get_state().vel, np.broadcast_to(np.array(gravity) * dt, initial_pos.shape), atol=2e-5)
+    if has_shell:
+        assert_allclose(
+            translating.get_state().pos - initial_shell_pos,
+            np.broadcast_to(expected, initial_shell_pos.shape),
+            atol=2e-6,
+        )
+        assert_allclose(
+            translating.get_state().vel, np.broadcast_to(np.array(gravity) * dt, initial_shell_pos.shape), atol=2e-5
+        )
+        shell_fixed_pos = translating.get_state().pos[:, 6:]
+        translating.set_vertex_constraints([6, 7, 8])
     assert_equal(constrained.get_state().pos[:, 0], fixed_pos)
     envs_idx = [0] if n_envs else None
     state = free.get_state()
@@ -81,6 +118,18 @@ def test_vertex_controls_and_state(n_envs, has_shell, show_viewer):
     velocity = free.get_state().vel
     free.set_vertex_forces([0.01, 0.0, 0.0], [0, 1, 2, 3], envs_idx=envs_idx)
     scene.step()
+    if has_shell:
+        shell_state = translating.get_state()
+        expected = np.array(gravity) * (dt / 2) ** 2 * 10
+        assert_allclose(
+            shell_state.pos[:, :6] - initial_shell_pos[:, :6],
+            np.broadcast_to(expected, initial_shell_pos[:, :6].shape),
+            atol=2e-6,
+        )
+        assert_allclose(
+            shell_state.vel[:, :6], np.broadcast_to(np.array(gravity) * dt * 2, shell_state.vel[:, :6].shape), atol=2e-5
+        )
+        assert_equal(shell_state.pos[:, 6:], shell_fixed_pos)
     acceleration = np.array(gravity)
     acceleration[0] += 0.01 / (free.material.rho * 0.1**3 / 24)
     assert_allclose(free.get_state().vel[0] - velocity[0], np.broadcast_to(acceleration * dt, (4, 3)), atol=2e-5)
@@ -176,6 +225,27 @@ def test_ground_and_self_contact(n_envs, is_line_search_enabled, show_viewer):
                 ),
             )
         )
+    approaching_entities = []
+    for index in range(2):
+        if index == 0:
+            lower_vertices = ((-0.02, -0.02, 0.0), (0.02, -0.02, 0.0), (0.0, 0.02, 0.0))
+            upper_vertices = ((-0.002, -0.002, 0.0), (0.002, -0.002, 0.0), (0.0, 0.002, 0.0))
+        else:
+            lower_vertices = ((-0.02, 0.0, 0.0), (0.02, 0.0, 0.0), (-0.04, -0.04, 0.0))
+            upper_vertices = ((0.0, -0.02, 0.0), (0.0, 0.02, 0.0), (0.04, 0.04, 0.0))
+        for height, vertices in ((0.2, lower_vertices), (0.2006, upper_vertices)):
+            mesh = trimesh.Trimesh(vertices=vertices, faces=((0, 1, 2),), process=False)
+            approaching_entities.append(
+                scene.add_entity(
+                    morph=gs.morphs.MeshSet(
+                        pos=(0.8 + 0.3 * index, -0.3, height),
+                        files=(mesh,),
+                    ),
+                    material=gs.materials.VBD.Cloth(
+                        thickness=0.00025,
+                    ),
+                )
+            )
     falling = scene.add_entity(
         morph=gs.morphs.TetrahedralMesh(
             pos=(0.5, 0.0, 1.0),
@@ -330,6 +400,8 @@ def test_ground_and_self_contact(n_envs, is_line_search_enabled, show_viewer):
     state = scene.vbd_solver.get_state(f=0)
     state.vel[:, falling.v_start : falling.v_start + falling.n_vertices, 2] = initial_velocity
     state.vel[:, crossing.v_start : crossing.v_start + crossing.n_vertices, 2] = -8.0
+    for index, entity in enumerate(approaching_entities):
+        state.vel[:, entity.v_start : entity.v_start + entity.n_vertices, 2] = 1.0 if index % 2 == 0 else -1.0
     scene.vbd_solver.set_state(f=0, state=state)
     initial_falling = falling.get_state().pos
     initial_dense = dense.get_state().pos
@@ -344,6 +416,19 @@ def test_ground_and_self_contact(n_envs, is_line_search_enabled, show_viewer):
         atol=2e-6,
     )
     assert_allclose(dense.get_state().pos - initial_dense, [0.0, 0.0, displacement], atol=2e-7)
+    for index in range(2):
+        lower_pos = approaching_entities[2 * index].get_state().pos
+        upper_pos = approaching_entities[2 * index + 1].get_state().pos
+        lower_edge = lower_pos[:, 1] - lower_pos[:, 0]
+        if index == 0:
+            normal = torch.linalg.cross(lower_edge, lower_pos[:, 2] - lower_pos[:, 0])
+            gap = ((upper_pos - lower_pos[:, :1]) * normal[:, None]).sum(dim=-1)
+            gap /= torch.linalg.vector_norm(normal, dim=-1, keepdim=True)
+        else:
+            normal = torch.linalg.cross(lower_edge, upper_pos[:, 1] - upper_pos[:, 0])
+            gap = ((upper_pos[:, 0] - lower_pos[:, 0]) * normal).sum(dim=-1)
+            gap /= torch.linalg.vector_norm(normal, dim=-1)
+        assert (gap >= approaching_entities[2 * index].material.thickness - 2e-7).all()
     assert (penetrating.get_state().pos[..., 2] > 0.14999).all()
     assert (crossing.get_state().pos[..., 2] > 0.1499).all()
     assert (
@@ -366,7 +451,6 @@ def test_ground_and_self_contact(n_envs, is_line_search_enabled, show_viewer):
     compression = entities[0].material.thickness / 2 + scene.vbd_options.contact_d_hat - lower.pos[..., 2]
     weight = 2 * 0.08**2 * entities[0].material.thickness * entities[0].material.rho * 9.81
     support = compression.clamp_min(0).sum(dim=-1) * scene.vbd_options.shell_contact_stiffness
-    assert_allclose(support, weight, atol=2e-5)
     assert (upper.pos[..., 2] < 0.0015).all()
     assert_allclose(lower.vel[..., 2], 0.0, atol=0.002)
     assert_allclose(upper.vel[..., 2], 0.0, atol=0.002)
@@ -425,6 +509,7 @@ def test_ground_and_self_contact(n_envs, is_line_search_enabled, show_viewer):
         else:
             depth = initial[:, 0, 2] - compressed.init_positions[0, 2]
             assert (interior.get_state().pos[..., 2].mean(dim=-1) < initial[..., 2].mean(dim=-1) - depth / 2).all()
+    assert_allclose(support, weight, atol=2e-5)
 
 
 @pytest.mark.parametrize("n_envs", [0, 2])
@@ -548,6 +633,8 @@ def test_material_response(n_envs, is_line_search_enabled, convergence_tolerance
         ),
         vbd_options=gs.options.VBDOptions(
             convergence_tolerance=convergence_tolerance,
+            shell_ground_stiffness=10.0,
+            shell_ground_d_hat=0.0,
             is_line_search_enabled=is_line_search_enabled,
         ),
         viewer_options=gs.options.ViewerOptions(
@@ -555,6 +642,29 @@ def test_material_response(n_envs, is_line_search_enabled, convergence_tolerance
             camera_lookat=(0.4, 0.2, 0.05),
         ),
         show_viewer=show_viewer,
+    )
+    scene.add_entity(
+        morph=gs.morphs.Plane(
+            pos=(0.0, 0.0, -1.0),
+        ),
+    )
+    mesh = trimesh.Trimesh(
+        vertices=((0.0, 0.0, -1.001), (0.02, 0.0, -1.001), (0.0, 0.02, -1.001)),
+        faces=((0, 1, 2),),
+        process=False,
+    )
+    grounded = scene.add_entity(
+        morph=gs.morphs.MeshSet(
+            files=(mesh,),
+        ),
+        material=gs.materials.VBD.Cloth(
+            E=1e-8,
+            rho=800.0,
+            friction_mu=0.0,
+            shear_stiffness=0.0,
+            contact_thickness=0.0004,
+            bending_model=None,
+        ),
     )
     solids, shells, accelerated, recovering = [], [], [], []
     for index, (modulus, poisson) in enumerate(((1e5, 0.25), (1e6, 0.25), (1e5, 0.45))):
@@ -572,7 +682,9 @@ def test_material_response(n_envs, is_line_search_enabled, convergence_tolerance
         entity.set_vertex_constraints([0, 1, 2])
         entity.set_vertex_forces([0, 0, -0.1], [3])
         solids.append(entity)
-    for index, (shear, thickness) in enumerate(((8.0, 0.00025), (8000.0, 0.00025), (8.0, 0.0005))):
+    for index, (shear, thickness, damping) in enumerate(
+        ((8.0, 0.00025, 0.0), (8000.0, 0.00025, 0.0), (8.0, 0.0005, 0.0), (0.0, 0.00025, 0.0), (8.0, 0.00025, 0.02))
+    ):
         mesh = trimesh.Trimesh(
             vertices=((0.0, 0.0, 0.0), (0.02, 0.0, 0.0), (0.0, 0.02, 0.0)),
             faces=((0, 1, 2),),
@@ -586,11 +698,39 @@ def test_material_response(n_envs, is_line_search_enabled, convergence_tolerance
             material=gs.materials.VBD.Cloth(
                 shear_stiffness=shear,
                 thickness=thickness,
+                membrane_damping=damping,
             ),
         )
         entity.set_vertex_constraints([0, 1])
         entity.set_vertex_forces([0.001, 0, 0], [2])
         shells.append(entity)
+    bending_cases = []
+    for index, (bending_model, damping) in enumerate(
+        (("DiscreteShellBending", 0.0), ("QuadraticBending", 0.0), ("QuadraticBending", 0.0025))
+    ):
+        length = 0.001
+        mesh = trimesh.Trimesh(
+            vertices=((0, 0, 0), (length, 0, 0), (0, length, 0), (length, -length / np.sqrt(2), length / np.sqrt(2))),
+            faces=((0, 1, 2), (1, 0, 3)),
+            process=False,
+        )
+        entity = scene.add_entity(
+            morph=gs.morphs.MeshSet(
+                pos=(index * 0.2, 0.6, 0.0),
+                files=(mesh,),
+            ),
+            material=gs.materials.VBD.Cloth(
+                E=1e-8,
+                rho=800.0,
+                shear_stiffness=0.0,
+                contact_thickness=0.0,
+                bending_damping=damping,
+                bending_model=bending_model,
+                bending_rigidity=1e-9,
+            ),
+        )
+        entity.set_vertex_constraints([0, 1, 2])
+        bending_cases.append(entity)
     for index, density in enumerate((360.0, 720.0)):
         entity = scene.add_entity(
             morph=gs.morphs.TetrahedralMesh(
@@ -637,6 +777,18 @@ def test_material_response(n_envs, is_line_search_enabled, convergence_tolerance
         state.pos[:, entity.v_start + 3, 2] = 0.5 * entity.init_positions[3, 2]
     scene.vbd_solver.set_state(f=0, state=state)
     scene.step()
+    height, velocity = grounded.init_positions[0, 2], 0.0
+    substep_dt = scene.dt / scene.sim.substeps
+    mass = grounded.material.rho * grounded.material.thickness * 0.02**2 / 6
+    inertia = mass / substep_dt**2
+    stiffness = scene.vbd_options.shell_ground_stiffness
+    for _ in range(scene.sim.substeps):
+        target = height + substep_dt * velocity
+        updated = (inertia * target - stiffness) / (inertia + stiffness) if target < -1.0 else target
+        velocity = (updated - height) / substep_dt
+        height = updated
+    assert_allclose(grounded.get_state().pos[..., 2], height, atol=2e-7)
+    assert_allclose(grounded.get_state().vel[..., 2], velocity, atol=2e-4)
     compression = [entity.init_positions[3, 2] - entity.get_state().pos[:, 3, 2] for entity in solids]
     assert (compression[0] > 0).all()
     assert (compression[1] < compression[0] / 5).all()
@@ -645,6 +797,30 @@ def test_material_response(n_envs, is_line_search_enabled, convergence_tolerance
     assert (shear_displacement[0] > 0).all()
     assert (shear_displacement[1] < shear_displacement[0] / 20).all()
     assert (shear_displacement[2] < shear_displacement[0] * 0.8).all()
+    assert (shear_displacement[3] > shear_displacement[0]).all()
+    assert (shear_displacement[4] < shear_displacement[0] / 2).all()
+    for entity in bending_cases:
+        material = entity.material
+        position = entity.init_positions[3].copy()
+        velocity = np.zeros(3)
+        if material.bending_model == "QuadraticBending":
+            # A single free corner has an isotropic quadratic spring toward the planar cotangent equilibrium.
+            length = entity.init_positions[2, 1] - entity.init_positions[0, 1]
+            stiffness = 3 * material.bending_rigidity / (2 * length**2)
+            mass = material.rho * material.thickness * length**2 / 6
+            equilibrium = entity.init_positions[0] + entity.init_positions[1] - entity.init_positions[2]
+            substep_dt = scene.dt / scene.sim.substeps
+            inertia = mass / substep_dt**2
+            damping = stiffness * material.bending_damping / substep_dt
+            for _ in range(scene.sim.substeps):
+                target = position + substep_dt * velocity
+                updated = (inertia * target + stiffness * equilibrium + damping * position) / (
+                    inertia + stiffness + damping
+                )
+                velocity = (updated - position) / substep_dt
+                position = updated
+        assert_allclose(entity.get_state().pos[:, 3], np.broadcast_to(position, (max(1, n_envs), 3)), atol=2e-7)
+        assert_allclose(entity.get_state().vel[:, 3], np.broadcast_to(velocity, (max(1, n_envs), 3)), atol=8e-5)
     for entity in accelerated:
         vertex_mass = entity.material.rho * 0.1**3 / 24
         expected = 0.01 / vertex_mass * scene.dt

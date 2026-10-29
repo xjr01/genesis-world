@@ -1,0 +1,32 @@
+[
+  {
+    "name": "__init__.py",
+    "original_sha256": "6148f9415220c5ab6244a085ae5c0dec35cc05837f728efd081b4cfb8b0d316d",
+    "optimized_sha256": "6148f9415220c5ab6244a085ae5c0dec35cc05837f728efd081b4cfb8b0d316d"
+  },
+  {
+    "name": "collision.py",
+    "original_sha256": "cb9dc4c8882f462806b69b933e81cdebdb6cddac00e16585d624bc372fcbe996",
+    "optimized_sha256": "5cca88835eac5dfba0d979d144b1db423f7b8001ca8d92ad68a48aa0a3efa413"
+  },
+  {
+    "name": "contact.py",
+    "original_sha256": "ce531d17dcbe69322ca45ba43c9c37303443143075201d391903449834b9bc10",
+    "optimized_sha256": "190c2d5ce8701e9ce13b2b13e431272f480b007a7a362ec5fa8706ce285d77fb"
+  },
+  {
+    "name": "data.py",
+    "original_sha256": "1124cac0d02c6ac27fc7e5af692fbd59cf7da13e057117fbbb1ab61d80f56e2b",
+    "optimized_sha256": "1dcbde586bcac5086afb0222b3f626ae6d3996912e1c5ce53ea7f870b18d0e7b"
+  },
+  {
+    "name": "physics.py",
+    "original_sha256": "a3d0b00bd12354be7cb12c895e1ad2f6ada68a311faa22d4044ff345c7f11747",
+    "optimized_sha256": "41b2419ba747890ede225c4ae43bd70182288a943ecbea6267b0f4bffb95ef11"
+  },
+  {
+    "name": "solver.py",
+    "original_sha256": "0d4a0129cab67aaf4dc50180c843439620b28d7051d3d240af282c279be489cb",
+    "optimized_sha256": "bad56c71c3098374615fbe3980240153a09f2ad0ecc4a2ceb8426c1738b8ad36"
+  }
+]

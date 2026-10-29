@@ -1,0 +1,52 @@
+{
+  "initial_simulated_seconds": 6.0,
+  "continuation_seconds": 0.5,
+  "cuff_rest_selection": "left: x < -0.61 m; right: x > 0.61 m",
+  "left_cuff_vertices": 159,
+  "right_cuff_vertices": 157,
+  "rest_layer_median_separation_mm": 2.0056917367801432,
+  "runs": [
+    {
+      "setting": "baseline",
+      "left_descent_mm": 1.0075569152832031,
+      "right_descent_mm": 1.0455846786499023,
+      "fixed_vertices": 12,
+      "fixed_cuff_vertices": 0
+    },
+    {
+      "setting": "no_damping",
+      "left_descent_mm": 1.0110139846801758,
+      "right_descent_mm": 1.0456442832946777,
+      "fixed_vertices": 12,
+      "fixed_cuff_vertices": 0
+    },
+    {
+      "setting": "iterations100",
+      "left_descent_mm": 6.403326988220215,
+      "right_descent_mm": 5.971133708953857,
+      "fixed_vertices": 12,
+      "fixed_cuff_vertices": 0
+    },
+    {
+      "setting": "no_friction",
+      "left_descent_mm": 78.73114943504333,
+      "right_descent_mm": 66.24317169189453,
+      "fixed_vertices": 12,
+      "fixed_cuff_vertices": 0
+    },
+    {
+      "setting": "small_gap",
+      "left_descent_mm": 158.45519304275513,
+      "right_descent_mm": 162.13905811309814,
+      "fixed_vertices": 12,
+      "fixed_cuff_vertices": 0
+    },
+    {
+      "setting": "pinned_inertia",
+      "left_descent_mm": 175.43229460716248,
+      "right_descent_mm": 188.9408528804779,
+      "fixed_vertices": 12,
+      "fixed_cuff_vertices": 0
+    }
+  ]
+}

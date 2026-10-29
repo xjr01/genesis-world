@@ -1,0 +1,39 @@
+{
+  "gaia_revision": "c229692045465a76233f9fba9197fb22bbfb3694",
+  "preset": "S03_MultiLayerClothOnCollider",
+  "observations": [
+    {
+      "label": "previous VBD shirt",
+      "seconds": 3.0,
+      "rms_speed": 0.2070377618074417,
+      "max_speed": 0.7904318571090698,
+      "pin_error": null
+    },
+    {
+      "label": "aligned VBD shirt",
+      "seconds": 2.9999999999999942,
+      "rms_speed": 0.022235440090298653,
+      "max_speed": 0.7711043357849121,
+      "pin_error": 3.151071714668774e-08
+    },
+    {
+      "label": "aligned VBD shirt",
+      "seconds": 5.999999999999984,
+      "rms_speed": 0.006928601767867804,
+      "max_speed": 0.10976982116699219,
+      "pin_error": 3.151071714668774e-08
+    },
+    {
+      "label": "aligned physics with previous time-step and iteration budget",
+      "seconds": 2.9999999999999583,
+      "rms_speed": 0.01686222478747368,
+      "max_speed": 0.1565990149974823,
+      "pin_error": 3.151071714668774e-08
+    }
+  ],
+  "baseline_substep_dt": 0.0025,
+  "aligned_substep_dt": 0.0008333333333333334,
+  "baseline_iterations_per_substep": 20,
+  "aligned_iterations_per_substep": 15,
+  "aligned_last_second_mean_rms_speed": 0.01009085363863657
+}

@@ -29,7 +29,7 @@ def self_response(
     while i_a < offsets[slot + 1]:
         entry = qd.cast(entries[i_a], gs.qd_int)
         index, local_idx = entry // 4, entry % 4
-        weights, normal, gap, displacement, is_active = contact_geometry(
+        weights, normal, gap, displacement, tangent_projection, is_active = contact_geometry(
             index, i_b, local_idx, trial, pairs, kinds, vertices
         )
         friction = 0.5 * (vertices.friction[pairs[index, 0]] + vertices.friction[pairs[index, 2]])
@@ -46,6 +46,7 @@ def self_response(
                 friction,
                 options.contact_d_hat,
                 options.friction_epsilon * dt,
+                tangent_projection,
                 is_shell,
             )
             weight = weights[local_idx]
@@ -94,10 +95,12 @@ def vertex_response(
         energy = qd.simt.subgroup.shuffle(qd.simt.subgroup.reduce_add_tiled(energy, log2_size), i_l)
         for i_d in qd.static(range(3)):
             gradient[i_d] = qd.simt.subgroup.shuffle(qd.simt.subgroup.reduce_add_tiled(gradient[i_d], log2_size), i_l)
-        for i_d, j_d in qd.static(qd.ndrange(3, 3)):
-            hessian[i_d, j_d] = qd.simt.subgroup.shuffle(
-                qd.simt.subgroup.reduce_add_tiled(hessian[i_d, j_d], log2_size), i_l
-            )
+        for i_d in qd.static(range(3)):
+            for j_d in qd.static(range(i_d, 3)):
+                hessian[i_d, j_d] = qd.simt.subgroup.shuffle(
+                    qd.simt.subgroup.reduce_add_tiled(hessian[i_d, j_d], log2_size), i_l
+                )
+                hessian[j_d, i_d] = hessian[i_d, j_d]
     return energy, gradient, hessian
 
 
@@ -159,15 +162,15 @@ def solve_color(
             if vertices.is_fixed[i_v, i_b]:
                 direction = vertices.fixed_pos[i_v, i_b] - pos
             else:
-                matrix = hessian / hessian.trace()
+                normalization = qd.max(qd.abs(hessian).max(), 1e-30)
+                matrix = hessian / normalization
                 terms = matrix[:, 0] * matrix[:, 1].cross(matrix[:, 2])
                 determinant = terms.sum()
                 # A relative determinant check rejects cancellation before inverting the local block.
-                if determinant > 1e-5 * qd.abs(terms).sum():
-                    direction = -matrix.inverse() @ (gradient / hessian.trace())
+                if qd.abs(determinant) > 1e-5 * qd.abs(terms).sum():
+                    direction = -matrix.inverse() @ (gradient / normalization)
                     if qd.static(options.has_shell) and not vertices.is_volume[i_v]:
-                        # Contact connects equal-colored vertices, so relax simultaneous shell corrections.
-                        direction *= 0.5
+                        direction *= options.shell_step_size
                     is_searching = True
                 if (
                     qd.math.isnan(determinant)

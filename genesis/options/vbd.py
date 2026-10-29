@@ -1,6 +1,8 @@
-from pydantic import StrictBool
+from typing import Annotated, Literal
 
-from genesis.typing import NonNegativeFloat, PositiveFloat, PositiveInt, Vec3FType
+from pydantic import Field, StrictBool
+
+from genesis.typing import NonNegativeFloat, PositiveFloat, PositiveInt, ValidFloat, Vec3FType
 
 from .options import Options
 
@@ -13,7 +15,7 @@ class VBDOptions(Options):
     values save work at the cost of residual force imbalance. The default zero runs every iteration and skips the
     convergence reduction; positive values can save iterations during simple motion at the cost of convergence checks.
     contact_d_hat is the contact activation gap outside the physical surface in metres. Shell contact accounts for
-    material thickness before applying this gap.
+    contact_thickness before applying this gap.
     Larger gaps improve clearance under load at the cost of a wider visible separation and more contact work.
     Zero activates solid and plane contact at the physical surface. Finite penalties allow load-dependent penetration;
     is_contact_diagnostics_enabled checks for geometric penetration and reports it while simulation continues.
@@ -30,6 +32,15 @@ class VBDOptions(Options):
     reduce penetration and contact-gap compression but require more iterations. is_line_search_enabled enables local
     energy backtracking for difficult deformations at the cost of extra energy evaluations. False accepts each limited step
     for faster iteration. line_search_iterations limits the backtracking attempts when enabled.
+    shell_initialization="previous" starts each substep at its previous positions, reducing prediction impulses at
+    the cost of more iterations for free motion; "inertia" starts from a limited inertial prediction.
+    shell_step_size scales each shell correction; smaller values stabilize simultaneous contacts but converge slower.
+    contact_relaxation bounds shell motion as a fraction of clearance; smaller values increase search frequency.
+    shell_ground_stiffness and shell_ground_friction_epsilon override the corresponding shell
+    contact settings for planes. shell_ground_friction overrides material friction. None shares the existing setting.
+    These controls let a floor use a softer penalty or different sliding response than cloth self-contact.
+    shell_ground_d_hat sets the plane activation distance from the simulated vertices. None uses contact_d_hat outside
+    the shell contact surface. Zero permits a ground penalty with no clearance; larger values separate cloth from planes.
     """
 
     dt: PositiveFloat | None = None
@@ -42,6 +53,13 @@ class VBDOptions(Options):
     contact_stiffness: PositiveFloat = 100000.0
     shell_contact_stiffness: PositiveFloat = 10000.0
     contact_search_radius: PositiveFloat = 0.002
+    contact_relaxation: Annotated[ValidFloat, Field(gt=0.0, lt=0.5)] = 0.45
+    shell_initialization: Literal["inertia", "previous"] = "inertia"
+    shell_step_size: Annotated[ValidFloat, Field(gt=0.0, le=1.0)] = 0.5
+    shell_ground_stiffness: PositiveFloat | None = None
+    shell_ground_d_hat: NonNegativeFloat | None = None
+    shell_ground_friction: NonNegativeFloat | None = None
+    shell_ground_friction_epsilon: PositiveFloat | None = None
     is_contact_diagnostics_enabled: StrictBool = False
     is_line_search_enabled: StrictBool = False
     line_search_iterations: PositiveInt = 12

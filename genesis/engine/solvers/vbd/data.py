@@ -19,6 +19,13 @@ class VBDConfig(metaclass=AutoInitMeta):
     is_line_search_enabled: bool
     line_search_iterations: int
     n_vertex_threads: int
+    contact_relaxation: float
+    is_shell_previous: bool
+    shell_step_size: float
+    shell_ground_stiffness: float
+    shell_ground_d_hat: float
+    shell_ground_friction: float
+    shell_ground_friction_epsilon: float
     has_shell: bool = False
     max_contact_thickness: float = 0.0
 
@@ -103,6 +110,7 @@ class ElementData(metaclass=AutoInitMeta):
     measure: qd.Tensor
     mu: qd.Tensor
     lam: qd.Tensor
+    damping: qd.Tensor
     is_volume: qd.Tensor
     is_log_neohookean: qd.Tensor | None
     is_plastic: qd.Tensor
@@ -118,6 +126,9 @@ class ElementData(metaclass=AutoInitMeta):
 class HingeData(metaclass=AutoInitMeta):
     indices: qd.Tensor | None
     stiffness: qd.Tensor | None
+    cotangent: qd.Tensor | None
+    is_quadratic: qd.Tensor | None
+    damping: qd.Tensor | None
     rest: qd.Tensor | None
     strain: qd.Tensor | None
     is_plastic: qd.Tensor | None
@@ -141,6 +152,11 @@ class CollisionData(metaclass=AutoInitMeta):
     vertex_faces: qd.Tensor
     neighbor_offsets: qd.Tensor
     neighbors: qd.Tensor
+    neighbor_edges: qd.Tensor | None
+    # Components hold minimum clearance bounds over every pair and over cross-entity pairs, respectively.
+    vertices_bound: qd.Tensor | None
+    faces_bound: qd.Tensor | None
+    edges_bound: qd.Tensor | None
     face_tets: qd.Tensor
     tet_indices: qd.Tensor | None
     # Reference volume scales the containment determinant threshold with each tetrahedron's size.
@@ -150,7 +166,9 @@ class CollisionData(metaclass=AutoInitMeta):
     contact_faces: qd.Tensor
     translation: qd.Tensor | None
     translation_bound: qd.Tensor | None
-    has_contact: qd.Tensor | None
+    plane_clearance: qd.Tensor | None
+    # Bits mark candidate pairs within an entity (1) and between entities (2).
+    contact_flags: qd.Tensor | None
     entity_mass: qd.Tensor | None
     n_faces: int
     n_edges: int

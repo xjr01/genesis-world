@@ -33,7 +33,7 @@ def hinge_angle_gradient(local_idx, p0, p1, p2, p3):
 
 
 @qd.func
-def element_response(i_e, i_local, i_b, trial, vertices: V_ANNOTATION, elements: V_ANNOTATION):
+def element_response(i_e, i_local, i_b, trial, dt, vertices: V_ANNOTATION, elements: V_ANNOTATION):
     F = qd.Matrix.zero(gs.qd_float, 3, 3)
     gradient = elements.gradient[i_e]
     if qd.static(elements.has_plastic) and elements.is_plastic[i_e]:
@@ -84,15 +84,21 @@ def element_response(i_e, i_local, i_b, trial, vertices: V_ANNOTATION, elements:
             # The determinant is affine in one vertex, so its second derivative vanishes in this block.
             hessian = mu * g.norm_sqr() * identity + volume_stiffness * a.outer_product(a)
     else:
-        G = 0.5 * (F.transpose() @ F - identity)
-        G[2, 2] = 0.0
+        F_shell = F[:, :2]
+        g_shell = g[:2]
+        G = 0.5 * (F_shell.transpose() @ F_shell - qd.Matrix.identity(gs.qd_float, 2))
         trace = G.trace()
-        S = 2.0 * mu * G + lam * trace * identity
-        u = F @ g
+        S = 2.0 * mu * G + lam * trace * qd.Matrix.identity(gs.qd_float, 2)
+        u = F_shell @ g_shell
         energy = mu * G.norm_sqr() + 0.5 * lam * trace**2
-        force = F @ S @ g
-        hessian = (lam + mu) * u.outer_product(u) + mu * g.norm_sqr() * F @ F.transpose()
-        hessian += qd.max(g.dot(S @ g), 0.0) * identity
+        force = F_shell @ S @ g_shell
+        hessian = (lam + mu) * u.outer_product(u) + mu * g_shell.norm_sqr() * (F_shell @ F_shell.transpose())
+        hessian += g_shell.dot(S @ g_shell) * identity
+        displacement = trial - vertices.prev[elements.indices[i_e][i_local], i_b]
+        damping_hessian = (elements.damping[i_e] / dt) * hessian
+        force += damping_hessian @ displacement
+        hessian += damping_hessian
+        energy += 0.5 * displacement.dot(damping_hessian @ displacement)
     measure = elements.measure[i_e]
     return measure * energy, measure * force, measure * hessian
 
@@ -104,21 +110,22 @@ def contact_potential(gap, stiffness, distance, is_shell):
         penetration = distance - gap
         energy = 0.5 * stiffness * penetration**2
         slope, curvature = -stiffness * penetration, stiffness
-        if is_shell and 1e-5 < gap < 0.5 * distance:
+        if is_shell and 1e-7 < gap < 0.5 * distance:
             tau = 0.5 * distance
             coefficient = 0.5 * tau**2 * stiffness
-            energy = coefficient * (qd.log(tau / gap) + 1.0 / distance)
+            # The additive energy offset uses a centimetre reference length, expressed here in metres.
+            energy = coefficient * (qd.log(tau / gap) + 0.01 / distance)
             slope, curvature = -coefficient / gap, coefficient / gap**2
     return energy, slope, curvature
 
 
 @qd.func
-def contact_response(displacement, normal, gap, stiffness, friction, distance, epsilon, is_shell):
+def contact_response(displacement, normal, gap, stiffness, friction, distance, epsilon, tangent_projection, is_shell):
     energy, slope, curvature = contact_potential(gap, stiffness, distance, is_shell)
     gradient = slope * normal
     hessian = curvature * normal.outer_product(normal)
     if slope < 0.0 and friction > 0.0:
-        tangent = displacement - normal * displacement.dot(normal)
+        tangent = tangent_projection @ displacement
         length = tangent.norm()
         if length > 0.0:
             factor = 1.0 / length
@@ -130,7 +137,7 @@ def contact_response(displacement, normal, gap, stiffness, friction, distance, e
             energy += load * potential
             gradient += load * factor * tangent
             # Lagging the tangent direction gives a positive semi-definite (PSD) friction approximation.
-            hessian += load * factor * (qd.Matrix.identity(gs.qd_float, 3) - normal.outer_product(normal))
+            hessian += load * factor * tangent_projection
     return energy, gradient, hessian
 
 
@@ -147,9 +154,11 @@ def predict(dt: float, gravity: qd.Tensor, vertices: V_ANNOTATION, errno: qd.Ten
 
 
 @qd.kernel
-def prepare_prediction(vertices: V_ANNOTATION):
+def prepare_prediction(vertices: V_ANNOTATION, options: V_ANNOTATION):
     for i_v, i_b in vertices.pos:
         vertices.next_pos[i_v, i_b] = vertices.target[i_v, i_b]
+        if qd.static(options.is_shell_previous) and not vertices.is_volume[i_v] and not vertices.is_fixed[i_v, i_b]:
+            vertices.next_pos[i_v, i_b] = vertices.prev[i_v, i_b]
 
 
 @qd.func
@@ -206,7 +215,12 @@ def limit_initialization(scale: qd.Tensor, vertices: V_ANNOTATION, elements: V_A
 
 @qd.kernel
 def apply_prediction(
-    is_shell: bool, scale: qd.Tensor, vertices: V_ANNOTATION, collision: V_ANNOTATION, errno: qd.Tensor
+    is_shell: bool,
+    scale: qd.Tensor,
+    vertices: V_ANNOTATION,
+    collision: V_ANNOTATION,
+    planes: V_ANNOTATION,
+    errno: qd.Tensor,
 ):
     for i_v, i_b in vertices.pos:
         if (errno[None] & ErrorCode.INVALID_VBD_STATE) == 0 and vertices.is_volume[i_v] != is_shell:
@@ -216,7 +230,10 @@ def apply_prediction(
                 if is_shell:
                     translation = qd.Vector.zero(gs.qd_float, 3)
                     i_entity = vertices.entity_idx[i_v]
-                    if collision.translation[i_entity, i_b][3] == 0.0 and not collision.has_contact[i_entity, i_b]:
+                    if (
+                        collision.translation[i_entity, i_b][3] == 0.0
+                        and collision.contact_flags[i_entity, i_b] & 2 == 0
+                    ):
                         translation = collision.translation[i_entity, i_b][:3] * fraction
                         translation *= qd.min(
                             1.0, collision.translation_bound[i_entity, i_b] / qd.max(translation.norm(), 1e-30)
@@ -228,12 +245,19 @@ def apply_prediction(
                         qd.max(0.0, collision.translation_bound[i_entity, i_b] - translation.norm()),
                     )
                     if not vertices.is_fixed[i_v, i_b]:
-                        if collision.has_contact[i_entity, i_b]:
-                            displacement = qd.Vector.zero(gs.qd_float, 3)
+                        if collision.contact_flags[i_entity, i_b] & 2 != 0:
+                            # External contact retains the previous iterate to avoid unbalanced prediction impulses.
+                            displacement = translation
                         else:
                             displacement -= translation
                             displacement *= qd.min(1.0, vertices.bound[i_v, i_b] / qd.max(displacement.norm(), 1e-30))
                             displacement += translation
+                        if qd.static(planes.n_planes > 0):
+                            # See initialize_shell_bounds for the plane-normal prediction limit.
+                            for i_p in range(planes.n_planes):
+                                normal = planes.normal[i_p]
+                                gap = vertices.pos[i_v, i_b].dot(normal) - planes.offset[i_p] - vertices.radius[i_v]
+                                displacement -= qd.min(0.0, displacement.dot(normal) + qd.max(0.0, gap)) * normal
             vertices.pos[i_v, i_b] += displacement
 
 
@@ -262,7 +286,7 @@ def local_response(
     i_a = vertices.elem_offsets[i_v] + i_t
     while i_a < vertices.elem_offsets[i_v + 1]:
         entry = vertices.elem_entries[i_a]
-        value, force, matrix = element_response(entry // 4, entry % 4, i_b, trial, vertices, elements)
+        value, force, matrix = element_response(entry // 4, entry % 4, i_b, trial, dt, vertices, elements)
         energy += value
         gradient += force
         hessian += matrix
@@ -277,12 +301,33 @@ def local_response(
                 positions[corner, :] = vertices.pos[hinges.indices[i_h][corner], i_b]
                 if corner == i_local:
                     positions[corner, :] = trial
-            angle, q = hinge_angle_gradient(i_local, positions[0, :], positions[1, :], positions[2, :], positions[3, :])
-            residual = wrapped_angle(angle - hinges.rest[i_h, i_b])
             stiffness = hinges.stiffness[i_h]
-            energy += 0.5 * stiffness * residual**2
-            gradient += stiffness * residual * q
-            hessian += stiffness * q.outer_product(q)
+            force = qd.Vector.zero(gs.qd_float, 3)
+            matrix = qd.Matrix.zero(gs.qd_float, 3, 3)
+            if hinges.is_quadratic[i_h]:
+                n0 = (positions[1, :] - positions[0, :]).cross(positions[2, :] - positions[0, :])
+                n1 = (positions[2, :] - positions[3, :]).cross(positions[1, :] - positions[3, :])
+                if qd.min(n0.norm_sqr(), n1.norm_sqr()) >= 1e-20:
+                    weights = hinges.cotangent[i_h]
+                    curvature = qd.Vector.zero(gs.qd_float, 3)
+                    for corner in qd.static(range(1, 4)):
+                        curvature += weights[corner] * (positions[corner, :] - positions[0, :])
+                    energy += 0.5 * stiffness * curvature.norm_sqr()
+                    force = stiffness * weights[i_local] * curvature
+                    matrix = stiffness * weights[i_local] ** 2 * qd.Matrix.identity(gs.qd_float, 3)
+            else:
+                angle, q = hinge_angle_gradient(
+                    i_local, positions[0, :], positions[1, :], positions[2, :], positions[3, :]
+                )
+                residual = wrapped_angle(angle - hinges.rest[i_h, i_b])
+                energy += 0.5 * stiffness * residual**2
+                force = stiffness * residual * q
+                matrix = stiffness * q.outer_product(q)
+            displacement = trial - vertices.prev[i_v, i_b]
+            damping_matrix = (hinges.damping[i_h] / dt) * matrix
+            energy += 0.5 * displacement.dot(damping_matrix @ displacement)
+            gradient += force + damping_matrix @ displacement
+            hessian += matrix + damping_matrix
             i_a += options.n_vertex_threads
     if qd.static(planes.n_planes > 0):
         i_p = i_t
@@ -290,16 +335,26 @@ def local_response(
             normal = planes.normal[i_p]
             gap = trial.dot(normal) - planes.offset[i_p] - vertices.radius[i_v]
             stiffness = options.contact_stiffness
+            distance = options.contact_d_hat
+            friction = vertices.friction[i_v]
+            epsilon = options.friction_epsilon * dt
             if qd.static(elements.has_shell) and not vertices.is_volume[i_v]:
-                stiffness = options.shell_contact_stiffness
+                stiffness = options.shell_ground_stiffness
+                if qd.static(options.shell_ground_d_hat >= 0.0):
+                    gap += vertices.radius[i_v]
+                    distance = options.shell_ground_d_hat
+                epsilon = options.shell_ground_friction_epsilon * dt
+                if qd.static(options.shell_ground_friction >= 0.0):
+                    friction = options.shell_ground_friction
             value, force, matrix = contact_response(
                 trial - vertices.prev[i_v, i_b],
                 normal,
                 gap,
                 stiffness,
-                vertices.friction[i_v],
-                distance=options.contact_d_hat,
-                epsilon=options.friction_epsilon * dt,
+                friction,
+                distance,
+                epsilon,
+                tangent_projection=qd.Matrix.identity(gs.qd_float, 3) - normal.outer_product(normal),
                 is_shell=False,
             )
             energy += value
@@ -334,11 +389,13 @@ def finish(
         if qd.static(options.is_contact_diagnostics_enabled and planes.n_planes > 0):
             for i_p in range(planes.n_planes):
                 gap = vertices.pos[i_v, i_b].dot(planes.normal[i_p]) - planes.offset[i_p] - vertices.radius[i_v]
+                if qd.static(options.shell_ground_d_hat >= 0.0) and not vertices.is_volume[i_v]:
+                    gap += vertices.radius[i_v]
                 if gap < 0.0:
                     qd.atomic_or(errno[None], ErrorCode.VBD_CONTACT_PENETRATION)
     if qd.static(options.is_contact_diagnostics_enabled):
         for i_c in range(pairs.shape[0]):
-            _weights, _normal, gap, _displacement, is_active = contact_geometry(
+            _weights, _normal, gap, _displacement, _tangent_projection, is_active = contact_geometry(
                 i_c, batches[i_c], -1, qd.Vector.zero(gs.qd_float, 3), pairs, kinds, vertices
             )
             if is_active and gap < 0.0:

@@ -14,7 +14,13 @@ from genesis.engine.states.vbd import VBDState
 from genesis.utils.array_class import ErrorCode, V, V_ANNOTATION
 from genesis.utils.misc import qd_to_numpy, qd_to_torch, tensor_to_array
 
-from .collision import find_shell_contacts, find_volume_contacts, initialize_shell_bounds, update_bounds
+from .collision import (
+    find_shell_contacts,
+    find_volume_contacts,
+    gather_shell_bounds,
+    initialize_shell_bounds,
+    update_bounds,
+)
 from .contact import solve_colors
 from .data import (
     CollisionData,
@@ -98,6 +104,21 @@ class VBDSolver(Solver):
             options.is_line_search_enabled,
             options.line_search_iterations,
             n_vertex_threads=8 if gs.backend == gs.cuda else 1,
+            contact_relaxation=options.contact_relaxation,
+            is_shell_previous=options.shell_initialization == "previous",
+            shell_step_size=options.shell_step_size,
+            shell_ground_stiffness=(
+                options.shell_contact_stiffness
+                if options.shell_ground_stiffness is None
+                else options.shell_ground_stiffness
+            ),
+            shell_ground_d_hat=-1.0 if options.shell_ground_d_hat is None else options.shell_ground_d_hat,
+            shell_ground_friction=-1.0 if options.shell_ground_friction is None else options.shell_ground_friction,
+            shell_ground_friction_epsilon=(
+                options.friction_epsilon
+                if options.shell_ground_friction_epsilon is None
+                else options.shell_ground_friction_epsilon
+            ),
         )
         self.vertices = None
         self.elements = None
@@ -136,6 +157,7 @@ class VBDSolver(Solver):
         gradients = np.zeros((n_elements, 4, 3), dtype=gs.np_float)
         measure = np.empty(n_elements, dtype=gs.np_float)
         mu, lam = np.empty_like(measure), np.empty_like(measure)
+        damping = np.zeros_like(measure)
         is_volume = np.empty(n_elements, dtype=gs.np_bool)
         is_log_neohookean = np.zeros(n_elements, dtype=gs.np_bool)
         is_vertex_volume = np.empty(n_vertices, dtype=gs.np_bool)
@@ -145,6 +167,7 @@ class VBDSolver(Solver):
         radius, friction = np.zeros_like(mass), np.zeros_like(mass)
         entity_indices = np.empty(n_vertices, dtype=gs.np_int)
         hinge_indices, hinge_stiffness, hinge_yield, hinge_hardening, hinge_plastic = [], [], [], [], []
+        hinge_cotangent, hinge_quadratic, hinge_damping = [], [], []
         for i_entity, entity in enumerate(self.entities):
             material = entity.material
             vs = slice(entity.v_start, entity.v_start + entity.n_vertices)
@@ -177,7 +200,12 @@ class VBDSolver(Solver):
                     material.E * material.thickness * material.nu / (1 - material.nu**2) - material.shear_stiffness
                 )
                 density = material.rho * material.thickness
-                radius[vs] = material.thickness / 2
+                damping[es] = material.membrane_damping
+                radius[vs] = (
+                    material.thickness if material.contact_thickness is None else material.contact_thickness
+                ) / 2
+                if material.bending_model == "QuadraticBending" and material.is_bending_plasticity_enabled:
+                    gs.raise_exception("Bending plasticity requires DiscreteShellBending.")
                 if material.bending_model is not None and material.bending_rigidity > 0:
                     oriented = np.concatenate(
                         (connectivity[:, [0, 1, 2]], connectivity[:, [1, 2, 0]], connectivity[:, [2, 0, 1]])
@@ -196,7 +224,23 @@ class VBDSolver(Solver):
                     hinge_indices.append(hinges)
                     area_sum = measure[es][first % entity.n_elements] + measure[es][second % entity.n_elements]
                     edge_sq = np.sum((positions[hinges[:, 1]] - positions[hinges[:, 0]]) ** 2, axis=-1)
-                    hinge_stiffness.append(3 * material.bending_rigidity * edge_sq / area_sum)
+                    if material.bending_model == "QuadraticBending":
+                        hinge_stiffness.append(3 * material.bending_rigidity / (2 * area_sum))
+                    else:
+                        hinge_stiffness.append(3 * material.bending_rigidity * edge_sq / area_sum)
+                    hinge_pos = positions[hinges]
+                    edge = hinge_pos[:, 1] - hinge_pos[:, 0]
+                    opposite0 = hinge_pos[:, 2] - hinge_pos[:, 0]
+                    opposite1 = hinge_pos[:, 3] - hinge_pos[:, 0]
+                    area0 = np.linalg.norm(np.cross(edge, opposite0), axis=-1)
+                    area1 = np.linalg.norm(np.cross(edge, opposite1), axis=-1)
+                    cot0 = np.sum(opposite0 * edge, axis=-1) / area0
+                    cot1 = np.sum(opposite1 * edge, axis=-1) / area1
+                    cot2 = np.sum((edge - opposite0) * edge, axis=-1) / area0
+                    cot3 = np.sum((edge - opposite1) * edge, axis=-1) / area1
+                    hinge_cotangent.append(np.column_stack((cot2 + cot3, cot0 + cot1, -cot0 - cot2, -cot1 - cot3)))
+                    hinge_quadratic.append(np.full(len(hinges), material.bending_model == "QuadraticBending"))
+                    hinge_damping.append(np.full(len(hinges), material.bending_damping))
                     hinge_yield.append(np.full(len(hinges), np.deg2rad(material.bending_yield_angle_deg)))
                     hinge_hardening.append(np.full(len(hinges), material.bending_plastic_hardening))
                     hinge_plastic.append(np.full(len(hinges), material.is_bending_plasticity_enabled))
@@ -281,6 +325,7 @@ class VBDSolver(Solver):
             array_to_field(measure, gs.qd_float),
             array_to_field(mu, gs.qd_float),
             array_to_field(lam, gs.qd_float),
+            array_to_field(damping, gs.qd_float),
             array_to_field(is_volume, gs.qd_bool),
             array_to_field(is_log_neohookean, gs.qd_bool) if is_log_neohookean.any() else None,
             array_to_field(is_plastic, gs.qd_bool),
@@ -295,6 +340,13 @@ class VBDSolver(Solver):
         self.hinges = HingeData(
             array_to_field(hinges, gs.qd_int, element_shape=(4,)),
             array_to_field(np.concatenate(hinge_stiffness) if hinge_stiffness else np.empty(0), gs.qd_float),
+            array_to_field(
+                np.concatenate(hinge_cotangent) if hinge_cotangent else np.empty((0, 4)),
+                gs.qd_float,
+                element_shape=(4,),
+            ),
+            array_to_field(np.concatenate(hinge_quadratic) if hinge_quadratic else np.empty(0), gs.qd_bool),
+            array_to_field(np.concatenate(hinge_damping) if hinge_damping else np.empty(0), gs.qd_float),
             array_to_field(np.repeat(angle[:, None], self._B, axis=1), gs.qd_float),
             array_to_field(np.zeros((len(hinges), self._B)), gs.qd_float),
             array_to_field(np.concatenate(hinge_plastic) if hinge_plastic else np.empty(0), gs.qd_bool),
@@ -382,6 +434,10 @@ class VBDSolver(Solver):
             array_to_field(vertex_faces, gs.qd_int),
             array_to_field(neighbor_offsets, gs.qd_int),
             array_to_field(surface_pairs[order, 1], gs.qd_int),
+            array_to_field(np.tile(np.arange(len(edges)), 2)[order], gs.qd_int) if self.config.has_shell else None,
+            V(gs.qd_vec2, (len(surface_indices), self._B)) if self.config.has_shell else None,
+            V(gs.qd_vec2, (len(faces), self._B)) if self.config.has_shell else None,
+            V(gs.qd_vec2, (len(edges), self._B)) if self.config.has_shell else None,
             array_to_field(face_tets, gs.qd_int),
             array_to_field(tets, gs.qd_int, element_shape=(4,)),
             array_to_field(6.0 * self.options.contact_min_volume_ratio * measure[is_volume], gs.qd_float),
@@ -390,6 +446,9 @@ class VBDSolver(Solver):
             V(gs.qd_int, (len(surface_indices), self._B)),
             V(gs.qd_vec4, (len(self.entities), self._B)) if self.config.has_shell else None,
             V(gs.qd_float, (len(self.entities), self._B)) if self.config.has_shell else None,
+            V(gs.qd_float, (len(self.entities), self.planes.n_planes, self._B))
+            if self.config.has_shell and self.planes.n_planes
+            else None,
             V(gs.qd_int, (len(self.entities), self._B)) if self.config.has_shell else None,
             array_to_field(np.bincount(entity_indices, weights=mass), gs.qd_float) if self.config.has_shell else None,
             len(faces),
@@ -445,7 +504,7 @@ class VBDSolver(Solver):
         if not self.is_active:
             return
         predict(self.substep_dt, self._gravity, self.vertices, self.errno)
-        prepare_prediction(self.vertices)
+        prepare_prediction(self.vertices, self.config)
         for _ in range(32):
             self.prediction_correction.fill(0)
             limit_prediction(self.prediction_scale, self.prediction_correction, self.vertices, self.elements)
@@ -453,41 +512,54 @@ class VBDSolver(Solver):
                 break
         self.initial_scale.fill(1.0)
         limit_initialization(self.initial_scale, self.vertices, self.elements)
-        update_bounds(is_previous=True, is_swept=False, vertices=self.vertices, collision=self.collision, bvh=self.bvh)
-        kernel_refit_bvh(self.bvh)
-        if self.sim.cur_substep_global % (16 * self.sim.substeps) == 0:
-            self.bvh.rebuild()
-        find_volume_contacts(
-            is_ccd=False,
-            vertices=self.vertices,
-            collision=self.collision,
-            bvh=self.bvh,
-            options=self.config,
-            errno=self.errno,
-        )
-        apply_prediction(
-            is_shell=False, scale=self.initial_scale, vertices=self.vertices, collision=self.collision, errno=self.errno
-        )
-        update_bounds(is_previous=False, is_swept=True, vertices=self.vertices, collision=self.collision, bvh=self.bvh)
-        kernel_refit_bvh(self.bvh)
-        find_volume_contacts(
-            is_ccd=True,
-            vertices=self.vertices,
-            collision=self.collision,
-            bvh=self.bvh,
-            options=self.config,
-            errno=self.errno,
-        )
-        contact_faces = qd_to_torch(self.collision.contact_faces, transpose=True)
-        active = (contact_faces >= 0).nonzero()
-        volume_batches = active[:, 0]
-        volume_pairs = torch.cat(
-            (
-                qd_to_torch(self.collision.surface_indices, transpose=True)[active[:, 1], None],
-                qd_to_torch(self.collision.faces, transpose=True)[contact_faces[active[:, 0], active[:, 1]]],
-            ),
-            dim=1,
-        )
+        if self.collision.n_tets:
+            update_bounds(
+                is_previous=True, is_swept=False, vertices=self.vertices, collision=self.collision, bvh=self.bvh
+            )
+            kernel_refit_bvh(self.bvh)
+            if self.sim.cur_substep_global % (16 * self.sim.substeps) == 0:
+                self.bvh.rebuild()
+            find_volume_contacts(
+                is_ccd=False,
+                vertices=self.vertices,
+                collision=self.collision,
+                bvh=self.bvh,
+                options=self.config,
+                errno=self.errno,
+            )
+            apply_prediction(
+                is_shell=False,
+                scale=self.initial_scale,
+                vertices=self.vertices,
+                collision=self.collision,
+                planes=self.planes,
+                errno=self.errno,
+            )
+            update_bounds(
+                is_previous=False, is_swept=True, vertices=self.vertices, collision=self.collision, bvh=self.bvh
+            )
+            kernel_refit_bvh(self.bvh)
+            find_volume_contacts(
+                is_ccd=True,
+                vertices=self.vertices,
+                collision=self.collision,
+                bvh=self.bvh,
+                options=self.config,
+                errno=self.errno,
+            )
+            contact_faces = qd_to_torch(self.collision.contact_faces, transpose=True)
+            active = (contact_faces >= 0).nonzero()
+            volume_batches = active[:, 0]
+            volume_pairs = torch.cat(
+                (
+                    qd_to_torch(self.collision.surface_indices, transpose=True)[active[:, 1], None],
+                    qd_to_torch(self.collision.faces, transpose=True)[contact_faces[active[:, 0], active[:, 1]]],
+                ),
+                dim=1,
+            )
+        else:
+            volume_pairs = torch.empty((0, 4), dtype=gs.tc_int, device=gs.device)
+            volume_batches = torch.empty(0, dtype=gs.tc_int, device=gs.device)
         is_rebuild_required = True
         has_iteration_control = self.config.has_shell or self.options.convergence_tolerance > 0.0
         iteration = 0
@@ -504,8 +576,15 @@ class VBDSolver(Solver):
                         collision=self.collision,
                         bvh=self.bvh,
                     )
-                    kernel_refit_bvh(self.bvh)
-                    initialize_shell_bounds(self.vertices, self.collision, self.config)
+                    if (
+                        not self.collision.n_tets
+                        and iteration == 0
+                        and self.sim.cur_substep_global % (16 * self.sim.substeps) == 0
+                    ):
+                        self.bvh.rebuild()
+                    else:
+                        kernel_refit_bvh(self.bvh)
+                    initialize_shell_bounds(self.vertices, self.collision, self.planes, self.config)
                     empty_pairs = torch.empty((0, 4), dtype=gs.tc_int, device=gs.device)
                     empty_indices = torch.empty(0, dtype=gs.tc_int, device=gs.device)
                     find_shell_contacts(
@@ -521,6 +600,7 @@ class VBDSolver(Solver):
                         options=self.config,
                         errno=self.errno,
                     )
+                    gather_shell_bounds(self.vertices, self.collision)
                     offsets = torch.cat(
                         (self.contact_counts.new_zeros(1), self.contact_counts.cumsum(0, dtype=gs.tc_int))
                     )
@@ -550,6 +630,7 @@ class VBDSolver(Solver):
                             scale=self.initial_scale,
                             vertices=self.vertices,
                             collision=self.collision,
+                            planes=self.planes,
                             errno=self.errno,
                         )
                 n_contacts = len(pairs)

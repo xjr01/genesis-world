@@ -17,6 +17,10 @@ Contact displacement limits and invalid-state checks remain active in both modes
 
 ```powershell
 python examples/vbd/vbd_shell.py -g -v
+python examples/vbd/vbd_shell.py -g -v --scenario hang
+python examples/vbd/vbd_shell.py -g -v --solver ipc --scenario hang
+python examples/vbd/vbd_shell.py -g -v --solver ipc --scenario shirt
+python examples/vbd/vbd_shell.py -g --scenario hang -r -o out/vbd/shirt
 python examples/vbd/vbd_elastic.py -g -v
 python examples/vbd/vbd_elastic.py -g -v --material-model log_neohookean
 python examples/vbd/vbd_elastic.py -g -v --solver ipc
@@ -24,9 +28,157 @@ python examples/vbd/vbd_shell.py -g --scenario fold --plastic
 python examples/vbd/vbd_elastic.py -g --scenario load_unload --plastic --yield-strain 1
 ```
 
-`-g` 使用 GPU，`-v` 打开查看器，`-s` 设置步数（默认 200）。省略 `-v` 可无窗口运行；省略 `-g` 使用 CPU。两个文件可以独立运行。所有 jelly 仿真统一读取 `genesis/assets/meshes/jelly/remeshed.obj`，包括薄壳、VBD 弹性体、加载卸载和 FEM/IPC 基线。资产已采用米制尺寸和 Z-up，脚本仅将底部抬高到 0.015 m。气泡装饰不参与仿真。
+`-g` selects the GPU, `-v` opens the viewer, and `-s` sets the number of frames (shell: 180; elastic: 200). Both scripts run
+independently. The shell example defaults to dropping `genesis/assets/meshes/shirt.glb`; `--scenario hang` holds its
+shoulders, and `--scenario fold` folds a rectangular sheet. `-r` records a video under `--output-dir`; recording and
+benchmarking run separately. Videos and benchmark reports use `<solver>_shell_<scenario>` filenames.
 
-`SimOptions` controls the time step and gravity. Examples use `dt=0.005`, two substeps and 20 iterations per substep.
+`vbd_shell.py --solver ipc` selects `FEM.Cloth` with `IPCCouplerOptions` and requires `--gpu`. It supports shirt drop
+and static shoulder pins; folding with moving/released pins and plasticity uses `--solver vbd` (the default).
+FEM vertex constraints can be set or removed before `scene.build()` for every environment and hold the initial positions.
+Each shell frame advances 1/60 s through twenty 1/1200 s physics steps for either solver. `--dt` and `--substeps` control
+these intervals. Reports distinguish these frame
+settings (`dt`, `substeps`) from actual scene settings (`scene_dt`, `scene_substeps`).
+
+Both modes use the specified Young's modulus, Poisson ratio, density, full mass thickness, self-friction and activation gap.
+The IPC material receives half the full thickness, since its shell thickness parameter is a radius and mass integrates
+over twice that radius. IPC uses its shell constitutive law, barrier contacts and Newton convergence settings.
+`--ipc-bending-stiffness` controls the FEM.Cloth bending coefficient and defaults to 40, following the garment example's
+calibration. VBD uses `--bending-rigidity` in N*m; the two bending coefficients have different definitions.
+`--no-bending` disables bending in either mode. VBD iteration, search, contact stiffness and plasticity options are
+accepted only with `--solver vbd`; benchmark entries for inactive parameters are `null`.
+
+The shirt keeps its texture and connected inner/outer surfaces: 8,412 simulation vertices and 16,832 triangles.
+The example rotates the asset from Y-up to Z-up and places its hem 0.35 m above the ground. Hanging selects mesh
+vertices nearest the two shoulder locations `(+-0.2, 0, 1.09)` m, then fixes each surrounding 0.025 m-radius patch
+with `entity.set_vertex_constraints(fixed_indices)` before `scene.build()`. This fixes 12 vertices in total at their
+initial positions; the remaining vertices move under gravity. Orange markers show the fixed patches, with a visual
+support above them. Setting the constraints before building also makes `scene.reset()` restore them.
+
+The shell example uses material parameters from the [Gaia multilayer gravity-cloth preset](https://github.com/AnkaChan/Gaia/blob/c229692045465a76233f9fba9197fb22bbfb3694/Simulator/VBDCloth/ParameterGen/S03_MultiLayerClothOnCollider.py),
+interpreted in centimetres, grams and seconds: the 100-unit cloth spans 1 m, and its area density `0.02` becomes
+`0.2 kg/m^2`. The two membrane coefficients `mu=lambda=10000` become `10 N/m` each. At the example's full thickness
+`h=0.00025 m`, `rho=800 kg/m^3`, `E=320000/3 Pa`, `nu=1/3` and `shear_stiffness=0` reproduce that area density and
+membrane energy through `mu=E*h/(2*(1+nu))+shear_stiffness` and `lambda=E*h*nu/(1-nu^2)-shear_stiffness`.
+
+The example uses `QuadraticBending`: each interior edge contributes a cotangent quadratic curvature energy with
+`bending_rigidity=1e-6 N*m` (reference coefficient `10`). Its equilibrium favors flat cloth while the rest triangles
+define membrane lengths and cotangent weights. `DiscreteShellBending` instead restores imported rest dihedral angles;
+`--plastic` selects that model for angular plasticity. `--bending-model` selects the elastic bending model explicitly.
+The two coefficients represent distinct energies and should be calibrated for the selected model.
+
+`membrane_damping=bending_damping=2e-6 s` applies each local stiffness block to the vertex displacement divided by the
+substep duration. This follows the reference's local damping, including resistance to common translation. Both damping
+times have command-line controls. The membrane solve uses the full Saint Venant-Kirchhoff Hessian.
+
+| Setting | Shell example value |
+| --- | ---: |
+| Frame duration / substeps / iterations per substep | 1/60 s / 20 / 15 |
+| Gravity magnitude | 10 m/s^2 |
+| Initial iterate / correction scale | Bounded inertial prediction / 1 |
+| Self-contact stiffness / activation gap / search radius | 100 N/m / 2 mm / 4.5 mm |
+| Full contact thickness, independent of mass thickness | 1 micrometre |
+| Conservative clearance fraction | 0.4 |
+| Self-friction / regularization speed | 0.1 / 0.001 m/s |
+| Ground stiffness / activation gap | 10 N/m / 0 |
+| Ground friction / regularization speed | 0.3 / 0.0001 m/s |
+
+Ground distances are measured from the simulated vertices; self-contact subtracts the two surface radii. A finite ground
+penalty permits load-dependent penetration. `--thickness` controls mass and membrane stiffness, while
+`--contact-thickness` controls collision spacing independently. Larger search radii cost more candidate pairs and allow
+more motion before rebuilding. `--contact-distance`, `--search-radius` and `--contact-stiffness` expose these tradeoffs.
+The solver options `shell_ground_*` control ground response independently.
+The initial iterate follows velocity and gravity within collision clearance, improving free motion at a finite iteration
+budget. The 2 mm activation gap is comparable to the shirt's inner/outer layer separation. The reference scene instead
+uses a 3 mm gap and previous-position initialization; the continuation measurements below document their effect here.
+
+Normal self-contact follows the reference's quadratic/logarithmic branches, including their junction discontinuity.
+The logarithmic cutoff is `1e-7 m`; its additive energy offset uses the converted 1 cm reference length. The edge
+parallelism cutoff is `1e-9 m^2`. Friction uses the reference edge-based tangent basis and lagged tangent Hessian.
+The actual contact-enabled reference path takes bounded full Newton corrections and skips local line search even though
+its JSON enables `useLineSearch`; the example therefore leaves `--line-search` off. It rebuilds candidates when clearance
+is exhausted and at each substep.
+
+These settings align the selected material/contact formulas and iteration budget. The shirt mesh, contact gap, initial
+iterate, shoulder pins and ground location are specific to this example. GPU reduction order, graph coloring and
+bounding-volume hierarchy (BVH) traversal differ from
+the reference CPU implementation, so trajectories can diverge. IPC retains its own bending law and barrier contacts;
+the VBD stiffness damping and separate collision thickness are VBD-only controls.
+
+The current defaults complete a six-second hanging run from the original asset pose on CUDA/float32. Both cuffs drape
+beside the torso. Their mean heights descend 205.3 mm and 202.7 mm; the final vertex root mean square (RMS) speed is
+0.001755 m/s and the fastest vertex moves at 0.013272 m/s. Throughout the run, the same 12 shoulder vertices remain fixed,
+with zero fixed cuff vertices and a maximum pin error of `3.2e-8 m`. The existing vertex-control/state tests pass for both
+single and batched environments. See the [current-default summary](results/gaia_alignment/cuff_fix_summary.json) and
+[frame measurements](results/gaia_alignment/cuff_fix_samples.json).
+
+Reference-preset validation on the RTX 4090, float32, uses the same 8,412-vertex shirt and 12 shoulder pins, with a 3 mm
+contact gap and previous-position initialization. All changes are applied together, including the smaller substep and
+changed contact parameters. The fixed-point deviation from the double-precision input coordinates is below `3.2e-8 m`.
+
+| Hanging run | Simulated time | Vertex root mean square (RMS) speed | Fastest vertex |
+| --- | ---: | ---: | ---: |
+| Previous defaults | 3 s | 0.207038 m/s | 0.790432 m/s |
+| Reference preset | 3 s | 0.022235 m/s | 0.771104 m/s |
+| Reference preset | 6 s | 0.006929 m/s | 0.109770 m/s |
+| Aligned physics, previous step/iteration budget | 3 s | 0.016862 m/s | 0.156599 m/s |
+
+Overall motion decreases substantially; isolated speed spikes persist. The last second averages `0.010091 m/s` RMS.
+The cuffs descend only 40-43 mm over these six seconds and remain extended sideways. Lower speed therefore accompanies
+arrested draping in this asset and is insufficient evidence of improved hanging behavior.
+The preset raises the iteration budget from 8,000 to 18,000 sweeps per simulated second, so this comparison measures
+the combined alignment and increased solve work. See the [summary](results/gaia_alignment/hang_summary.json),
+[frame measurements](results/gaia_alignment/hang_samples.json) and [speed plot](results/gaia_alignment/speed.png).
+The connected inner and outer shirt surfaces have a median corresponding-vertex separation of 2.006 mm in the rest
+mesh, within the 3 mm self-contact activation gap. The reference scene spaces separate cloth layers 3 mm apart;
+the shirt geometry therefore activates contact under different initial conditions.
+
+Controlled continuations start from the same six-second state and advance another 0.5 s. Every run retains the same
+12 shoulder pins and zero cuff pins. Cuffs are selected by rest coordinates `abs(x) > 0.61 m` (159 left, 157 right vertices).
+
+| Single change from reference preset | Left cuff descent | Right cuff descent |
+| --- | ---: | ---: |
+| Baseline | 1.01 mm | 1.05 mm |
+| Membrane and bending damping both zero | 1.01 mm | 1.05 mm |
+| 100 iterations per substep | 6.40 mm | 5.97 mm |
+| Self-friction zero | 78.73 mm | 66.24 mm |
+| Self-contact activation gap 0.5 mm | 158.46 mm | 162.14 mm |
+| Bounded inertial prediction as initial iterate | 175.43 mm | 188.94 mm |
+
+The last row retains the 3 mm gap, friction, damping, pins and iteration budget. Its large response to the initial
+iterate, together with the iteration-count comparison, exposes substantial convergence sensitivity in the arrested
+state. Lowering friction or the gap changes both the physical model and solve difficulty; those controls alone cannot
+establish that the arrested shape is a physical equilibrium. See the
+[cuff measurements](results/gaia_alignment/cuff_diagnosis.json).
+
+Releasing all pins from that state, zeroing initial velocity and disabling material damping lets the shirt fall as a
+whole. After 1/60 s its mass-weighted downward speed is 0.155234 m/s with the previous-position initial iterate,
+0.163391 m/s with friction zero, and 0.169372 m/s with bounded inertial prediction. Gravity alone predicts 0.166667 m/s.
+Self-contact forces are internal; fixed shoulders supply external support in the hanging scene. These release results
+show integration error, while the pinned continuations expose a much larger sensitivity of the draping motion.
+
+The last row of the speed table keeps `--dt 0.005 --substeps 2 --iterations 20` with the aligned material, contact and solver
+formulas. Reduced speed therefore remains at the previous iteration budget. Coarser implicit integration also
+increases numerical dissipation, so lower speed alone does not establish more accurate dynamics.
+[Previous-budget samples](results/gaia_alignment/old_timestep_samples.json) record
+this separate comparison.
+
+The reference-preset 6-second drop reaches a minimum sampled height of `-0.001918 m` with the `10 N/m` ground penalty;
+its final RMS speed is `0.022766 m/s`. This finite penetration follows the selected soft ground response. Increasing
+`shell_ground_stiffness` reduces it at the cost of a harder contact solve. [Drop samples](results/gaia_alignment/drop_samples.json)
+retain the full frame measurements.
+
+The existing material-response test includes an analytical free-corner quadratic bending solve with and without damping,
+membrane damping under load, and a ground-penalty solve with an independent zero activation gap. Removing either damping
+term or replacing quadratic bending with rest-angle bending makes the corresponding physical assertion fail.
+Final validation passes all 18 VBD tests on CUDA/float32 and all 12 contact/material cases on CPU/float64, covering
+single and batched environments and both line-search settings. Existing support-force tolerances are unchanged.
+
+The elastic drop, load/unload and elastic FEM/IPC baseline use `genesis/assets/meshes/jelly/remeshed.obj`. That asset uses
+metres and Z-up; these examples raise its bottom to 0.015 m.
+
+`SimOptions` controls the time step and gravity. The elastic example uses `dt=0.005`, two substeps and 20 iterations per
+substep; shell settings are listed above.
 `--iterations` and `--precision 32|64` support convergence and precision comparisons. `--tolerance` defaults to zero,
 running every iteration without a convergence reduction; a positive distance enables early stopping.
 
@@ -40,7 +192,10 @@ The elastic example uses `E=10000 Pa` for both drop and load/unload scenarios; t
 
 `remeshed.obj` 从原始 `jelly.glb` 的 `Jelly_Fluted_12Lobes` 节点生成，采用 2 mm 目标边长进行各向同性重网格化。原始 GLB 保留为来源。新表面包含 12,740 个顶点和 25,476 个三角形；最小三角形角从 0.819 度提高到 17.297 度，最小角低于 5 度的三角形从 2,160 个降到 0。双向顶点及面心采样的最大表面偏差为 0.180 mm，体积变化为 +0.00422%。采样偏差不是严格 Hausdorff 距离上界。
 
-资产通过闭合性、朝向、自相交和初始四面体正体积检查。弹性体脚本从同一个保存的表面生成四面体，保留 `--tet-max-volume` 控制；薄壳直接使用该表面。每份仿真 JSON 记录资产路径和 SHA-256，便于区分网格版本。具体质量指标和上下表面网格对比见 [资产说明](../../genesis/assets/meshes/jelly/README.md)。
+The jelly asset passed closedness, orientation, self-intersection and initial tetrahedron-volume checks. The elastic
+example tetrahedralizes this surface with `--tet-max-volume` controlling the volume limit. Archived jelly shell
+measurements use its surface triangles. Benchmark JSON files record the asset path and SHA-256. Mesh quality and
+surface comparisons are documented in the [asset notes](../../genesis/assets/meshes/jelly/README.md).
 
 重新生成资产及质量报告：
 
@@ -125,8 +280,10 @@ Static planes use analytic contact. Penalty forces include regularized friction,
 activation gap outside the physical surface independently of shell thickness. A shell candidate limits each participating
 vertex's motion from the latest query position to `0.45*max(distance-thickness, 0)`, further bounded by the search radius.
 Vertices take the smallest candidate bound. Exhausting a bound requests another search. Zero clearance produces a zero
-bound, which can lock motion because the bound also limits separation and tangential motion. Common translation is
-handled separately when the entity has no retained shell contacts or fixed vertices.
+bound, which can lock motion because the bound also limits separation and tangential motion. For self-contact, the
+initial guess retains predicted displacement within these bounds. External shell contacts retain the preceding
+configuration to limit transient contact impulses. Common translation is handled separately for entities with free vertices
+throughout and whose retained shell candidates lie within the same entity.
 
 Prediction limits the initial deformation change under concentrated loads while retaining the complete inertial target
 in the objective. Local solid updates can cross zero volume during recovery. A vertex's incident tetrahedra are excluded
@@ -141,6 +298,7 @@ Optional `--contact-diagnostics` reports interpenetration warnings; it is disabl
 
 ```powershell
 python examples/vbd/vbd_shell.py -g --benchmark
+python examples/vbd/vbd_shell.py -g --scenario hang --benchmark
 python examples/vbd/vbd_elastic.py -g --youngs-modulus 100000 --benchmark
 python examples/vbd/vbd_elastic.py -g --solver ipc --youngs-modulus 100000 --benchmark
 ```
@@ -234,4 +392,7 @@ python -m pytest -n 0 tests/deformable/test_vbd.py --backend gpu
 4. 提供可复现性能结果：记录网格规模、材料、时间步、子步、迭代数、精度、接触设置，以及预热后的平均耗时和 P95。初始化单独计时；按相同仿真时长和相近效果比较，不能只比较迭代次数或不同时间步的单步耗时。暂不设未经确认的 FPS 或加速倍数门槛。
 5. 交付 Genesis 内的实现、最小运行示例、必要测试和简短的使用/性能说明。两类塑性、自碰撞等完整要求不能仅以 TODO 代替。
 
-重点性能资产由 `genesis/assets/meshes/jelly/jelly.glb` 提供形状，目标机器为 RTX 4090。仿真统一使用其重网格化版本 `genesis/assets/meshes/jelly/remeshed.obj`，含 12,740 个表面顶点、25,476 个三角形。默认四面体化保留这些表面顶点，并生成内部顶点；实际规模记录在 JSON 中。折叠验收使用独立薄片场景，体积加载卸载使用同一个重网格化 jelly。
+The target performance device is an RTX 4090. Shell examples use `genesis/assets/meshes/shirt.glb`; the archived
+shell optimization measurements and volume examples use `genesis/assets/meshes/jelly/remeshed.obj` (12,740 surface
+vertices, 25,476 triangles). Default tetrahedralization retains those surface vertices and adds interior vertices;
+JSON reports record the resulting size. Folding uses a separate rectangular sheet.

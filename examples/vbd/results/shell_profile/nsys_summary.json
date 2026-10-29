@@ -1,0 +1,121 @@
+{
+  "source": "out/vbd/shell_profile/shell_nodes.nsys-rep",
+  "measured_frames": 200,
+  "mean_frame_ms": 79.20147450146032,
+  "kernel_total_ms": 10941.642232999864,
+  "kernel_launches": 393712,
+  "copy_ms_per_frame": 0.058769585,
+  "copied_bytes": 15656400,
+  "graph_replays": 8012,
+  "shell_rebuilds": 427,
+  "stages": [
+    {
+      "stage": "shell_count_and_bounds",
+      "launches": 427,
+      "total_ms": 9323.939089000009,
+      "ms_per_frame": 46.61969544500004,
+      "percent_kernel_time": 85.21517054249058
+    },
+    {
+      "stage": "local_solve",
+      "launches": 80120,
+      "total_ms": 626.1652890000647,
+      "ms_per_frame": 3.1308264450003236,
+      "percent_kernel_time": 5.722772465650153
+    },
+    {
+      "stage": "shell_fill",
+      "launches": 427,
+      "total_ms": 363.4929049999998,
+      "ms_per_frame": 1.817464524999999,
+      "percent_kernel_time": 3.3221055602029232
+    },
+    {
+      "stage": "apply_color",
+      "launches": 80120,
+      "total_ms": 293.11176899988186,
+      "ms_per_frame": 1.4655588449994092,
+      "percent_kernel_time": 2.678864495458097
+    },
+    {
+      "stage": "color_serial",
+      "launches": 168252,
+      "total_ms": 166.75012199991443,
+      "ms_per_frame": 0.8337506099995722,
+      "percent_kernel_time": 1.5239953788380873
+    },
+    {
+      "stage": "remaining_kernels",
+      "launches": 26644,
+      "total_ms": 60.551041999995164,
+      "ms_per_frame": 0.3027552099999758,
+      "percent_kernel_time": 0.5533999440904211
+    },
+    {
+      "stage": "bvh_refit",
+      "launches": 22333,
+      "total_ms": 34.33321300000223,
+      "ms_per_frame": 0.17166606500001116,
+      "percent_kernel_time": 0.31378482561286514
+    },
+    {
+      "stage": "shell_bounds_initialization",
+      "launches": 1708,
+      "total_ms": 30.646662999999617,
+      "ms_per_frame": 0.1532333149999981,
+      "percent_kernel_time": 0.28009198571279953
+    },
+    {
+      "stage": "prediction",
+      "launches": 6000,
+      "total_ms": 25.44732199999893,
+      "ms_per_frame": 0.12723660999999464,
+      "percent_kernel_time": 0.23257314997240638
+    },
+    {
+      "stage": "finish_validate",
+      "launches": 4000,
+      "total_ms": 9.452458000000036,
+      "ms_per_frame": 0.04726229000000018,
+      "percent_kernel_time": 0.08638975574883571
+    },
+    {
+      "stage": "volume_queries",
+      "launches": 1600,
+      "total_ms": 3.7381470000000743,
+      "ms_per_frame": 0.01869073500000037,
+      "percent_kernel_time": 0.03416440530952353
+    },
+    {
+      "stage": "update_bounds",
+      "launches": 1227,
+      "total_ms": 3.2220569999999724,
+      "ms_per_frame": 0.016110284999999863,
+      "percent_kernel_time": 0.029447654487205644
+    },
+    {
+      "stage": "shell_search_serial",
+      "launches": 854,
+      "total_ms": 0.7921570000000079,
+      "ms_per_frame": 0.0039607850000000396,
+      "percent_kernel_time": 0.007239836426115923
+    }
+  ],
+  "diagnostics": [
+    "Process 24860 was launched by the profiler",
+    "Common injection library initialized successfully.",
+    "Buffers holding CUDA trace data will be flushed on CudaProfilerStop() call. See --flush-on-cudaprofilerstop to control this behavior.",
+    "Loaded CUPTI library: C:\\Program Files\\NVIDIA Corporation\\Nsight Systems 2025.5.2\\target-windows-x64\\cupti64_131.dll",
+    "Installed CUDA driver version (13.3) is not supported by this build of Nsight Systems. CUDA trace will be collected using libraries for driver version 13.1",
+    "CUDA injection initialized successfully.",
+    "NVTX injection initialized successfully.",
+    "Profiling has started.",
+    "Profiling started due to cudaProfilerStart API invoked in the application.",
+    "Not all NVTX events might have been collected.",
+    "No NVTX events collected. Does the process use NVTX?",
+    "Not all CUDA events might have been collected.",
+    "Number of CUDA events collected: \t590155.",
+    "Profiling has stopped.",
+    "Number of CUPTI events produced: \t598571, CUPTI buffers: 20."
+  ]
+}

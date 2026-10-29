@@ -1,0 +1,209 @@
+[
+  {
+    "name": "original_2mm",
+    "frames": 200,
+    "total_kernel_calls": 393712,
+    "total_gpu_ms_per_frame": 54.708211164999305,
+    "graph_kernel_calls": 328492,
+    "color_sweeps_submitted": 8012,
+    "local_solve_registers": [
+      140
+    ],
+    "groups": [
+      {
+        "name": "contact_count",
+        "calls": 427,
+        "total_ms": 9323.939089000009,
+        "ms_per_frame": 46.61969544500004,
+        "gpu_percent": 85.21517054249061
+      },
+      {
+        "name": "contact_fill",
+        "calls": 427,
+        "total_ms": 363.4929049999998,
+        "ms_per_frame": 1.817464524999999,
+        "gpu_percent": 3.3221055602029246
+      },
+      {
+        "name": "bound_gather",
+        "calls": 0,
+        "total_ms": 0.0,
+        "ms_per_frame": 0.0,
+        "gpu_percent": 0.0
+      },
+      {
+        "name": "bound_initialization",
+        "calls": 1708,
+        "total_ms": 30.646662999999617,
+        "ms_per_frame": 0.1532333149999981,
+        "gpu_percent": 0.2800919857127996
+      },
+      {
+        "name": "local_solve",
+        "calls": 80120,
+        "total_ms": 626.1652890000647,
+        "ms_per_frame": 3.1308264450003236,
+        "gpu_percent": 5.722772465650155
+      },
+      {
+        "name": "position_update",
+        "calls": 80120,
+        "total_ms": 293.11176899988186,
+        "ms_per_frame": 1.4655588449994092,
+        "gpu_percent": 2.678864495458098
+      },
+      {
+        "name": "graph_control",
+        "calls": 168252,
+        "total_ms": 166.75012199991443,
+        "ms_per_frame": 0.8337506099995722,
+        "gpu_percent": 1.5239953788380876
+      },
+      {
+        "name": "other",
+        "calls": 62658,
+        "total_ms": 137.53639599999175,
+        "ms_per_frame": 0.6876819799999587,
+        "gpu_percent": 1.2569995716473314
+      }
+    ]
+  },
+  {
+    "name": "optimized_2mm",
+    "frames": 200,
+    "total_kernel_calls": 376440,
+    "total_gpu_ms_per_frame": 20.383306339998516,
+    "graph_kernel_calls": 328492,
+    "color_sweeps_submitted": 8012,
+    "local_solve_registers": [
+      128
+    ],
+    "groups": [
+      {
+        "name": "contact_count",
+        "calls": 427,
+        "total_ms": 2500.7685469999983,
+        "ms_per_frame": 12.503842734999992,
+        "gpu_percent": 61.343545185618304
+      },
+      {
+        "name": "contact_fill",
+        "calls": 427,
+        "total_ms": 363.924708,
+        "ms_per_frame": 1.81962354,
+        "gpu_percent": 8.927028371394886
+      },
+      {
+        "name": "bound_gather",
+        "calls": 854,
+        "total_ms": 2.807182000000018,
+        "ms_per_frame": 0.014035910000000089,
+        "gpu_percent": 0.06885982953833736
+      },
+      {
+        "name": "bound_initialization",
+        "calls": 3416,
+        "total_ms": 34.47606799999916,
+        "ms_per_frame": 0.1723803399999958,
+        "gpu_percent": 0.8456937119260719
+      },
+      {
+        "name": "local_solve",
+        "calls": 80120,
+        "total_ms": 614.7478169999371,
+        "ms_per_frame": 3.0737390849996853,
+        "gpu_percent": 15.079688416241057
+      },
+      {
+        "name": "position_update",
+        "calls": 80120,
+        "total_ms": 290.99931299988276,
+        "ms_per_frame": 1.4549965649994139,
+        "gpu_percent": 7.138177392468702
+      },
+      {
+        "name": "graph_control",
+        "calls": 168252,
+        "total_ms": 165.8685609998892,
+        "ms_per_frame": 0.829342804999446,
+        "gpu_percent": 4.068735420867478
+      },
+      {
+        "name": "other",
+        "calls": 42824,
+        "total_ms": 103.06907199999662,
+        "ms_per_frame": 0.5153453599999831,
+        "gpu_percent": 2.5282716719451543
+      }
+    ]
+  },
+  {
+    "name": "optimized_1mm",
+    "frames": 200,
+    "total_kernel_calls": 388463,
+    "total_gpu_ms_per_frame": 12.115953614998766,
+    "graph_kernel_calls": 335257,
+    "color_sweeps_submitted": 8177,
+    "local_solve_registers": [
+      128
+    ],
+    "groups": [
+      {
+        "name": "contact_count",
+        "calls": 543,
+        "total_ms": 853.2605280000006,
+        "ms_per_frame": 4.266302640000003,
+        "gpu_percent": 35.21227280631544
+      },
+      {
+        "name": "contact_fill",
+        "calls": 543,
+        "total_ms": 234.05047000000008,
+        "ms_per_frame": 1.1702523500000004,
+        "gpu_percent": 9.658772121340112
+      },
+      {
+        "name": "bound_gather",
+        "calls": 1086,
+        "total_ms": 3.8393260000000113,
+        "ms_per_frame": 0.019196630000000058,
+        "gpu_percent": 0.15844093341720844
+      },
+      {
+        "name": "bound_initialization",
+        "calls": 4344,
+        "total_ms": 46.58132999999858,
+        "ms_per_frame": 0.2329066499999929,
+        "gpu_percent": 1.9223138136784341
+      },
+      {
+        "name": "local_solve",
+        "calls": 81770,
+        "total_ms": 669.4977860000693,
+        "ms_per_frame": 3.3474889300003463,
+        "gpu_percent": 27.628769772247825
+      },
+      {
+        "name": "position_update",
+        "calls": 81770,
+        "total_ms": 316.14766499999735,
+        "ms_per_frame": 1.5807383249999867,
+        "gpu_percent": 13.04675121109027
+      },
+      {
+        "name": "graph_control",
+        "calls": 171717,
+        "total_ms": 184.12926899968937,
+        "ms_per_frame": 0.9206463449984469,
+        "gpu_percent": 7.598628834784794
+      },
+      {
+        "name": "other",
+        "calls": 46690,
+        "total_ms": 115.68434899999764,
+        "ms_per_frame": 0.5784217449999882,
+        "gpu_percent": 4.7740505071259065
+      }
+    ]
+  }
+]

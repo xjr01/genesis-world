@@ -1,6 +1,6 @@
 import math
 from contextlib import nullcontext
-from typing import TYPE_CHECKING, cast, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 import pytest
@@ -12,10 +12,10 @@ except ImportError:
 
 
 import genesis as gs
-from genesis.utils.misc import tensor_to_array, qd_to_numpy
+from genesis.utils.misc import qd_to_numpy, tensor_to_array
 
 from ..conftest import TOL_SINGLE
-from ..utils import assert_allclose, get_hf_dataset
+from ..utils import assert_allclose, assert_equal, get_hf_dataset
 from .utils import (
     find_ipc_geometries,
     get_ipc_positions,
@@ -100,23 +100,41 @@ def test_ipc_state_and_checkpoint(n_envs, show_viewer, asset_tmp_path):
             bending_stiffness=1.0e-6,
         ),
     )
+    pinned_cloth = scene.add_entity(
+        morph=gs.morphs.Mesh(
+            file=str(mesh_path),
+            pos=(0.0, 0.3, 0.5),
+            decimate=False,
+        ),
+        material=gs.materials.FEM.Cloth(),
+    )
+    pinned_initial_positions = tensor_to_array(pinned_cloth.init_positions)
+    fixed_indices = np.flatnonzero(pinned_initial_positions[:, 1] < 0.31)
+    free_indices = np.flatnonzero(pinned_initial_positions[:, 1] > 0.31)
+    pinned_cloth.set_vertex_constraints(range(pinned_cloth.n_vertices))
+    pinned_cloth.remove_vertex_constraints(free_indices)
     scene.build(n_envs=n_envs)
     initial_positions = tuple(entity.get_state().pos.clone() for entity in entities)
+    pinned_positions = pinned_cloth.get_state().pos.clone()
     initial_rigid_position = rigid.get_pos().clone()
     scene.step()
     states = tuple(entity.get_state() for entity in entities)
     for state, position in zip(states, initial_positions):
         assert_allclose(state.vel[..., 2], -9.8 * dt, atol=1e-4)
         assert_allclose(state.vel, (state.pos - position) / dt, atol=1e-4)
+    pinned_state = pinned_cloth.get_state()
+    assert_equal(pinned_state.pos[:, fixed_indices], pinned_positions[:, fixed_indices])
+    assert_equal(pinned_state.vel[:, fixed_indices], 0.0)
+    assert (pinned_state.pos[:, free_indices, 2] < pinned_positions[:, free_indices, 2] - 0.5 * 9.8 * dt**2).all()
 
     checkpoint = scene.get_state()
     scene.step()
-    continued_states = tuple(entity.get_state() for entity in (*entities, contact_cloth))
+    continued_states = tuple(entity.get_state() for entity in (*entities, contact_cloth, pinned_cloth))
     continued_rigid_position = rigid.get_pos().clone()
     continued_rigid_velocity = rigid.get_vel().clone()
     scene.restore(checkpoint)
     scene.step()
-    for entity, expected in zip((*entities, contact_cloth), continued_states):
+    for entity, expected in zip((*entities, contact_cloth, pinned_cloth), continued_states):
         state = entity.get_state()
         assert_allclose(state.pos, expected.pos, atol=1e-5)
         assert_allclose(state.vel, expected.vel, atol=1e-5)
@@ -131,6 +149,12 @@ def test_ipc_state_and_checkpoint(n_envs, show_viewer, asset_tmp_path):
         assert_allclose(state.vel, 0.0, atol=1e-6)
     assert_allclose(rigid.get_pos(), initial_rigid_position, atol=1e-6)
     assert_allclose(rigid.get_vel(), 0.0, atol=1e-6)
+    assert_equal(pinned_cloth.get_state().pos, pinned_positions)
+    scene.step()
+    pinned_state = pinned_cloth.get_state()
+    assert_equal(pinned_state.pos[:, fixed_indices], pinned_positions[:, fixed_indices])
+    assert_equal(pinned_state.vel[:, fixed_indices], 0.0)
+    assert (pinned_state.pos[:, free_indices, 2] < pinned_positions[:, free_indices, 2] - 0.5 * 9.8 * dt**2).all()
 
 
 @pytest.mark.slow  # ~250s

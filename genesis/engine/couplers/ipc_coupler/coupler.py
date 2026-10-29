@@ -447,6 +447,9 @@ class IPCCoupler(RBC):
                     moduli = ElasticModuli.youngs_poisson(entity.material.E, entity.material.nu)
                     self._ipc_stk.apply_to(mesh, moduli, mass_density=entity.material.rho)
 
+                is_fixed = uipc.view(mesh.vertices().find(uipc.builtin.is_fixed))
+                is_fixed[:] = entity.init_is_fixed
+
                 # ---- Apply subscene and metadata ----
                 meta_attrs = mesh.meta()
                 meta_attrs.create("solver_type", solver_type)

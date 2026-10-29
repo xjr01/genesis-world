@@ -55,12 +55,12 @@ def edge_weights(a, b, c, d):
 def is_edge_contact_active(a, b, c, d):
     """Suppress the ill-conditioned closest-point direction of nearly parallel segments."""
     first, second = b - a, d - c
-    return first.cross(second).norm_sqr() > 1e-5 * first.norm() * second.norm()
+    return first.cross(second).norm_sqr() > 1e-9 * first.norm() * second.norm()
 
 
 @qd.func
 def contact_geometry(i_c, i_b, i_local, trial, pairs: qd.template(), kinds: qd.template(), vertices: V_ANNOTATION):
-    """Evaluate contact weights, normal, physical gap and relative motion at a trial position."""
+    """Evaluate contact geometry, relative motion and the tangent projection at a trial position."""
     positions = qd.Matrix.zero(gs.qd_float, 4, 3)
     for i in qd.static(range(4)):
         positions[i, :] = vertices.pos[pairs[i_c, i], i_b]
@@ -86,7 +86,15 @@ def contact_geometry(i_c, i_b, i_local, trial, pairs: qd.template(), kinds: qd.t
         elif normal.dot(face_normal) < 0.0:
             normal = -normal
     is_active = kinds[i_c] != 0 or is_edge_contact_active(a, b, c, d)
-    return weights, normal, separation.dot(normal) - radius, displacement, is_active
+    tangent_projection = qd.Matrix.identity(gs.qd_float, 3) - normal.outer_product(normal)
+    if kinds[i_c] != 2:
+        edge = b - a
+        if kinds[i_c] == 1:
+            edge = c - b
+        tangent0 = edge.normalized(1e-30)
+        tangent1 = tangent0.cross(normal).normalized(1e-30)
+        tangent_projection = tangent0.outer_product(tangent0) + tangent1.outer_product(tangent1)
+    return weights, normal, separation.dot(normal) - radius, displacement, tangent_projection, is_active
 
 
 @qd.func
@@ -445,15 +453,29 @@ def feasible_face(i_f, i_b, point, bary, vertices: V_ANNOTATION, collision: V_AN
 
 
 @qd.kernel
-def initialize_shell_bounds(vertices: V_ANNOTATION, collision: V_ANNOTATION, options: V_ANNOTATION):
+def initialize_shell_bounds(
+    vertices: V_ANNOTATION, collision: V_ANNOTATION, planes: V_ANNOTATION, options: V_ANNOTATION
+):
+    for i_f, i_b in collision.faces_bound:
+        collision.faces_bound[i_f, i_b] = qd.Vector([1e30, 1e30])
+    for i_e, i_b in collision.edges_bound:
+        collision.edges_bound[i_e, i_b] = qd.Vector([1e30, 1e30])
     for i_entity, i_b in collision.translation:
         collision.translation[i_entity, i_b] = qd.Vector.zero(gs.qd_float, 4)
-        collision.has_contact[i_entity, i_b] = 0
-        collision.translation_bound[i_entity, i_b] = 0.45 * (
+        collision.contact_flags[i_entity, i_b] = 0
+        collision.translation_bound[i_entity, i_b] = options.contact_relaxation * (
             options.contact_search_radius - options.max_contact_thickness
         )
+        # See apply_prediction for the common-translation bound.
+        if collision.entity_mass.shape[0] == 1:
+            collision.translation_bound[i_entity, i_b] = 1e30
+    if qd.static(planes.n_planes > 0):
+        for i_entity, i_p, i_b in collision.plane_clearance:
+            collision.plane_clearance[i_entity, i_p, i_b] = 1e30
     for i_v, i_b in vertices.pos:
-        vertices.bound[i_v, i_b] = 0.45 * (options.contact_search_radius - options.max_contact_thickness)
+        vertices.bound[i_v, i_b] = options.contact_relaxation * (
+            options.contact_search_radius - options.max_contact_thickness
+        )
         if vertices.is_volume[i_v]:
             vertices.bound[i_v, i_b] = 1e30
         vertices.collision_origin[i_v, i_b] = vertices.pos[i_v, i_b]
@@ -463,6 +485,38 @@ def initialize_shell_bounds(vertices: V_ANNOTATION, collision: V_ANNOTATION, opt
         collision.translation[i_entity, i_b] += weight * qd.Vector(
             [motion[0], motion[1], motion[2], qd.cast(vertices.is_fixed[i_v, i_b], gs.qd_float)]
         )
+        if qd.static(planes.n_planes > 0):
+            for i_p in range(planes.n_planes):
+                gap = vertices.pos[i_v, i_b].dot(planes.normal[i_p]) - planes.offset[i_p] - vertices.radius[i_v]
+                qd.atomic_min(collision.plane_clearance[i_entity, i_p, i_b], qd.max(0.0, gap))
+    if qd.static(planes.n_planes > 0):
+        for i_entity, i_b in collision.translation:
+            motion = collision.translation[i_entity, i_b][:3]
+            # Limiting the normal component preserves frictionless tangential motion.
+            for i_p in range(planes.n_planes):
+                normal = planes.normal[i_p]
+                approach = motion.dot(normal)
+                gap = collision.plane_clearance[i_entity, i_p, i_b]
+                motion -= qd.min(0.0, approach + gap) * normal
+            for i_d in qd.static(range(3)):
+                collision.translation[i_entity, i_b][i_d] = motion[i_d]
+
+
+@qd.kernel
+def gather_shell_bounds(vertices: V_ANNOTATION, collision: V_ANNOTATION):
+    for i_q, i_b in collision.vertices_bound:
+        i_v = collision.surface_indices[i_q]
+        bound = collision.vertices_bound[i_q, i_b]
+        for i_a in range(collision.neighbor_offsets[i_v], collision.neighbor_offsets[i_v + 1]):
+            i_e = collision.neighbor_edges[i_a]
+            bound = qd.min(bound, collision.edges_bound[i_e, i_b])
+            for i in qd.static(range(2)):
+                i_f = collision.edge_faces[i_e][i]
+                if i_f >= 0:
+                    bound = qd.min(bound, collision.faces_bound[i_f, i_b])
+        vertices.bound[i_v, i_b] = qd.min(vertices.bound[i_v, i_b], bound[0])
+        if bound[1] < 1e30:
+            qd.atomic_min(collision.translation_bound[vertices.entity_idx[i_v], i_b], bound[1])
 
 
 @qd.kernel
@@ -495,6 +549,7 @@ def find_shell_contacts(
             root = bvh.roots_idx[1]
         radius = options.contact_search_radius
         node, count = root, 0
+        bound = qd.Vector([1e30, 1e30])
         while node >= 0:
             box = bvh.nodes[i_b, node].bound
             is_overlap = (lower - radius <= box.max).all() and (upper + radius >= box.min).all()
@@ -536,10 +591,12 @@ def find_shell_contacts(
                             vertices.pos[ids[2], i_b],
                             vertices.pos[ids[3], i_b],
                         )
-                        weights = edge_weights(a, b, c, d)
+                        weights = qd.Vector.zero(gs.qd_float, 4)
                         if is_vertex:
                             bary = triangle_weights(a, b, c, d)
                             weights = qd.Vector([1.0, -bary[0], -bary[1], -bary[2]])
+                        else:
+                            weights = edge_weights(a, b, c, d)
                         separation = weights[0] * a + weights[1] * b + weights[2] * c + weights[3] * d
                         distance = separation.norm()
                         thickness = qd.cast(0.0, gs.qd_float)
@@ -547,13 +604,23 @@ def find_shell_contacts(
                             thickness += qd.abs(weights[i]) * vertices.radius[ids[i]]
                         if distance < radius:
                             if not is_fill:
-                                for i in qd.static(range(4)):
-                                    qd.atomic_min(vertices.bound[ids[i], i_b], 0.45 * qd.max(0.0, distance - thickness))
-                                    if vertices.entity_idx[ids[0]] != vertices.entity_idx[ids[2]]:
-                                        qd.atomic_min(
-                                            collision.translation_bound[vertices.entity_idx[ids[i]], i_b],
-                                            0.45 * qd.max(0.0, distance - thickness),
-                                        )
+                                clearance = options.contact_relaxation * qd.max(0.0, distance - thickness)
+                                bound[0] = qd.min(bound[0], clearance)
+                                # Bounds only decrease during the query, so a stale smaller value also permits skipping.
+                                if is_vertex:
+                                    if clearance < collision.faces_bound[candidate, i_b][0]:
+                                        qd.atomic_min(collision.faces_bound[candidate, i_b][0], clearance)
+                                else:
+                                    if clearance < collision.edges_bound[candidate, i_b][0]:
+                                        qd.atomic_min(collision.edges_bound[candidate, i_b][0], clearance)
+                                if vertices.entity_idx[ids[0]] != vertices.entity_idx[ids[2]]:
+                                    bound[1] = qd.min(bound[1], clearance)
+                                    if is_vertex:
+                                        if clearance < collision.faces_bound[candidate, i_b][1]:
+                                            qd.atomic_min(collision.faces_bound[candidate, i_b][1], clearance)
+                                    else:
+                                        if clearance < collision.edges_bound[candidate, i_b][1]:
+                                            qd.atomic_min(collision.edges_bound[candidate, i_b][1], clearance)
                             if is_vertex:
                                 is_eligible = feasible_face(
                                     candidate, i_b, a, -weights[1:], vertices, collision, is_unique=True
@@ -565,11 +632,14 @@ def find_shell_contacts(
                                 is_eligible = (
                                     (second - a).dot(first_edge) >= 0.0 and (b - second).dot(first_edge) >= 0.0
                                 ) or ((first - c).dot(second_edge) >= 0.0 and (d - first).dot(second_edge) >= 0.0)
-                                is_eligible = is_eligible and is_edge_contact_active(a, b, c, d)
+                                # Retain parallel candidates: their angle can change before the next search.
                             if is_eligible:
                                 if not is_fill:
+                                    flag = 1
+                                    if vertices.entity_idx[ids[0]] != vertices.entity_idx[ids[2]]:
+                                        flag = 2
                                     for i in qd.static(range(4)):
-                                        qd.atomic_or(collision.has_contact[vertices.entity_idx[ids[i]], i_b], 1)
+                                        qd.atomic_or(collision.contact_flags[vertices.entity_idx[ids[i]], i_b], flag)
                                 if qd.static(options.is_contact_diagnostics_enabled) and distance <= thickness:
                                     qd.atomic_or(errno[None], ErrorCode.VBD_CONTACT_PENETRATION)
                                 if is_fill:
@@ -581,3 +651,10 @@ def find_shell_contacts(
                                 count += 1
                 node = next_node(node, i_b, root, bvh)
         counts[i_q * bvh.n_batches + i_b] = count
+        if not is_fill:
+            if is_vertex:
+                collision.vertices_bound[i_q, i_b] = bound
+            else:
+                qd.atomic_min(collision.edges_bound[i_e, i_b][0], bound[0])
+                if bound[1] < 1e30:
+                    qd.atomic_min(collision.edges_bound[i_e, i_b][1], bound[1])

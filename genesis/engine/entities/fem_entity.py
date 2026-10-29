@@ -92,6 +92,7 @@ class FEMEntity(Entity):
         self._vface_start = vface_start  # offset for render faces
         self._step_global_added = None
         self.sample()
+        self._init_is_fixed = np.zeros(self.n_vertices, dtype=gs.np_bool)
 
         if isinstance(self.material, gs.materials.FEM.Cloth):
             # For cloth, elements are already surface triangles
@@ -154,9 +155,8 @@ class FEMEntity(Entity):
                 verts_idx_local, gs.tc_int, (len(envs_idx), -1), ("envs_idx", "verts_idx")
             )
 
-        # FIXME: This check is too expensive
-        # if not (0 <= verts_idx_local_ & verts_idx_local_ < self.n_vertices).all():
-        #     gs.raise_exception("Elements of `verts_idx_local' are out-of-range.")
+        if not self.is_built and ((verts_idx_local_ < 0) | (verts_idx_local_ >= self.n_vertices)).any():
+            gs.raise_exception("Vertex indices must be within the entity's vertex range.")
 
         return verts_idx_local_.contiguous()
 
@@ -913,6 +913,9 @@ class FEMEntity(Entity):
         """
         Set vertex constraints for specified vertices.
 
+        With Incremental Potential Contact (IPC), call before scene.build() to hold vertices at their initial positions
+        in every environment. These static constraints persist through scene.reset().
+
         Parameters
         ----------
             verts_idx_local : array_like
@@ -929,13 +932,19 @@ class FEMEntity(Entity):
             envs_idx : array_like, optional
                 List of environment indices to apply the constraints to. If None, applies to all environments.
         """
+        if isinstance(self.sim.coupler, IPCCoupler):
+            if self.is_built or envs_idx is not None:
+                gs.raise_exception("IPC vertex constraints must be set before scene.build() for every environment.")
+            if target_poss is not None or link is not None or is_soft_constraint:
+                gs.raise_exception("IPC vertex constraints hold vertices at their initial positions.")
+            indices = tensor_to_array(self._sanitize_verts_idx_local(verts_idx_local))
+            self._init_is_fixed[indices] = True
+            return
+
         if self._solver._use_implicit_solver and not self._solver._enable_vertex_constraints:
             gs.raise_exception(
                 "This feature is disabled. Please set 'enable_vertex_constraints=True' when using FEM implicit solver."
             )
-
-        if isinstance(self.sim.coupler, IPCCoupler):
-            gs.raise_exception("Vertex constraints are not supported by the IPC coupler.")
 
         if not self._solver._constraints_initialized:
             self._solver.init_constraints()
@@ -976,6 +985,8 @@ class FEMEntity(Entity):
 
     def update_constraint_targets(self, verts_idx_local, target_poss, envs_idx=None):
         """Update target positions for existing constraints."""
+        if isinstance(self.sim.coupler, IPCCoupler):
+            gs.raise_exception("IPC vertex constraints hold vertices at their initial positions.")
         if not self._solver._constraints_initialized:
             gs.logger.warning("Ignoring update_constraint_targets; constraints have not been initialized.")
             return
@@ -989,7 +1000,13 @@ class FEMEntity(Entity):
         self._solver._kernel_update_constraint_targets(verts_idx, target_poss, envs_idx)
 
     def remove_vertex_constraints(self, verts_idx_local=None, envs_idx=None):
-        """Remove constraints from specified vertices, or all if None."""
+        """Release selected vertices, or all if None. With Incremental Potential Contact (IPC), call before scene.build()."""
+        if isinstance(self.sim.coupler, IPCCoupler):
+            if self.is_built or envs_idx is not None:
+                gs.raise_exception("IPC vertex constraints must be removed before scene.build() for every environment.")
+            indices = tensor_to_array(self._sanitize_verts_idx_local(verts_idx_local))
+            self._init_is_fixed[indices] = False
+            return
         if not self._solver._constraints_initialized:
             gs.logger.warning("Ignoring remove_vertex_constraints; constraints have not been initialized.")
             return
@@ -1111,6 +1128,11 @@ class FEMEntity(Entity):
     def vgeoms(self):
         """The list of visual geoms (`DeformableVisGeom`) in the entity, one per morph sub-mesh."""
         return self._vgeoms
+
+    @property
+    def init_is_fixed(self):
+        """Initial fixed-vertex mask used by Incremental Potential Contact (IPC)."""
+        return self._init_is_fixed.copy()
 
     @property
     def n_elements(self):
