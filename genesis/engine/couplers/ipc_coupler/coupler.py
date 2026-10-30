@@ -112,7 +112,7 @@ class IPCCoupler(RBC):
         if not UIPC_AVAILABLE:
             raise ImportError(
                 "Python module 'uipc' is required by IPCCoupler but is not installed. Please install it via "
-                "`pip install pyuipc`."
+                "`python -m pip install -e '.[ipc]'` from the Genesis repository root."
             )
 
         self.sim = simulator
