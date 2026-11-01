@@ -307,6 +307,7 @@ def func_apply_contact_delta(particles: V_ANNOTATION, errno: qd.Tensor):
 
 @qd.func
 def func_accumulate_contact(i_b, indices, residual, gradients, weights, particles: V_ANNOTATION, errno: qd.Tensor):
+    multiplier = gs.qd_float(0.0)
     if residual < 0.0:
         denominator = gs.qd_float(0.0)
         for i_v in qd.static(range(indices.n)):
@@ -322,6 +323,82 @@ def func_accumulate_contact(i_b, indices, residual, gradients, weights, particle
                     qd.atomic_add(particles[i_p, i_b].dpos, delta)
         else:
             qd.atomic_or(errno[i_b], ErrorCode.INVALID_PBD_STATE)
+    return multiplier
+
+
+@qd.func
+def func_accumulate_rigid_contact(
+    i_b,
+    geom_idx,
+    indices,
+    residual,
+    gradients,
+    weights,
+    dyn_state: array_class.DynState,
+    dyn_info: array_class.DynInfo,
+    surface_info: array_class.RigidSurfaceInfo,
+    solver: V_ANNOTATION,
+):
+    """Project normal separation and Coulomb friction at a rigid contact's material coordinates."""
+    normal_multiplier = func_accumulate_contact(
+        i_b, indices, residual, gradients, weights, solver.particles, solver._errno
+    )
+    if normal_multiplier > 0.0:
+        normal = qd.Vector.zero(gs.qd_float, 3)
+        for slot in qd.static(range(indices.n)):
+            normal += gradients[:, slot]
+        if normal.norm_sqr() > 0.0:
+            normal = normal.normalized()
+            coordinates = qd.Vector.zero(gs.qd_float, indices.n)
+            point = qd.Vector.zero(gs.qd_float, 3)
+            previous_point = qd.Vector.zero(gs.qd_float, 3)
+            mu_s = gs.qd_float(0.0)
+            mu_k = gs.qd_float(0.0)
+            tangent_denominator = gs.qd_float(0.0)
+            for slot in qd.static(range(indices.n)):
+                i_p = indices[slot]
+                coordinate = gradients[:, slot].dot(normal)
+                coordinates[slot] = coordinate
+                point += coordinate * solver.particles[i_p, i_b].pos
+                previous_point += coordinate * solver.particles[i_p, i_b].ipos
+                mu_s += coordinate * solver.particles_info[i_p].mu_s
+                mu_k += coordinate * solver.particles_info[i_p].mu_k
+                tangent_denominator += weights[slot] * coordinate**2
+            mu_s = qd.max(mu_s, dyn_info.geoms.coup_friction[geom_idx])
+            mu_k = qd.max(mu_k, dyn_info.geoms.coup_friction[geom_idx])
+            geom_slot = surface_info.surface_geom_slots[geom_idx]
+            displacement = qd.Vector.zero(gs.qd_float, 3)
+            if geom_slot >= 0:
+                local_point = geom.qd_inv_transform_by_trans_quat(
+                    point, dyn_state.geoms.pos[geom_idx, i_b], dyn_state.geoms.quat[geom_idx, i_b]
+                )
+                displacement = point - geom.qd_transform_by_trans_quat(
+                    local_point, solver._previous_geoms_pos[geom_slot, i_b], solver._previous_geoms_quat[geom_slot, i_b]
+                )
+            else:
+                velocity = solver.scene.rigid_solver._func_vel_at_point(
+                    pos_world=point,
+                    link_idx=dyn_info.geoms.link_idx[geom_idx],
+                    i_b=i_b,
+                    links_state=dyn_state.links,
+                )
+                displacement = velocity * solver.substep_dt
+            relative = point - previous_point - displacement
+            tangent = relative - normal * relative.dot(normal)
+            length = tangent.norm()
+            if qd.math.isnan(tangent).any() or qd.math.isinf(tangent).any():
+                qd.atomic_or(solver._errno[i_b], ErrorCode.INVALID_PBD_STATE)
+            if length > 0.0 and tangent_denominator > 0.0:
+                tangent_multiplier = length / tangent_denominator
+                if tangent_multiplier > mu_s * normal_multiplier:
+                    tangent_multiplier = qd.min(tangent_multiplier, mu_k * normal_multiplier)
+                correction = -tangent_multiplier / length * tangent
+                for slot in qd.static(range(indices.n)):
+                    delta = weights[slot] * coordinates[slot] * correction
+                    if qd.math.isnan(delta).any() or qd.math.isinf(delta).any():
+                        qd.atomic_or(solver._errno[i_b], ErrorCode.INVALID_PBD_STATE)
+                    else:
+                        qd.atomic_add(solver.particles[indices[slot], i_b].dpos, delta)
 
 
 @qd.func
@@ -428,14 +505,17 @@ def func_accumulate_vertex_contacts(
                     if qd.math.isnan(residual) or qd.math.isinf(residual) or qd.math.isnan(normal).any():
                         qd.atomic_or(errno[i_b], ErrorCode.INVALID_CONTACT_NAN)
                     else:
-                        func_accumulate_contact(
+                        func_accumulate_rigid_contact(
                             i_b,
+                            i_g,
                             qd.Vector([i_p]),
                             residual,
                             qd.Matrix.cols([normal]),
                             qd.Vector([1.0]),
-                            particles,
-                            errno,
+                            dyn_state,
+                            dyn_info,
+                            surface_info,
+                            solver,
                         )
 
 
@@ -614,8 +694,17 @@ def func_accumulate_face_contacts(
                         if not is_valid:
                             qd.atomic_or(solver._errno[i_b], ErrorCode.INVALID_PBD_STATE)
                         elif is_contact and weights.sum() > 0.0:
-                            func_accumulate_contact(
-                                i_b, face, residual, gradients[:, 1:4], weights, solver.particles, solver._errno
+                            func_accumulate_rigid_contact(
+                                i_b,
+                                geom_idx,
+                                face,
+                                residual,
+                                gradients[:, 1:4],
+                                weights,
+                                dyn_state,
+                                dyn_info,
+                                surface_info,
+                                solver,
                             )
         solver._surface_query_counts[i_v, i_b] = counts
 
@@ -765,6 +854,8 @@ def func_edge_contacts(
                                 if not is_owner:
                                     continue
                                 rigid_normal = qd.Vector.zero(gs.qd_float, 3)
+                                is_planar = True
+                                n_adjacent = 0
                                 for adjacent_slot in range(
                                     solver._rigid_edge_adjacency.edge_offsets[i_re],
                                     solver._rigid_edge_adjacency.edge_offsets[i_re + 1],
@@ -778,7 +869,13 @@ def func_edge_contacts(
                                         adjacent_triangle[:, 2] - adjacent_triangle[:, 0]
                                     )
                                     if normal.norm_sqr() > 0.0:
+                                        if n_adjacent > 0:
+                                            error = normal.cross(rigid_normal).norm_sqr()
+                                            scale = normal.norm_sqr() * rigid_normal.norm_sqr()
+                                            is_planar = is_planar and normal.dot(rigid_normal) > 0.0
+                                            is_planar = is_planar and error <= (32.0 * gs.EPS) ** 2 * scale
                                         rigid_normal += normal.normalized()
+                                        n_adjacent += 1
                                     if adjacent_idx < i_rf:
                                         is_hit = is_near
                                         if not is_near:
@@ -789,7 +886,9 @@ def func_edge_contacts(
                                             is_owner = False
                                 if not is_owner:
                                     continue
-                                residual, gradients, is_valid = edge_edge_contact(edge, rigid_edge, rigid_normal)
+                                residual, gradients, is_valid = edge_edge_contact(
+                                    edge, rigid_edge, rigid_normal, is_planar and n_adjacent > 1
+                                )
                                 if not is_valid or qd.math.isnan(residual) or qd.math.isinf(residual):
                                     qd.atomic_or(solver._errno[i_b], ErrorCode.INVALID_PBD_STATE)
                                 else:
@@ -814,14 +913,17 @@ def func_edge_contacts(
                                                 gradients[:, slot], geom_quat
                                             )
                                         if weights.sum() > 0.0:
-                                            func_accumulate_contact(
+                                            func_accumulate_rigid_contact(
                                                 i_b,
+                                                geom_idx,
                                                 indices,
                                                 residual,
                                                 gradients,
                                                 weights,
-                                                solver.particles,
-                                                solver._errno,
+                                                dyn_state,
+                                                dyn_info,
+                                                surface_info,
+                                                solver,
                                             )
                                             # Count separated candidates in the detection band too, keeping averaging
                                             # stable as individual constraints enter or leave the target gap.
@@ -1181,6 +1283,8 @@ class PBDUnifiedSolver(Solver):
     before a simultaneous update. All unique elastic-rigid edge pairs contribute inverse-mass corrections from the
     same positions, averaged by each vertex's incident edge-contact count before updating positions.
     Surface contacts use elastic boundary faces and rigid collision-mesh triangles.
+    Coulomb friction bounds tangential corrections by the normal multiplier. Static and kinetic coefficients each
+    combine the elastic material coefficient with the rigid coupling coefficient by maximum.
     Material compliance regularizes each elastic projection denominator; effective stiffness also depends on the
     iteration count and time step. Extrapolation accelerates recovery, with history initialized after motion prediction.
     Fully free entities receive a final velocity correction preserving linear and angular momentum after external

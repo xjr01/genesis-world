@@ -132,6 +132,8 @@ def test_unified_elastic_projection(n_envs, contact_distances, show_viewer, asse
                     elements=((0, 1, 2, 3),),
                 ),
                 material=gs.materials.PBD.Elastic(
+                    static_friction=0.0,
+                    kinetic_friction=0.0,
                     volume_compliance=volume_compliance,
                     stretch_relaxation=stretch_relaxation,
                     volume_relaxation=volume_relaxation,
@@ -150,6 +152,8 @@ def test_unified_elastic_projection(n_envs, contact_distances, show_viewer, asse
             file=cloth_path,
         ),
         material=gs.materials.PBD.Cloth(
+            static_friction=0.0,
+            kinetic_friction=0.0,
             stretch_compliance=0.0,
             bending_compliance=0.0,
             stretch_relaxation=0.1,
@@ -164,6 +168,8 @@ def test_unified_elastic_projection(n_envs, contact_distances, show_viewer, asse
             elements=((0, 1, 2, 3),),
         ),
         material=gs.materials.PBD.Elastic(
+            static_friction=0.0,
+            kinetic_friction=0.0,
             stretch_relaxation=0.0,
             volume_relaxation=0.5,
         ),
@@ -174,6 +180,7 @@ def test_unified_elastic_projection(n_envs, contact_distances, show_viewer, asse
             size=(0.3, 0.3, 0.015),
         ),
         material=gs.materials.Rigid(
+            coup_friction=0.0,
             is_coup_reaction_enabled=False,
         ),
     )
@@ -199,6 +206,8 @@ def test_unified_elastic_projection(n_envs, contact_distances, show_viewer, asse
                     elements=elements,
                 ),
                 material=gs.materials.PBD.Elastic(
+                    static_friction=0.0,
+                    kinetic_friction=0.0,
                     stretch_relaxation=0.0,
                     volume_relaxation=0.0,
                 ),
@@ -211,6 +220,7 @@ def test_unified_elastic_projection(n_envs, contact_distances, show_viewer, asse
                     file=probe_path,
                 ),
                 material=gs.materials.Rigid(
+                    coup_friction=0.0,
                     is_coup_reaction_enabled=False,
                 ),
             )
@@ -221,6 +231,7 @@ def test_unified_elastic_projection(n_envs, contact_distances, show_viewer, asse
             size=(0.5, 0.5, 0.007),
         ),
         material=gs.materials.Rigid(
+            coup_friction=0.0,
             is_coup_reaction_enabled=False,
         ),
     )
@@ -231,6 +242,8 @@ def test_unified_elastic_projection(n_envs, contact_distances, show_viewer, asse
             elements=((0, 2, 1, 3),),
         ),
         material=gs.materials.PBD.Elastic(
+            static_friction=0.0,
+            kinetic_friction=0.0,
             stretch_relaxation=0.0,
             volume_relaxation=0.0,
         ),
@@ -251,6 +264,7 @@ def test_unified_elastic_projection(n_envs, contact_distances, show_viewer, asse
                     convexify=False,
                 ),
                 material=gs.materials.Rigid(
+                    coup_friction=0.0,
                     is_coup_reaction_enabled=False,
                 ),
             )
@@ -272,6 +286,7 @@ def test_unified_elastic_projection(n_envs, contact_distances, show_viewer, asse
                         convexify=False,
                     ),
                     material=gs.materials.Rigid(
+                        coup_friction=0.0,
                         is_coup_reaction_enabled=False,
                     ),
                 )
@@ -940,6 +955,7 @@ def test_one_way_rigid_surface_collision(n_envs, is_regular_grid, options_type, 
     )
     if isinstance(pbd_options, gs.options.PBDUnifiedOptions):
         pbd_options.max_solver_iterations = 1
+        pbd_options.upper_bound = (3.0, 0.5, 1.0)
         pbd_options.bvh_rebuild_check_interval = 1
         pbd_options.bvh_rebuild_threshold = 1.0
     scene = gs.Scene(
@@ -949,8 +965,8 @@ def test_one_way_rigid_surface_collision(n_envs, is_regular_grid, options_type, 
         ),
         pbd_options=pbd_options,
         viewer_options=gs.options.ViewerOptions(
-            camera_pos=(0.8, -1.0, 1.0),
-            camera_lookat=(0.0, 0.0, 0.5),
+            camera_pos=(3.5, -3.0, 2.5),
+            camera_lookat=(1.0, 0.0, 0.5),
         ),
         show_viewer=show_viewer,
     )
@@ -982,6 +998,7 @@ def test_one_way_rigid_surface_collision(n_envs, is_regular_grid, options_type, 
     triangles_initial = particles_initial[triangles_idx]
     vverts_rest_offset = elastic.vmesh.verts[:, None] - particles_initial[None]
     vverts_particles_idx = np.linalg.norm(vverts_rest_offset, axis=-1).argmin(axis=1)
+    vverts_idx = slice(elastic.vvert_start, elastic.vvert_start + elastic.n_vverts)
     contact_triangles = []
     contact_weights = []
     contact_positions = []
@@ -1041,6 +1058,44 @@ def test_one_way_rigid_surface_collision(n_envs, is_regular_grid, options_type, 
         box_dist = np.abs(particles_initial - candidates[candidate_idx]) - half_size
         assert (np.linalg.norm(np.maximum(box_dist, 0.0), axis=-1) > scene.pbd_options.particle_size / 2).all()
 
+    friction_entities = []
+    friction_rigids = []
+    if isinstance(pbd_options, gs.options.PBDUnifiedOptions):
+        for i, (mu_particle, mu_geom) in enumerate(((0.0, 0.0), (0.2, 0.0), (0.2, 1.0))):
+            y = -0.3 + 0.3 * i
+            friction_rigids.append(
+                scene.add_entity(
+                    morph=gs.morphs.Box(
+                        pos=(2.04, y + 0.04, 0.79),
+                        size=(0.16, 0.16, 0.02),
+                    ),
+                    material=gs.materials.Rigid(
+                        coup_friction=mu_geom,
+                        is_coup_reaction_enabled=False,
+                    ),
+                )
+            )
+            friction_entities.append(
+                scene.add_entity(
+                    morph=gs.morphs.TetrahedralMesh(
+                        pos=(2.0, y, 0.8),
+                        vertices=(
+                            (-0.01, -0.01, 0.0),
+                            (0.01, -0.01, 0.0),
+                            (-0.01, 0.01, 0.0),
+                            (0.0, 0.0, 0.04),
+                        ),
+                        elements=((0, 1, 2, 3),),
+                    ),
+                    material=gs.materials.PBD.Elastic(
+                        static_friction=mu_particle,
+                        kinetic_friction=mu_particle,
+                        stretch_relaxation=0.0,
+                        volume_relaxation=0.0,
+                    ),
+                )
+            )
+
     scene.build(n_envs=n_envs)
     for rigid, contact_pos in zip(rigid_entities, contact_positions):
         if isinstance(pbd_options, gs.options.PBDUnifiedOptions):
@@ -1052,7 +1107,7 @@ def test_one_way_rigid_surface_collision(n_envs, is_regular_grid, options_type, 
     scene.step()
     particles_pos = tensor_to_array(elastic.get_particles_pos()).reshape((-1, elastic.n_particles, 3))
     vverts_pos, _, vfaces = scene.pbd_solver.get_state_render()
-    vverts_pos = qd_to_numpy(vverts_pos, transpose=True)
+    vverts_pos = qd_to_numpy(vverts_pos, col_mask=vverts_idx, transpose=True)
     if isinstance(pbd_options, gs.options.PBDOptions):
         render_mesh = trimesh.Trimesh(vertices=vverts_pos[-1], faces=qd_to_numpy(vfaces, transpose=True), process=False)
         _, contact_distances, _ = trimesh.proximity.closest_point(render_mesh, np.stack(contact_positions))
@@ -1084,7 +1139,7 @@ def test_one_way_rigid_surface_collision(n_envs, is_regular_grid, options_type, 
     particles_pos = tensor_to_array(elastic.get_particles_pos()).reshape((-1, elastic.n_particles, 3))
     assert_allclose(particles_pos, particles_initial[None], atol=1e-6)
     vverts_pos, _, _ = scene.pbd_solver.get_state_render()
-    assert_equal(qd_to_numpy(vverts_pos, transpose=True), particles_pos[:, vverts_particles_idx])
+    assert_equal(qd_to_numpy(vverts_pos, col_mask=vverts_idx, transpose=True), particles_pos[:, vverts_particles_idx])
 
     scene.reset()
     contact_vertices_idx = []
@@ -1125,6 +1180,31 @@ def test_one_way_rigid_surface_collision(n_envs, is_regular_grid, options_type, 
         assert_allclose(particles_pos[-1], positions, atol=1e-7)
         if n_envs:
             assert_allclose(particles_pos[0], particles_initial, atol=1e-7)
+        for velocity in (0.0, 0.02):
+            scene.reset()
+            for entity, rigid in zip(friction_entities, friction_rigids):
+                entity.set_particles_vel((0.05, 0.0, -0.1))
+                rigid.set_dofs_velocity([velocity, 0.0, 0.0, 0.0, 0.0, 0.0])
+            scene.step()
+            for entity, expected in zip(friction_entities, (0.05, 0.03, velocity)):
+                velocities = entity.get_particles_vel()
+                assert_allclose(velocities[..., :3, 0], expected, atol=2e-5)
+                assert_allclose(velocities[..., :3, 2], 0.0, atol=2e-5)
+
+        scene.reset()
+        entity = friction_entities[-1]
+        rigid = friction_rigids[-1]
+        positions = tensor_to_array(entity.get_particles_pos())
+        rigid_pos = tensor_to_array(rigid.get_pos())
+        rigid_quat = tensor_to_array(rigid.get_quat())
+        entity.set_particles_vel((0.0, 0.0, -0.1))
+        rigid.set_dofs_velocity([0.0, 0.0, 0.0, 0.0, 0.0, 0.2])
+        scene.step()
+        local = gs.utils.geom.inv_transform_by_trans_quat(positions, rigid_pos[..., None, :], rigid_quat[..., None, :])
+        expected = gs.utils.geom.transform_by_trans_quat(
+            local, tensor_to_array(rigid.get_pos())[..., None, :], tensor_to_array(rigid.get_quat())[..., None, :]
+        )
+        assert_allclose(entity.get_particles_pos()[..., :3, :2], expected[..., :3, :2], atol=2e-6)
 
 
 @pytest.mark.required

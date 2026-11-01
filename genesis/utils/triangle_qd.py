@@ -231,7 +231,7 @@ def triangle_crossing_edges(vertices0, vertices1):
 
 
 @qd.func
-def edge_edge_contact(vertices0, vertices1, reference_normal):
+def edge_edge_contact(vertices0, vertices1, reference_normal, is_planar=False):
     """Return finite-edge signed distance and endpoint gradients, oriented toward the reference normal."""
     edge0 = vertices0[:, 1] - vertices0[:, 0]
     edge1 = vertices1[:, 1] - vertices1[:, 0]
@@ -259,7 +259,10 @@ def edge_edge_contact(vertices0, vertices1, reference_normal):
         separation = offset + parameter0 * edge0 - parameter1 * edge1
         distance = separation.norm()
         normal = edge0.cross(edge1)
-        if distance > 32.0 * gs.EPS * qd.sqrt(qd.max(length0_sqr, length1_sqr)):
+        if is_planar:
+            # An internal triangulation edge inherits its supporting plane's normal during sliding.
+            normal = reference_normal
+        elif distance > 32.0 * gs.EPS * qd.sqrt(qd.max(length0_sqr, length1_sqr)):
             normal = separation / distance
         elif denominator > gs.EPS**2 * length0_sqr * length1_sqr:
             normal /= qd.sqrt(denominator)
