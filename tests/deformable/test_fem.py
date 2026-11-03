@@ -641,3 +641,52 @@ def test_implicit_sap_coupler_hard_constraint_and_collision(show_viewer):
     assert_allclose(com_pos_z_f - com_pos_z_0, com_pos_delta, tol=0.05)
     sphere_center = sphere.get_state().pos[..., sphere_center_idx, :]
     assert_allclose(sphere_center, sphere_target_poss, tol=1e-8)
+
+
+@pytest.mark.required
+@pytest.mark.precision("64")
+@pytest.mark.parametrize("n_envs", [0, 2])
+def test_fem_uniform_translation(n_envs, show_viewer):
+    dt = 0.001
+    velocity = (0.2, 0.0, 0.0)
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=dt,
+            substeps_local=4,
+            gravity=(0.0, 0.0, 0.0),
+        ),
+        fem_options=gs.options.FEMOptions(
+            damping=0.0,
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(0.3, -0.5, 1.4),
+            camera_lookat=(0.0, 0.0, 1.0),
+        ),
+        show_viewer=show_viewer,
+    )
+    entity = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(0.0, 0.0, 1.0),
+            size=(0.1, 0.1, 0.1),
+        ),
+        material=gs.materials.FEM.Elastic(
+            E=1000.0,
+            nu=0.25,
+            model="linear",
+        ),
+    )
+    scene.build(n_envs=n_envs)
+    initial = tensor_to_array(entity.get_state().pos).copy()
+    entity.set_velocity(velocity)
+    for step in range(1, 3):
+        scene.step()
+        state = entity.get_state()
+        assert_allclose(state.vel, np.broadcast_to(velocity, initial.shape), atol=1e-10, rtol=0.0)
+        assert_allclose(state.pos, initial + np.array(velocity) * dt * step, atol=1e-10, rtol=0.0)
+
+    target = initial + (0.03, 0.02, 0.1)
+    entity.set_position(target)
+    scene.step()
+    state = entity.get_state()
+    assert_allclose(state.vel, np.broadcast_to(velocity, initial.shape), atol=1e-10, rtol=0.0)
+    assert_allclose(state.pos, target + np.array(velocity) * dt, atol=1e-10, rtol=0.0)

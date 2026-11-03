@@ -1,22 +1,24 @@
 from functools import wraps
 from pathlib import Path
 
-import igl
 import numpy as np
-import quadrants as qd
 import torch
 import trimesh
+
+import igl
+
+import quadrants as qd
 
 import genesis as gs
 import genesis.utils.element as eu
 import genesis.utils.geom as gu
 import genesis.utils.mesh as mu
+from genesis.engine.couplers import IPCCoupler, SAPCoupler
 from genesis.engine.entities.rigid_entity import RigidLink
-from genesis.engine.couplers import SAPCoupler
 from genesis.engine.states.cache import QueriedStates
 from genesis.engine.states.entities import FEMEntityState
 from genesis.repr_base import RBC
-from genesis.utils.misc import to_gs_tensor, tensor_to_array, broadcast_tensor
+from genesis.utils.misc import broadcast_tensor, tensor_to_array, to_gs_tensor
 
 from .base_entity import Entity
 
@@ -720,7 +722,6 @@ class FEMEntity(Entity):
             for key in self._tgt_keys:
                 self._tgt_buffer[key].append(self._tgt[key])
 
-        # set_pos followed by set_vel, because set_pos resets velocity.
         if self._tgt["pos"] is not None:
             self._tgt["pos"].assert_contiguous()
             self._tgt["pos"].assert_sceneless()
@@ -739,6 +740,9 @@ class FEMEntity(Entity):
             self._tgt["actu"].assert_contiguous()
             self._tgt["actu"].assert_sceneless()
             self.set_actu(self._sim.cur_substep_local, self._tgt["actu"])
+
+        if isinstance(self._sim.coupler, IPCCoupler):
+            self._sim.coupler.set_fem_state(self, self._tgt["pos"], self._tgt["vel"])
 
         for key in self._tgt_keys:
             self._tgt[key] = None

@@ -196,7 +196,8 @@ class IPCCouplerOptions(BaseCouplerOptions):
     Newton Solver Options
     ---------------------
     newton_max_iterations : int, optional
-        Maximum iterations for Newton solver. Defaults to None (use libuipc default: 1024).
+        Maximum iterations for Newton solver. Smaller budgets reduce cost but can leave larger residual errors.
+        With is_strict=False, an exhausted budget accepts the current iterate. None uses the native default: 1024.
     newton_min_iterations : int, optional
         Minimum iterations for Newton solver. Defaults to None (use libuipc default: 1).
     newton_tolerance : float, optional
@@ -211,6 +212,14 @@ class IPCCouplerOptions(BaseCouplerOptions):
         Whether to enable semi-implicit Newton solver mode. Defaults to None (use libuipc default: False).
     newton_semi_implicit_beta_tolerance : float, optional
         Beta tolerance for semi-implicit Newton solver. Defaults to None (use libuipc default: 1e-3).
+
+    is_acceleration_enabled : bool, optional
+        Enable approximate bending curvature and the reduced-cost friction projection together. This reduces work but
+        can require more Newton iterations for difficult deformations. Defaults to False, using both original
+        paths. Available with standard Incremental Potential Contact (IPC).
+    is_strict : bool, optional
+        Fail when a Newton or line-search budget is exhausted. False permits approximate accepted steps, trading
+        accuracy for bounded work. None retains the native default.
 
     Line Search Options
     -------------------
@@ -301,6 +310,9 @@ class IPCCouplerOptions(BaseCouplerOptions):
     newton_translation_tolerance: PositiveFloat | None = None
     newton_semi_implicit_enable: StrictBool | None = None
     newton_semi_implicit_beta_tolerance: PositiveFloat | None = None
+
+    is_acceleration_enabled: StrictBool = False
+    is_strict: StrictBool | None = None
 
     # Line search options (None = use libuipc default)
     n_linesearch_iterations: PositiveInt | None = None

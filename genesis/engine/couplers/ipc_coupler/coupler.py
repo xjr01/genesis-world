@@ -32,7 +32,6 @@ except ImportError:
 
 if TYPE_CHECKING or UIPC_AVAILABLE:
     import polyscope as ps
-    from uipc.backend import SceneVisitor
     from uipc.constitution import (
         AffineBodyConstitution,
         AffineBodyPrismaticJoint,
@@ -45,7 +44,15 @@ if TYPE_CHECKING or UIPC_AVAILABLE:
         StableNeoHookean,
         StrainLimitingBaraffWitkinShell,
     )
-    from uipc.core import Engine, World, Scene, AffineBodyStateAccessorFeature, ContactElement, SubsceneElement
+    from uipc.core import (
+        AffineBodyStateAccessorFeature,
+        ContactElement,
+        Engine,
+        FiniteElementStateAccessorFeature,
+        Scene,
+        SubsceneElement,
+        World,
+    )
     from uipc.geometry import GeometrySlot, SimplicialComplex, SimplicialComplexSlot
     from uipc.gui import SceneGUI
 
@@ -56,7 +63,6 @@ if TYPE_CHECKING or UIPC_AVAILABLE:
         default_coup_type,
         find_target_link_for_fixed_merge,
         has_articulation_dofs,
-        read_ipc_geometry_metadata,
         update_coupling_forces,
     )
 
@@ -122,12 +128,17 @@ class IPCCoupler(RBC):
         self.rigid_solver: "RigidSolver" = self.sim.rigid_solver
         self.fem_solver: "FEMSolver" = self.sim.fem_solver
 
-        self._constraint_strength_translation_scaled = self.options.constraint_strength_translation / self.sim.dt**2
-        self._constraint_strength_rotation_scaled = self.options.constraint_strength_rotation / self.sim.dt**2
+        substep_dt = self.sim.dt / self.sim.substeps
+        # Native constraint energies are mass-weighted; recover forces using the native substep duration.
+        self._constraint_strength_translation_scaled = self.options.constraint_strength_translation / substep_dt**2
+        self._constraint_strength_rotation_scaled = self.options.constraint_strength_rotation / substep_dt**2
 
         # ==== IPC System Infrastructure ====
         self._ipc_engine: Engine | None = None
         self._ipc_world: World | None = None
+        self._fem_state_feature: FiniteElementStateAccessorFeature | None = None
+        self._fem_velocity_state: SimplicialComplex | None = None
+        self._fem_slots_by_entity: dict["FEMEntity", list[SimplicialComplexSlot]] = {}
         self._ipc_scene = Scene(build_ipc_scene_config(self.options, self.sim.options))
         self._ipc_subscenes: list[SubsceneElement] = []
         self._ipc_constitution_tabular = self._ipc_scene.constitution_tabular()
@@ -362,7 +373,8 @@ class IPCCoupler(RBC):
                 meta_attrs.create("env_idx", str(env_idx))
 
                 # ---- Create IPC object and geometry slot ----
-                fem_obj.geometries().create(mesh)
+                slot, _ = fem_obj.geometries().create(mesh)
+                self._fem_slots_by_entity.setdefault(entity, []).append(slot)
 
     def _add_rigid_geoms_to_ipc(self) -> None:
         """Add rigid geoms to the IPC scene as ABD objects, merging geoms by link."""
@@ -710,6 +722,18 @@ class IPCCoupler(RBC):
         assert gs.logger is not None
         assert self._ipc_world is not None
 
+        if self.fem_solver.is_active:
+            self._fem_state_feature = cast(
+                FiniteElementStateAccessorFeature, self._ipc_world.features().find(FiniteElementStateAccessorFeature)
+            )
+            if self._fem_state_feature is None:
+                gs.raise_exception("Native finite-element state access is required for IPC position and velocity sync.")
+            # The accessor copies only attributes present in this host buffer; World.retrieve supplies positions.
+            self._fem_velocity_state = self._fem_state_feature.create_geometry()
+            slot = self._fem_slots_by_entity[self.fem_solver.entities[0]][0]
+            scalar = np.zeros(3, dtype=slot.geometry().positions().view().dtype)
+            self._fem_velocity_state.vertices().create(uipc.builtin.velocity, scalar)
+
         # No ABD bodies, feature not needed
         abd_links = list(self._abd_slots_by_link.keys())
         n_abd_links = len(abd_links)
@@ -812,7 +836,7 @@ class IPCCoupler(RBC):
         self._ipc_world.retrieve()
 
         # Step 4: Retrieve states
-        self._retrieve_fem_states()
+        self._retrieve_fem_states(f + 1)
         self._retrieve_rigid_states()
 
         # Step 5: Post-advance processing (per entity type)
@@ -1003,42 +1027,41 @@ class IPCCoupler(RBC):
                 velocity=None, dofs_idx=slice(entity.dof_start, entity.dof_start + 6), skip_forward=True
             )
 
-    def _retrieve_fem_states(self):
-        # IPC world advance/retrieve is handled at Scene level
-        # This method handles both volumetric FEM (3D) and cloth (2D) post-processing
+    def set_fem_state(self, entity, positions=None, velocities=None):
+        """Apply explicit finite-element position and velocity targets to Incremental Potential Contact (IPC)."""
+        if positions is None and velocities is None:
+            return
+        assert self._fem_state_feature is not None and self._fem_velocity_state is not None
+        if positions is not None:
+            positions = tensor_to_array(positions)
+        if velocities is not None:
+            velocities = tensor_to_array(velocities)
+        scalar = np.zeros(3, dtype=self._fem_velocity_state.vertices().find(uipc.builtin.velocity).view().dtype)
+        for env_idx, slot in enumerate(self._fem_slots_by_entity[entity]):
+            offset = int(slot.geometry().meta().find(uipc.builtin.backend_fem_vertex_offset).view()[0])
+            # Missing attributes preserve the corresponding native field.
+            state = self._fem_state_feature.create_geometry(offset, entity.n_vertices)
+            if positions is not None:
+                uipc.view(state.vertices().create(uipc.builtin.position, scalar))[..., 0] = positions[env_idx]
+            if velocities is not None:
+                velocity = state.vertices().create(uipc.builtin.velocity, scalar)
+                uipc.view(velocity)[..., 0] = velocities[env_idx]
+            self._fem_state_feature.copy_from(state)
 
+    def _retrieve_fem_states(self, f):
+        """Synchronize retrieved positions and native velocities into the completed Genesis substep."""
         if not self.fem_solver.is_active:
             return
-
-        # Gather FEM states (both volumetric and cloth) using metadata filtering
-        visitor = SceneVisitor(self._ipc_scene)
-
-        # Collect FEM and cloth geometries using metadata
-        fem_positions_by_entity: dict["FEMEntity", list[np.ndarray]] = {
-            entity: [np.array([]) for _ in range(self.sim._B)] for entity in self.fem_solver.entities
-        }
-        for fem_geom_slot in visitor.geometries():
-            if not isinstance(fem_geom_slot, SimplicialComplexSlot):
-                continue
-
-            fem_geom = fem_geom_slot.geometry()
-            if fem_geom.dim() not in (2, 3):
-                continue
-            meta = read_ipc_geometry_metadata(fem_geom)
-            if meta is None:
-                continue
-            solver_type, env_idx, i_e = meta
-            if solver_type not in ("fem", "cloth"):
-                continue
-
-            entity = cast("FEMEntity", self.fem_solver.entities[i_e])
-            (transformed_geom,) = uipc.geometry.apply_transform(fem_geom)
-            fem_positions_by_entity[entity][env_idx] = transformed_geom.positions().view().reshape(-1, 3)
-
-        # Update FEM entities using filtered geometries
-        for entity, geom_positions in fem_positions_by_entity.items():
-            geom_positions = np.stack(geom_positions, axis=0, dtype=gs.np_float)
-            entity.set_pos(0, geom_positions)
+        assert self._fem_state_feature is not None and self._fem_velocity_state is not None
+        self._fem_state_feature.copy_to(self._fem_velocity_state)
+        velocities = self._fem_velocity_state.vertices().find(uipc.builtin.velocity).view()[..., 0]
+        for entity, slots in self._fem_slots_by_entity.items():
+            positions = np.stack([slot.geometry().positions().view()[..., 0] for slot in slots], dtype=gs.np_float)
+            offsets = [
+                int(slot.geometry().meta().find(uipc.builtin.backend_fem_vertex_offset).view()[0]) for slot in slots
+            ]
+            entity.set_pos(f, positions)
+            entity.set_vel(f, np.stack([velocities[o : o + entity.n_vertices] for o in offsets], dtype=gs.np_float))
 
     def _retrieve_rigid_states(self):
         """

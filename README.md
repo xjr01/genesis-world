@@ -159,6 +159,9 @@ The URL must identify xw-c/libuipc, with requested_revision equal to main.
 The installer also records the resolved commit for provenance; that record does not make the declared branch dependency
 a fixed-commit dependency. All three development checkouts use ipc-optimized.
 
+`IPCCouplerOptions(is_acceleration_enabled=True)` enables both bending and friction pseudo approximations (default: False).
+FEM position targets preserve velocity; each native step uses `SimOptions.dt / SimOptions.substeps`.
+
 Quadrants is bundled with Genesis automatically; no extra install. The standalone wheel (`pip install quadrants`) is documented at [Quadrants](https://github.com/Genesis-Embodied-AI/quadrants) for users who want the compiler outside Genesis.
 
 ### Using uv

@@ -828,7 +828,8 @@ def test_single_joint(n_envs, coup_type, joint_type, fixed, show_viewer):
 @pytest.mark.required
 @pytest.mark.parametrize("n_envs", [0, 2])
 @pytest.mark.parametrize("constraint_strength", [1, 100])
-def test_apply_forces_base_link(n_envs, constraint_strength, show_viewer):
+@pytest.mark.parametrize("substeps", [1, 2])
+def test_apply_forces_base_link(n_envs, constraint_strength, substeps, show_viewer):
     DT = 0.002
     FREQ = 2.0
     SCALE = 0.1
@@ -838,6 +839,7 @@ def test_apply_forces_base_link(n_envs, constraint_strength, show_viewer):
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
             dt=DT,
+            substeps=substeps,
             gravity=GRAVITY,
         ),
         coupler_options=gs.options.IPCCouplerOptions(

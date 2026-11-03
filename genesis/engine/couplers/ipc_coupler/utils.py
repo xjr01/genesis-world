@@ -9,10 +9,11 @@ from typing import TYPE_CHECKING
 import numba as nb
 import numpy as np
 
+import uipc
+from uipc.core import Scene
+
 import genesis as gs
 import genesis.utils.geom as gu
-
-from uipc.core import Scene
 
 if TYPE_CHECKING:
     from genesis.engine.entities import RigidEntity
@@ -114,7 +115,8 @@ def build_ipc_scene_config(options, sim_options):
     config = Scene.default_config()
 
     # Basic simulation parameters (derived from SimOptions)
-    config["dt"] = sim_options.dt
+    # Simulator invokes the coupler once per substep.
+    config["dt"] = sim_options.dt / sim_options.substeps
     gravity = sim_options.gravity
     config["gravity"] = [[float(e)] for e in gravity]
 
@@ -127,6 +129,18 @@ def build_ipc_scene_config(options, sim_options):
     _set_if_not_none(config, ["newton", "transrate_tol"], options.newton_translation_tolerance)
     _set_if_not_none(config, ["newton", "semi_implicit", "enable"], options.newton_semi_implicit_enable)
     _set_if_not_none(config, ["newton", "semi_implicit", "beta_tol"], options.newton_semi_implicit_beta_tolerance)
+
+    if options.is_acceleration_enabled:
+        build_info = uipc.build_info()
+        if not (build_info.get("has_bending_pseudo", False) and build_info.get("has_ipc_friction_pseudo", False)):
+            gs.raise_exception(
+                "The native package does not support is_acceleration_enabled. Build a compatible package."
+            )
+    if options.is_acceleration_enabled or "pseudo" in config["fem"].get("bending", {}):
+        _set_if_not_none(config, ["fem", "bending", "pseudo"], options.is_acceleration_enabled)
+    if options.is_acceleration_enabled or "pseudo" in config["contact"]["friction"]:
+        _set_if_not_none(config, ["contact", "friction", "pseudo"], options.is_acceleration_enabled)
+    _set_if_not_none(config, ["extras", "strict_mode", "enable"], options.is_strict)
 
     # Line search options
     _set_if_not_none(config, ["line_search", "max_iter"], options.n_linesearch_iterations)
@@ -142,6 +156,9 @@ def build_ipc_scene_config(options, sim_options):
     _set_if_not_none(config, ["contact", "friction", "enable"], options.contact_friction_enable)
     _set_if_not_none(config, ["contact", "eps_velocity"], options.contact_eps_velocity)
     _set_if_not_none(config, ["contact", "constitution"], options.contact_constitution)
+
+    if options.is_acceleration_enabled and config["contact"]["constitution"] != "ipc":
+        gs.raise_exception("is_acceleration_enabled requires contact_constitution=ipc.")
 
     # Collision detection options
     _set_if_not_none(config, ["collision_detection", "method"], options.collision_detection_method)
@@ -174,33 +191,6 @@ def _set_if_not_none(config, keys, value):
     for key in keys[:-1]:
         d = d[key]
     d[keys[-1]] = value
-
-
-def read_ipc_geometry_metadata(geo):
-    """
-    Read solver_type, env_idx, and entity/link index from IPC geometry metadata.
-
-    Returns (solver_type, env_idx, idx) where idx is entity_idx for fem/cloth
-    or link_idx for rigid. Returns None if the geometry has no solver_type
-    metadata (i.e. not a Genesis-created geometry).
-    """
-    meta_attrs = geo.meta()
-    solver_type_attr = meta_attrs.find("solver_type")
-    if solver_type_attr is None:
-        return None
-
-    (solver_type,) = solver_type_attr.view()
-
-    (env_idx,) = map(int, meta_attrs.find("env_idx").view())
-
-    if solver_type == "rigid":
-        (idx,) = map(int, meta_attrs.find("link_idx").view())
-    elif solver_type in ("fem", "cloth"):
-        (idx,) = map(int, meta_attrs.find("entity_idx").view())
-    else:
-        gs.raise_exception(f"Unknown IPC geometry solver_type: {solver_type!r}")
-
-    return (solver_type, env_idx, idx)
 
 
 @nb.jit(nopython=True, cache=True)

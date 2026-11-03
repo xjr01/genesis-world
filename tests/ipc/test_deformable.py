@@ -415,3 +415,146 @@ def test_cloth_uniform_biaxial_stretching(E, nu, strech_scale, n_envs, show_view
     cloth_aabb_extent = cloth_aabb_max - cloth_aabb_min
     assert (cloth_aabb_extent[..., :2] < STRETCH_RATIO_1 * (2.0 * CLOTH_HALF)).all()
     assert ((0.001 < cloth_aabb_extent[..., 2]) & (cloth_aabb_extent[..., 2] < 0.2)).all()
+
+
+@pytest.fixture(scope="session")
+def ipc_state_cloth_paths(asset_tmp_path):
+    quad = asset_tmp_path / "ipc_state_quad.obj"
+    quad.write_text("v 0 0 0\nv 0.1 0 0\nv 0.1 0.1 0\nv 0 0.1 0\nf 1 2 3\nf 1 3 4\n")
+    triangle = asset_tmp_path / "ipc_state_triangle.obj"
+    triangle.write_text("v 0 0 0\nv 0.1 0 0\nv 0 0.1 0\nf 1 2 3\n")
+    return str(quad), str(triangle)
+
+
+@pytest.mark.required
+@pytest.mark.precision("64")
+@pytest.mark.parametrize("n_envs", [0, 2])
+@pytest.mark.parametrize("substeps", [1, 2])
+def test_cloth_position_velocity(n_envs, substeps, ipc_state_cloth_paths, show_viewer):
+    dt = 0.01
+    gravity = (0.0, 0.0, -2.0)
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=dt,
+            substeps=substeps,
+            substeps_local=4,
+            gravity=gravity,
+        ),
+        coupler_options=gs.options.IPCCouplerOptions(
+            # Resolve the linear solve accurately enough to test ballistic state transfer.
+            linear_system_tolerance=1e-12,
+            contact_enable=False,
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(0.6, -0.7, 1.5),
+            camera_lookat=(0.2, 0.05, 1.0),
+        ),
+        show_viewer=show_viewer,
+    )
+    cloths = []
+    for i_e, path in enumerate(ipc_state_cloth_paths):
+        cloths.append(
+            scene.add_entity(
+                morph=gs.morphs.Mesh(
+                    file=path,
+                    pos=(0.3 * i_e, 0.0, 1.0),
+                    decimate=False,
+                ),
+                material=gs.materials.FEM.Cloth(
+                    E=1000.0,
+                    nu=0.25,
+                ),
+            )
+        )
+    scene.build(n_envs=n_envs)
+    initial = [tensor_to_array(cloth.get_state().pos).copy() for cloth in cloths]
+    velocities = []
+    for i_e, cloth in enumerate(cloths):
+        velocity = np.zeros_like(initial[i_e])
+        velocity[..., 0] = np.arange(1, max(n_envs, 1) + 1)[:, None] * (0.2 + 0.1 * i_e)
+        velocities.append(velocity)
+        cloth.set_velocity(velocity)
+    acceleration = np.array(gravity)
+    substep_dt = dt / substeps
+    for step in range(1, 3):
+        scene.step()
+        n = step * substeps
+        for i_e, cloth in enumerate(cloths):
+            state = cloth.get_state()
+            assert_allclose(state.vel, velocities[i_e] + acceleration * dt * step, atol=1e-10, rtol=0.0)
+            displacement = velocities[i_e] * dt * step + acceleration * substep_dt**2 * n * (n + 1) / 2
+            assert_allclose(state.pos, initial[i_e] + displacement, atol=1e-10, rtol=0.0)
+
+    target = initial[0] + (0.03, 0.02, 0.1)
+    cloths[0].set_position(target)
+    scene.step()
+    state = cloths[0].get_state()
+    previous_velocity = velocities[0] + acceleration * dt * 2
+    assert_allclose(state.vel, previous_velocity + acceleration * dt, atol=1e-10, rtol=0.0)
+    displacement = previous_velocity * dt + acceleration * substep_dt**2 * substeps * (substeps + 1) / 2
+    assert_allclose(state.pos, target + displacement, atol=1e-10, rtol=0.0)
+
+    cloths[0].set_position(initial[0])
+    cloths[0].set_velocity(velocities[0])
+    scene.step()
+    state = cloths[0].get_state()
+    assert_allclose(state.vel, velocities[0] + acceleration * dt, atol=1e-10, rtol=0.0)
+    displacement = velocities[0] * dt + acceleration * substep_dt**2 * substeps * (substeps + 1) / 2
+    assert_allclose(state.pos, initial[0] + displacement, atol=1e-10, rtol=0.0)
+    state = cloths[1].get_state()
+    n = 4 * substeps
+    assert_allclose(state.vel, velocities[1] + acceleration * dt * 4, atol=1e-10, rtol=0.0)
+    displacement = velocities[1] * dt * 4 + acceleration * substep_dt**2 * n * (n + 1) / 2
+    assert_allclose(state.pos, initial[1] + displacement, atol=1e-10, rtol=0.0)
+
+    scene.reset()
+    for i_e, cloth in enumerate(cloths):
+        state = cloth.get_state()
+        assert_allclose(state.pos, initial[i_e], atol=1e-10, rtol=0.0)
+        assert_allclose(state.vel, 0.0, atol=1e-10, rtol=0.0)
+        cloth.set_velocity(velocities[i_e])
+    scene.step()
+    for i_e, cloth in enumerate(cloths):
+        state = cloth.get_state()
+        assert_allclose(state.vel, velocities[i_e] + acceleration * dt, atol=1e-10, rtol=0.0)
+        displacement = velocities[i_e] * dt + acceleration * substep_dt**2 * substeps * (substeps + 1) / 2
+        assert_allclose(state.pos, initial[i_e] + displacement, atol=1e-10, rtol=0.0)
+
+
+@pytest.mark.required
+@pytest.mark.precision("64")
+@pytest.mark.parametrize("n_envs", [0, 2])
+def test_volume_frame_state(n_envs, show_viewer):
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            substeps_local=4,
+            gravity=(0.0, 0.0, 0.0),
+        ),
+        coupler_options=gs.options.IPCCouplerOptions(
+            contact_enable=False,
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(0.3, -0.5, 1.4),
+            camera_lookat=(0.0, 0.0, 1.0),
+        ),
+        show_viewer=show_viewer,
+    )
+    entity = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(0.0, 0.0, 1.0),
+            size=(0.1, 0.1, 0.1),
+        ),
+        material=gs.materials.FEM.Elastic(
+            E=1000.0,
+            nu=0.25,
+        ),
+    )
+    scene.build(n_envs=n_envs)
+    initial = tensor_to_array(entity.get_state().pos).copy()
+    assert entity.n_elements > 0
+    for _ in range(4):
+        scene.step()
+        state = entity.get_state()
+        assert (state.active == gs.ACTIVE).all()
+        assert_allclose(state.pos, initial, atol=1e-10, rtol=0.0)
+        assert_allclose(state.vel, 0.0, atol=1e-10, rtol=0.0)

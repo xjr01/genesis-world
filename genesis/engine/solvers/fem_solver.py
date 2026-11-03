@@ -979,7 +979,8 @@ class FEMSolver(Solver):
             from genesis.engine.couplers import IPCCoupler
 
             if isinstance(self.sim._coupler, IPCCoupler):
-                pass  # IPC coupler handles FEM simulation
+                if self.n_elements > 0:
+                    self.copy_active_frame(f, f + 1)
             elif self._use_implicit_solver:
                 self.precompute_material_data(f)
                 self.init_pos_and_inertia(f)
@@ -1002,6 +1003,11 @@ class FEMSolver(Solver):
 
     def substep_post_coupling(self, f):
         if self.is_active:
+            from genesis.engine.couplers import IPCCoupler
+
+            if isinstance(self.sim.coupler, IPCCoupler):
+                # The native integrator supplies both position and velocity for the completed substep.
+                return
             self.compute_pos(f)
             if self._constraints_initialized and not self._use_implicit_solver:
                 self.apply_hard_constraints(f)
@@ -1009,6 +1015,11 @@ class FEMSolver(Solver):
     def substep_post_coupling_grad(self, f):
         if self.is_active:
             self.compute_pos.grad(f)
+
+    @qd.kernel
+    def copy_active_frame(self, source: qd.i32, target: qd.i32):
+        for i_e, i_b in qd.ndrange(self.n_elements, self._B):
+            self.elements_el_ng[target, i_e, i_b].active = self.elements_el_ng[source, i_e, i_b].active
 
     @qd.kernel
     def copy_frame(self, source: qd.i32, target: qd.i32):

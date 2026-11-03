@@ -10,6 +10,7 @@ except ImportError:
 
 import genesis as gs
 from genesis.engine.couplers.ipc_coupler.data import COUPLING_TYPE
+from genesis.engine.couplers.ipc_coupler.utils import build_ipc_scene_config
 
 from .utils import (
     get_ipc_rigid_links_idx,
@@ -328,3 +329,47 @@ def test_coup_collision_links():
     assert base_link in collision_settings
     assert collision_settings[base_link] is False
     assert moving_link not in collision_settings
+
+
+@pytest.mark.required
+@pytest.mark.parametrize(
+    "is_acceleration_enabled,newton_max_iterations",
+    [(False, None), (True, None), (False, 5), (True, 5)],
+)
+def test_ipc_solver_options(is_acceleration_enabled, newton_max_iterations):
+    options = gs.options.IPCCouplerOptions(
+        newton_max_iterations=newton_max_iterations,
+        is_acceleration_enabled=is_acceleration_enabled,
+        is_strict=False,
+    )
+    native_scene = uipc.Scene(build_ipc_scene_config(options, gs.options.SimOptions()))
+    config = native_scene.config()
+    assert uipc.view(config.find("fem/bending/pseudo"))[0] == is_acceleration_enabled
+    assert uipc.view(config.find("contact/friction/pseudo"))[0] == is_acceleration_enabled
+    assert uipc.view(config.find("newton/max_iter"))[0] == (1024 if newton_max_iterations is None else 5)
+    assert uipc.view(config.find("extras/strict_mode/enable"))[0] == 0
+
+
+@pytest.mark.required
+def test_ipc_solver_defaults_disable_acceleration():
+    options = gs.options.IPCCouplerOptions()
+    assert options.is_acceleration_enabled is False
+    config = build_ipc_scene_config(options, gs.options.SimOptions())
+    assert config["fem"]["bending"]["pseudo"] == 0
+    assert config["contact"]["friction"]["pseudo"] == 0
+    defaults = uipc.Scene.default_config()
+    for section in ("newton", "fem", "contact", "extras"):
+        assert config[section] == defaults[section]
+
+
+@pytest.mark.required
+def test_ipc_acceleration_rejects_none():
+    with pytest.raises(gs.GenesisException, match="Invalid attribute"):
+        gs.options.IPCCouplerOptions(is_acceleration_enabled=None)
+
+
+@pytest.mark.required
+@pytest.mark.parametrize("name", ["is_acceleration_enabled", "is_strict"])
+def test_ipc_solver_options_require_boolean(name):
+    with pytest.raises(gs.GenesisException, match="Invalid attribute"):
+        gs.options.IPCCouplerOptions(**{name: 1})
