@@ -27,11 +27,13 @@ class Elastic(Base["PBD3DEntity"]):
     volume_compliance : float, optional
         The volume compliance (m^3/N). Default is 0.0.
     stretch_relaxation : float, optional
-        The stretch relaxation. Default is 0.1.
+        Stretch correction strength. Smaller values soften length recovery; larger values recover faster but can
+        amplify oscillations. Default is 1.0.
     bending_relaxation : float, optional
         The bending relaxation. Default is 0.1.
     volume_relaxation : float, optional
-        The volume relaxation. Default is 0.1.
+        Volume correction strength. Smaller values allow more compression; larger values preserve volume more
+        strongly but can amplify oscillations. Default is 1.0.
     damping : float, optional
         Velocity damping rate (1/s), supported by PBDUnifiedOptions. Larger values reduce deformation oscillations
         but slow elastic recovery; zero retains elastic oscillations. Free entities retain their overall translation
@@ -44,7 +46,7 @@ class Elastic(Base["PBD3DEntity"]):
     stretch_compliance: NonNegativeFloat = 0.0
     bending_compliance: NonNegativeFloat = 0.0
     volume_compliance: NonNegativeFloat = 0.0
-    stretch_relaxation: ValidFloat = 0.1
+    stretch_relaxation: ValidFloat = 1.0
     bending_relaxation: ValidFloat = 0.1
-    volume_relaxation: ValidFloat = 0.1
+    volume_relaxation: ValidFloat = 1.0
     damping: NonNegativeFloat = 0.0

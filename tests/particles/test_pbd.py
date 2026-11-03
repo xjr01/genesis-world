@@ -122,7 +122,7 @@ def test_unified_elastic_projection(n_envs, contact_distances, show_viewer, asse
     )
     entities = []
     for i_entity, (size, stretch_relaxation, volume_relaxation, volume_compliance) in enumerate(
-        ((0.03, 0.0, 0.5, 0.0), (0.1, 0.0, 1.0, 0.0), (0.3, 0.15, 0.25, 0.0), (0.1, 0.0, 0.5, 1e-8))
+        ((0.03, 0.0, 0.5, 0.0), (0.1, 0.0, 1.0, 0.0), (0.3, 1.0, 1.0, 0.0), (0.1, 0.0, 0.5, 1e-8))
     ):
         entities.append(
             scene.add_entity(
@@ -292,6 +292,68 @@ def test_unified_elastic_projection(n_envs, contact_distances, show_viewer, asse
                 )
             )
     scene.build(n_envs=n_envs)
+    initial_state = scene.get_state()
+    prepared_positions = []
+    expected_positions = []
+    for entity in entities:
+        rest = entity.init_particles
+        positions = rest.copy()
+        positions[3, 2] = rest[0, 2] + 0.8 * (rest[3, 2] - rest[0, 2])
+        if entity.material.stretch_relaxation != 0.0:
+            positions[3, 0] += 0.6 * (rest[3, 2] - rest[0, 2])
+        prepared_positions.append(positions.copy())
+        entity.set_particles_pos(positions)
+        entity.fix_particles([0, 1, 2])
+        inverse_mass = entity.n_particles / tensor_to_array(entity.get_mass()).mean()
+        material = entity.material
+        edge = positions[3] - positions[:3]
+        lengths = np.linalg.norm(edge, axis=-1)
+        lengths_rest = np.linalg.norm(rest[3] - rest[:3], axis=-1)
+        stretch_delta = (
+            -material.stretch_relaxation
+            * (lengths - lengths_rest)[:, None]
+            * edge
+            / lengths[:, None]
+            * inverse_mass
+            / (inverse_mass + material.stretch_compliance / scene.dt**2)
+        ).sum(axis=0)
+        base_area_gradient = np.cross(rest[1] - rest[0], rest[2] - rest[0]) / 6.0
+        volume_residual = np.dot(positions[3] - rest[3], base_area_gradient)
+        volume_delta = (
+            -material.volume_relaxation
+            * volume_residual
+            * inverse_mass
+            * base_area_gradient
+            / (inverse_mass * np.dot(base_area_gradient, base_area_gradient) + material.volume_compliance / scene.dt**2)
+        )
+        n_constraints = 3 * (material.stretch_relaxation != 0.0) + (material.volume_relaxation != 0.0)
+        positions[3] += (stretch_delta + volume_delta) / n_constraints
+        expected_positions.append(positions)
+    assert cloth.n_particles == 4
+    cloth_positions = cloth.init_particles.copy()
+    free_idx = np.argmin(cloth_positions[:, 1])
+    fixed_idx = np.flatnonzero(np.arange(cloth.n_particles) != free_idx)
+    cloth_positions[free_idx, 2] += 0.05
+    prepared_cloth_positions = cloth_positions.copy()
+    cloth.set_particles_pos(cloth_positions)
+    cloth.fix_particles(fixed_idx)
+    hinge_idx = np.flatnonzero(np.isclose(cloth_positions[:, 1], 0.0))
+    edges = cloth_positions[free_idx] - cloth_positions[hinge_idx]
+    lengths = np.linalg.norm(edges, axis=-1)
+    rest_lengths = np.linalg.norm(cloth.init_particles[free_idx] - cloth.init_particles[hinge_idx], axis=-1)
+    stretch_delta = (
+        -cloth.material.stretch_relaxation * (lengths - rest_lengths)[:, None] * edges / lengths[:, None]
+    ).sum(axis=0)
+    y = cloth_positions[free_idx, 1]
+    z = cloth_positions[free_idx, 2] - cloth.init_particles[free_idx, 2]
+    angle = np.arctan2(z, -y)
+    bending_delta = cloth.material.bending_relaxation * angle * np.array((0.0, -z, y))
+    cloth_positions[free_idx] += (stretch_delta + bending_delta) / 3
+    scene.pbd_solver.project_elastic_constraints()
+    for entity, expected in zip(entities, expected_positions):
+        assert_allclose(entity.get_particles_pos(), expected, atol=2e-7)
+    assert_allclose(cloth.get_particles_pos(), cloth_positions, atol=2e-7)
+    scene.reset(initial_state)
     if thickness > 0.0:
         for i_rigid, rigid in enumerate((*probes, mixed_contact_rigid)):
             rigid.set_pos((10.0 + i_rigid, 0.0, 1.0))
@@ -342,7 +404,6 @@ def test_unified_elastic_projection(n_envs, contact_distances, show_viewer, asse
         positions[3, 2] = thickness
         assert_allclose(contact_elastic.get_particles_pos(), positions, atol=2e-7)
         return
-    initial_state = scene.get_state()
     contact_positions = contact_elastic.init_particles.copy()
     contact_positions[3, 2] -= 0.02
     contact_elastic.set_particles_pos(contact_positions)
@@ -352,56 +413,11 @@ def test_unified_elastic_projection(n_envs, contact_distances, show_viewer, asse
         entity.fix_particles([3, 4] if i_contact == 0 else [0, 3])
         velocity = 0.0 if i_contact == 0 else -2.5
         probe.set_dofs_velocity((0.0, 0.0, velocity, 0.0, 0.0, 0.0))
-    expected_positions = []
-    for entity in entities:
-        rest = entity.init_particles
-        positions = rest.copy()
-        positions[3, 2] = rest[0, 2] + 0.8 * (rest[3, 2] - rest[0, 2])
+    for entity, positions in zip(entities, prepared_positions):
         entity.set_particles_pos(positions)
         entity.fix_particles([0, 1, 2])
-        inverse_mass = entity.n_particles / tensor_to_array(entity.get_mass()).mean()
-        material = entity.material
-        edge = positions[3] - positions[:3]
-        lengths = np.linalg.norm(edge, axis=-1)
-        lengths_rest = np.linalg.norm(rest[3] - rest[:3], axis=-1)
-        stretch_delta = (
-            -material.stretch_relaxation
-            * (lengths - lengths_rest)[:, None]
-            * edge
-            / lengths[:, None]
-            * inverse_mass
-            / (inverse_mass + material.stretch_compliance / scene.dt**2)
-        ).sum(axis=0)
-        base_area_gradient = np.cross(rest[1] - rest[0], rest[2] - rest[0]) / 6.0
-        volume_residual = np.dot(positions[3] - rest[3], base_area_gradient)
-        volume_delta = (
-            -material.volume_relaxation
-            * volume_residual
-            * inverse_mass
-            * base_area_gradient
-            / (inverse_mass * np.dot(base_area_gradient, base_area_gradient) + material.volume_compliance / scene.dt**2)
-        )
-        positions[3] += stretch_delta + volume_delta
-        expected_positions.append(positions)
-    assert cloth.n_particles == 4
-    cloth_positions = cloth.init_particles.copy()
-    free_idx = np.argmin(cloth_positions[:, 1])
-    fixed_idx = np.flatnonzero(np.arange(cloth.n_particles) != free_idx)
-    cloth_positions[free_idx, 2] += 0.05
-    cloth.set_particles_pos(cloth_positions)
+    cloth.set_particles_pos(prepared_cloth_positions)
     cloth.fix_particles(fixed_idx)
-    hinge_idx = np.flatnonzero(np.isclose(cloth_positions[:, 1], 0.0))
-    edges = cloth_positions[free_idx] - cloth_positions[hinge_idx]
-    lengths = np.linalg.norm(edges, axis=-1)
-    rest_lengths = np.linalg.norm(cloth.init_particles[free_idx] - cloth.init_particles[hinge_idx], axis=-1)
-    stretch_delta = (
-        -cloth.material.stretch_relaxation * (lengths - rest_lengths)[:, None] * edges / lengths[:, None]
-    ).sum(axis=0)
-    y = cloth_positions[free_idx, 1]
-    z = cloth_positions[free_idx, 2] - cloth.init_particles[free_idx, 2]
-    angle = np.arctan2(z, -y)
-    bending_delta = cloth.material.bending_relaxation * angle * np.array((0.0, -z, y))
-    cloth_positions[free_idx] += stretch_delta + bending_delta
     scene.step()
     assert_allclose(contact_elastic.get_particles_pos(), contact_positions, atol=2e-7)
     for i_contact, (entity, probe) in enumerate(zip(face_entities, probes)):

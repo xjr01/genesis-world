@@ -178,7 +178,7 @@ def func_accumulate_stretch(
     for i_c, i_b in qd.ndrange(edges_info.shape[0], particles.shape[1]):
         info = edges_info[i_c]
         i1, i2 = info.v1, info.v2
-        if particles_ng[i1, i_b].active and particles_ng[i2, i_b].active:
+        if particles_ng[i1, i_b].active and particles_ng[i2, i_b].active and info.stretch_relaxation != 0.0:
             w1 = particles[i1, i_b].free / particles_info[i1].mass
             w2 = particles[i2, i_b].free / particles_info[i2].mass
             edge = particles[i1, i_b].pos - particles[i2, i_b].pos
@@ -195,6 +195,8 @@ def func_accumulate_stretch(
                 )
                 particles[i1, i_b].dpos += w1 * correction
                 particles[i2, i_b].dpos -= w2 * correction
+                particles[i1, i_b].n_elastic_constraints += 1
+                particles[i2, i_b].n_elastic_constraints += 1
 
 
 @qd.func
@@ -216,7 +218,7 @@ def func_accumulate_volume(
             points[:, i_v] = particles[i_p, i_b].pos
             weights[i_v] = particles[i_p, i_b].free / particles_info[i_p].mass
             is_active = is_active and particles_ng[i_p, i_b].active
-        if is_active:
+        if is_active and info.volume_relaxation != 0.0:
             p1, p2, p3, p4 = points[:, 0], points[:, 1], points[:, 2], points[:, 3]
             gradients = qd.Matrix.cols(
                 [
@@ -234,6 +236,7 @@ def func_accumulate_volume(
                 multiplier = -info.volume_relaxation * residual / (denominator + info.volume_compliance / dt**2)
                 for i_v in qd.static(range(4)):
                     particles[vertices[i_v], i_b].dpos += multiplier * weights[i_v] * gradients[:, i_v]
+                    particles[vertices[i_v], i_b].n_elastic_constraints += 1
 
 
 @qd.func
@@ -256,7 +259,7 @@ def func_accumulate_bending(
             points[:, i_v] = particles[i_p, i_b].pos
             weights[i_v] = particles[i_p, i_b].free / particles_info[i_p].mass
             is_active = is_active and particles_ng[i_p, i_b].active
-        if is_active and weights.sum() > 0.0:
+        if is_active and weights.sum() > 0.0 and info.bending_relaxation != 0.0:
             angle, gradients, is_valid = func_dihedral(points[:, 0], points[:, 1], points[:, 2], points[:, 3])
             if is_valid:
                 residual = qd.atan2(qd.sin(angle - info.angle_rest), qd.cos(angle - info.angle_rest))
@@ -267,6 +270,7 @@ def func_accumulate_bending(
                     multiplier = -info.bending_relaxation * residual / (denominator + info.bending_compliance / dt**2)
                     for i_v in qd.static(range(4)):
                         particles[vertices[i_v], i_b].dpos += multiplier * weights[i_v] * gradients[:, i_v]
+                        particles[vertices[i_v], i_b].n_elastic_constraints += 1
             else:
                 qd.atomic_or(errno[i_b], ErrorCode.INVALID_PBD_STATE)
 
@@ -278,7 +282,9 @@ def func_apply_delta(acceleration: float, particles: V_ANNOTATION, particles_ng:
             previous = particles[i_p, i_b].pos_iter
             particles[i_p, i_b].pos_iter = particles[i_p, i_b].pos
             pos = (
-                particles[i_p, i_b].pos + particles[i_p, i_b].dpos + acceleration * (particles[i_p, i_b].pos - previous)
+                particles[i_p, i_b].pos
+                + particles[i_p, i_b].dpos / qd.max(particles[i_p, i_b].n_elastic_constraints, 1)
+                + acceleration * (particles[i_p, i_b].pos - previous)
             )
             if qd.math.isnan(pos).any() or qd.math.isinf(pos).any():
                 qd.atomic_or(errno[i_b], ErrorCode.INVALID_PBD_STATE)
@@ -1091,6 +1097,9 @@ def func_compute_momentum(solver: V_ANNOTATION, is_initial: qd.template(), is_co
 
 @qd.func
 def func_accumulate_elastic_constraints(solver: V_ANNOTATION):
+    # Count participating constraints even at zero residual so averaging stays continuous near rest.
+    for i_p, i_b in qd.ndrange(solver.n_particles, solver._B):
+        solver.particles[i_p, i_b].n_elastic_constraints = 0
     if qd.static(solver.n_edges > 0):
         func_accumulate_stretch(
             solver.substep_dt, solver.particles, solver.particles_ng, solver.particles_info, solver.edges_info
@@ -1278,10 +1287,11 @@ class PBDUnifiedSolver(Solver):
     """Position-based dynamics (PBD) with simultaneous elastic corrections followed by unilateral contact projections.
 
     Supports cloth and tetrahedral elastic entities. Rigid geoms with ``needs_coup=True`` supply prescribed
-    boundaries. Each iteration applies simultaneous elastic corrections, then projects vertex-face and domain contacts,
-    followed by edge-edge contacts detected at the updated positions. Vertex-face and domain corrections accumulate
-    before a simultaneous update. All unique elastic-rigid edge pairs contribute inverse-mass corrections from the
-    same positions, averaged by each vertex's incident edge-contact count before updating positions.
+    boundaries. Each iteration averages elastic corrections by each vertex's participating constraint count, then
+    projects vertex-face and domain contacts, followed by edge-edge contacts detected at the updated positions.
+    Vertex-face and domain corrections accumulate before a simultaneous update. All unique elastic-rigid edge pairs
+    contribute inverse-mass corrections from the same positions, averaged by each vertex's incident edge-contact count
+    before updating positions.
     Surface contacts use elastic boundary faces and rigid collision-mesh triangles.
     Coulomb friction bounds tangential corrections by the normal multiplier. Static and kinetic coefficients each
     combine the elastic material coefficient with the rigid coupling coefficient by maximum.
@@ -1406,6 +1416,7 @@ class PBDUnifiedSolver(Solver):
             contact_pos=gs.qd_vec3,
             momentum_vel=gs.qd_vec3,
             dpos=gs.qd_vec3,
+            n_elastic_constraints=gs.qd_int,
             vel=gs.qd_vec3,
         ).field(shape=(self.n_particles, self._B), layout=qd.Layout.SOA)
         self.particles_ng = qd.types.struct(active=gs.qd_bool).field(

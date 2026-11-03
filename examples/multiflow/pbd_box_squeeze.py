@@ -407,8 +407,9 @@ def main():
             if args.solver == "fem"
             else gs.materials.PBD.Elastic(
                 rho=30.0,
-                stretch_relaxation=0.1,
-                volume_relaxation=0.1,
+                # Stronger relaxation maintains grip stiffness within the fixed iteration budget.
+                stretch_relaxation=3.0 if args.solver == "unified" else 1.0,
+                volume_relaxation=3.0 if args.solver == "unified" else 1.0,
                 damping=args.damping if args.solver == "unified" else 0.0,
             )
         ),
