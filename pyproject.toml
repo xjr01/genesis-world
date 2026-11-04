@@ -78,7 +78,7 @@ dependencies = [
 
 [project.optional-dependencies]
 ipc = [
-    "pyuipc @ git+https://github.com/xw-c/libuipc.git@main",
+    "pyuipc @ git+https://github.com/xw-c/libuipc.git@ipc-optimized",
 ]
 dev = [
     "black",

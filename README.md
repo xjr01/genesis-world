@@ -128,7 +128,7 @@ It is recommended to systematically execute `pip install -e ".[dev]"` after movi
 
 ### IPC installation from our fork
 
-The ipc extra installs pyuipc from the main branch of https://github.com/xw-c/libuipc.
+The ipc extra installs pyuipc from the ipc-optimized branch of https://github.com/xw-c/libuipc.
 This is a standard Git dependency understood by pip and uv; it does not install the sibling libuipc checkout.
 
 Use a dedicated Python environment and prepare libuipc's source-build prerequisites: CMake >= 3.26, a compatible CUDA
@@ -140,14 +140,8 @@ python -m pip install -e ".[ipc]"
 ```
 
 uv project workflows can use `uv sync --extra ipc`. The branch is not pinned to a fixed commit.
-After modifying libuipc, commit and push to xw-c/libuipc's main branch, then reinstall the remote package and
+After modifying libuipc, commit and push to xw-c/libuipc's ipc-optimized branch, then reinstall the remote package and
 restart the simulation. Editing the sibling libuipc checkout alone does not update the installed remote package.
-
-On the configured server, refresh and rebuild the remote package with:
-
-```bash
-bash ../interactive-demos/setup/update-libuipc.sh
-```
 
 Check the source recorded by the installer:
 
@@ -155,7 +149,7 @@ Check the source recorded by the installer:
 python -c "import importlib.metadata as m; print(m.distribution('pyuipc').read_text('direct_url.json'))"
 ```
 
-The URL must identify xw-c/libuipc, with requested_revision equal to main.
+The URL must identify xw-c/libuipc, with requested_revision equal to ipc-optimized.
 The installer also records the resolved commit for provenance; that record does not make the declared branch dependency
 a fixed-commit dependency. All three development checkouts use ipc-optimized.
 
