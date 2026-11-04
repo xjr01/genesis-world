@@ -375,11 +375,17 @@ def func_accumulate_rigid_contact(
             geom_slot = surface_info.surface_geom_slots[geom_idx]
             displacement = qd.Vector.zero(gs.qd_float, 3)
             if geom_slot >= 0:
+                # Advect the material reference so tangential slip uses the current contact orientation.
                 local_point = geom.qd_inv_transform_by_trans_quat(
-                    point, dyn_state.geoms.pos[geom_idx, i_b], dyn_state.geoms.quat[geom_idx, i_b]
+                    previous_point,
+                    solver._previous_geoms_pos[geom_slot, i_b],
+                    solver._previous_geoms_quat[geom_slot, i_b],
                 )
-                displacement = point - geom.qd_transform_by_trans_quat(
-                    local_point, solver._previous_geoms_pos[geom_slot, i_b], solver._previous_geoms_quat[geom_slot, i_b]
+                displacement = (
+                    geom.qd_transform_by_trans_quat(
+                        local_point, dyn_state.geoms.pos[geom_idx, i_b], dyn_state.geoms.quat[geom_idx, i_b]
+                    )
+                    - previous_point
                 )
             else:
                 velocity = solver.scene.rigid_solver._func_vel_at_point(

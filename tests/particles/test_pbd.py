@@ -1207,20 +1207,26 @@ def test_one_way_rigid_surface_collision(n_envs, is_regular_grid, options_type, 
                 assert_allclose(velocities[..., :3, 0], expected, atol=2e-5)
                 assert_allclose(velocities[..., :3, 2], 0.0, atol=2e-5)
 
-        scene.reset()
         entity = friction_entities[-1]
         rigid = friction_rigids[-1]
-        positions = tensor_to_array(entity.get_particles_pos())
-        rigid_pos = tensor_to_array(rigid.get_pos())
-        rigid_quat = tensor_to_array(rigid.get_quat())
-        entity.set_particles_vel((0.0, 0.0, -0.1))
-        rigid.set_dofs_velocity([0.0, 0.0, 0.0, 0.0, 0.0, 0.2])
-        scene.step()
-        local = gs.utils.geom.inv_transform_by_trans_quat(positions, rigid_pos[..., None, :], rigid_quat[..., None, :])
-        expected = gs.utils.geom.transform_by_trans_quat(
-            local, tensor_to_array(rigid.get_pos())[..., None, :], tensor_to_array(rigid.get_quat())[..., None, :]
-        )
-        assert_allclose(entity.get_particles_pos()[..., :3, :2], expected[..., :3, :2], atol=2e-6)
+        for linear_velocity, angular_velocity, normal_velocity in (
+            ((0.0, 0.0, 0.0), (0.0, 0.0, 0.2), -0.1),
+            ((0.02, -0.01, 0.03), (1.0, -0.5, 2.0), -0.5),
+        ):
+            scene.reset()
+            positions = tensor_to_array(entity.get_particles_pos())
+            rigid_pos = tensor_to_array(rigid.get_pos())
+            rigid_quat = tensor_to_array(rigid.get_quat())
+            entity.set_particles_vel((0.0, 0.0, normal_velocity))
+            rigid.set_dofs_velocity((*linear_velocity, *angular_velocity))
+            scene.step()
+            local = gs.utils.geom.inv_transform_by_trans_quat(
+                positions, rigid_pos[..., None, :], rigid_quat[..., None, :]
+            )
+            expected = gs.utils.geom.transform_by_trans_quat(
+                local, tensor_to_array(rigid.get_pos())[..., None, :], tensor_to_array(rigid.get_quat())[..., None, :]
+            )
+            assert_allclose(entity.get_particles_pos()[..., :3, :], expected[..., :3, :], atol=2e-6)
 
 
 @pytest.mark.required
