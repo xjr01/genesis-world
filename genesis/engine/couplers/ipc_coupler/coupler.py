@@ -123,6 +123,7 @@ class IPCCoupler(RBC):
 
         self.sim = simulator
         self.options = options
+        self._ipc_float_dtype = np.float32 if uipc.build_info()["float_bytes"] == 4 else np.float64
 
         # Define some proxies for convenience
         self.rigid_solver: "RigidSolver" = self.sim.rigid_solver
@@ -316,7 +317,7 @@ class IPCCoupler(RBC):
                 # ---- Create mesh ----
                 # trimesh for cloth (2D shell), tetmesh for volumetric FEM (3D)
                 if is_cloth:
-                    verts = tensor_to_array(entity.init_positions).astype(np.float64, copy=False)
+                    verts = tensor_to_array(entity.init_positions).astype(self._ipc_float_dtype, copy=False)
                     faces = entity.surface_triangles.astype(np.int32, copy=False)
                     mesh = uipc.geometry.trimesh(verts, faces)
                 else:
@@ -430,7 +431,7 @@ class IPCCoupler(RBC):
                                     f"but only 'ipc_only' is supported for plane geoms."
                                 )
 
-                            local_normal = geom.data[:3].astype(np.float64, copy=False)
+                            local_normal = geom.data[:3].astype(self._ipc_float_dtype, copy=False)
                             normal = gu.transform_by_quat(local_normal, geom.init_quat)
                             normal = normal / np.linalg.norm(normal)
                             height = np.dot(geom.init_pos, normal)
@@ -457,7 +458,7 @@ class IPCCoupler(RBC):
 
                             try:
                                 mesh = uipc.geometry.trimesh(
-                                    geom_verts.astype(np.float64, copy=False),
+                                    geom_verts.astype(self._ipc_float_dtype, copy=False),
                                     geom.init_faces.astype(np.int32, copy=False),
                                 )
                             except RuntimeError as e:
@@ -524,7 +525,7 @@ class IPCCoupler(RBC):
 
                     constraint_strength = np.array(
                         [self.options.constraint_strength_translation, self.options.constraint_strength_rotation],
-                        dtype=np.float64,
+                        dtype=self._ipc_float_dtype,
                     )
                     self._ipc_stc.apply_to(rigid_link_geom, constraint_strength)
                     self._ipc_animator.insert(
@@ -582,7 +583,7 @@ class IPCCoupler(RBC):
             # Detect non-fixed base for handling base link separately via SoftTransformConstraint
             gs.logger.debug(f"Adding articulated entity {i_e} with {entity.n_joints} joints")
 
-            mass_matrix = np.diag(np.full((entity.n_dofs,), fill_value=STIFFNESS_DEFAULT, dtype=np.float64))
+            mass_matrix = np.diag(np.full((entity.n_dofs,), fill_value=STIFFNESS_DEFAULT, dtype=self._ipc_float_dtype))
 
             # ---- Collect joint info (env-independent) ----
             joints: list[tuple["RigidJoint", type, bool, "RigidLink", "RigidLink"]] = []
@@ -617,7 +618,7 @@ class IPCCoupler(RBC):
 
                     v1 = joint_pos - 0.5 * joint_axis
                     v2 = joint_pos + 0.5 * joint_axis
-                    vertices = np.array([v2, v1] if reverse_verts else [v1, v2], dtype=np.float64)
+                    vertices = np.array([v2, v1] if reverse_verts else [v1, v2], dtype=self._ipc_float_dtype)
                     edges = np.array([[0, 1]], dtype=np.int32)
                     joint_geom = uipc.geometry.linemesh(vertices, edges)
                     if self.sim.n_envs > 0:
@@ -649,12 +650,12 @@ class IPCCoupler(RBC):
                 joints_child_link=[j.link for j, *_ in joints],
                 joints_q_idx_local=[j.qs_idx_local[0] for j, *_ in joints],
                 articulation_slots=articulation_geom_slots,
-                ref_dof_prev=np.zeros((self.sim._B, entity.n_qs), dtype=np.float64),
-                qpos_stored=np.zeros((self.sim._B, entity.n_qs), dtype=np.float64),
-                qpos_current=np.zeros((self.sim._B, entity.n_qs), dtype=np.float64),
-                qpos_new=np.zeros((self.sim._B, entity.n_qs), dtype=np.float64),
-                delta_theta_tilde=np.zeros((self.sim._B, len(joints)), dtype=np.float64),
-                delta_theta_ipc=np.zeros((self.sim._B, len(joints)), dtype=np.float64),
+                ref_dof_prev=np.zeros((self.sim._B, entity.n_qs), dtype=self._ipc_float_dtype),
+                qpos_stored=np.zeros((self.sim._B, entity.n_qs), dtype=self._ipc_float_dtype),
+                qpos_current=np.zeros((self.sim._B, entity.n_qs), dtype=self._ipc_float_dtype),
+                qpos_new=np.zeros((self.sim._B, entity.n_qs), dtype=self._ipc_float_dtype),
+                delta_theta_tilde=np.zeros((self.sim._B, len(joints)), dtype=self._ipc_float_dtype),
+                delta_theta_ipc=np.zeros((self.sim._B, len(joints)), dtype=self._ipc_float_dtype),
                 prev_links_transform=[[None for _ in range(self.sim._B)] for _ in joints],
             )
 
@@ -755,8 +756,8 @@ class IPCCoupler(RBC):
 
         # Create state geometry for batch data transfer
         self._abd_state_geom = self._abd_state_feature.create_geometry()
-        self._abd_state_geom.instances().create(uipc.builtin.transform, np.eye(4, dtype=np.float64))
-        self._abd_state_geom.instances().create(uipc.builtin.velocity, np.zeros((4, 4), dtype=np.float64))
+        self._abd_state_geom.instances().create(uipc.builtin.transform, np.eye(4, dtype=self._ipc_float_dtype))
+        self._abd_state_geom.instances().create(uipc.builtin.velocity, np.zeros((4, 4), dtype=self._ipc_float_dtype))
 
         rigid_retrieve_entities = set(
             self._entities_by_coup_type.get(COUPLING_TYPE.TWO_WAY_SOFT_CONSTRAINT, [])

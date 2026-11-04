@@ -427,7 +427,7 @@ def ipc_state_cloth_paths(asset_tmp_path):
 
 
 @pytest.mark.required
-@pytest.mark.precision("64")
+@pytest.mark.precision(str(uipc.build_info()["float_bytes"] * 8))
 @pytest.mark.parametrize("n_envs", [0, 2])
 @pytest.mark.parametrize("substeps", [1, 2])
 def test_cloth_position_velocity(n_envs, substeps, ipc_state_cloth_paths, show_viewer):
@@ -476,53 +476,56 @@ def test_cloth_position_velocity(n_envs, substeps, ipc_state_cloth_paths, show_v
         cloth.set_velocity(velocity)
     acceleration = np.array(gravity)
     substep_dt = dt / substeps
+    # Unit-scale positions round at O(eps); velocity reconstruction divides by h.
+    position_tolerance = 8 * np.finfo(gs.np_float).eps if gs.np_float == np.float32 else 1e-10
+    velocity_tolerance = position_tolerance / substep_dt if gs.np_float == np.float32 else 1e-10
     for step in range(1, 3):
         scene.step()
         n = step * substeps
         for i_e, cloth in enumerate(cloths):
             state = cloth.get_state()
-            assert_allclose(state.vel, velocities[i_e] + acceleration * dt * step, atol=1e-10, rtol=0.0)
+            assert_allclose(state.vel, velocities[i_e] + acceleration * dt * step, atol=velocity_tolerance, rtol=0.0)
             displacement = velocities[i_e] * dt * step + acceleration * substep_dt**2 * n * (n + 1) / 2
-            assert_allclose(state.pos, initial[i_e] + displacement, atol=1e-10, rtol=0.0)
+            assert_allclose(state.pos, initial[i_e] + displacement, atol=position_tolerance, rtol=0.0)
 
     target = initial[0] + (0.03, 0.02, 0.1)
     cloths[0].set_position(target)
     scene.step()
     state = cloths[0].get_state()
     previous_velocity = velocities[0] + acceleration * dt * 2
-    assert_allclose(state.vel, previous_velocity + acceleration * dt, atol=1e-10, rtol=0.0)
+    assert_allclose(state.vel, previous_velocity + acceleration * dt, atol=velocity_tolerance, rtol=0.0)
     displacement = previous_velocity * dt + acceleration * substep_dt**2 * substeps * (substeps + 1) / 2
-    assert_allclose(state.pos, target + displacement, atol=1e-10, rtol=0.0)
+    assert_allclose(state.pos, target + displacement, atol=position_tolerance, rtol=0.0)
 
     cloths[0].set_position(initial[0])
     cloths[0].set_velocity(velocities[0])
     scene.step()
     state = cloths[0].get_state()
-    assert_allclose(state.vel, velocities[0] + acceleration * dt, atol=1e-10, rtol=0.0)
+    assert_allclose(state.vel, velocities[0] + acceleration * dt, atol=velocity_tolerance, rtol=0.0)
     displacement = velocities[0] * dt + acceleration * substep_dt**2 * substeps * (substeps + 1) / 2
-    assert_allclose(state.pos, initial[0] + displacement, atol=1e-10, rtol=0.0)
+    assert_allclose(state.pos, initial[0] + displacement, atol=position_tolerance, rtol=0.0)
     state = cloths[1].get_state()
     n = 4 * substeps
-    assert_allclose(state.vel, velocities[1] + acceleration * dt * 4, atol=1e-10, rtol=0.0)
+    assert_allclose(state.vel, velocities[1] + acceleration * dt * 4, atol=velocity_tolerance, rtol=0.0)
     displacement = velocities[1] * dt * 4 + acceleration * substep_dt**2 * n * (n + 1) / 2
-    assert_allclose(state.pos, initial[1] + displacement, atol=1e-10, rtol=0.0)
+    assert_allclose(state.pos, initial[1] + displacement, atol=position_tolerance, rtol=0.0)
 
     scene.reset()
     for i_e, cloth in enumerate(cloths):
         state = cloth.get_state()
-        assert_allclose(state.pos, initial[i_e], atol=1e-10, rtol=0.0)
-        assert_allclose(state.vel, 0.0, atol=1e-10, rtol=0.0)
+        assert_allclose(state.pos, initial[i_e], atol=position_tolerance, rtol=0.0)
+        assert_allclose(state.vel, 0.0, atol=velocity_tolerance, rtol=0.0)
         cloth.set_velocity(velocities[i_e])
     scene.step()
     for i_e, cloth in enumerate(cloths):
         state = cloth.get_state()
-        assert_allclose(state.vel, velocities[i_e] + acceleration * dt, atol=1e-10, rtol=0.0)
+        assert_allclose(state.vel, velocities[i_e] + acceleration * dt, atol=velocity_tolerance, rtol=0.0)
         displacement = velocities[i_e] * dt + acceleration * substep_dt**2 * substeps * (substeps + 1) / 2
-        assert_allclose(state.pos, initial[i_e] + displacement, atol=1e-10, rtol=0.0)
+        assert_allclose(state.pos, initial[i_e] + displacement, atol=position_tolerance, rtol=0.0)
 
 
 @pytest.mark.required
-@pytest.mark.precision("64")
+@pytest.mark.precision(str(uipc.build_info()["float_bytes"] * 8))
 @pytest.mark.parametrize("n_envs", [0, 2])
 def test_volume_frame_state(n_envs, show_viewer):
     scene = gs.Scene(
@@ -551,10 +554,11 @@ def test_volume_frame_state(n_envs, show_viewer):
     )
     scene.build(n_envs=n_envs)
     initial = tensor_to_array(entity.get_state().pos).copy()
+    tolerance = 8 * np.finfo(gs.np_float).eps if gs.np_float == np.float32 else 1e-10
     assert entity.n_elements > 0
     for _ in range(4):
         scene.step()
         state = entity.get_state()
         assert (state.active == gs.ACTIVE).all()
-        assert_allclose(state.pos, initial, atol=1e-10, rtol=0.0)
-        assert_allclose(state.vel, 0.0, atol=1e-10, rtol=0.0)
+        assert_allclose(state.pos, initial, atol=tolerance, rtol=0.0)
+        assert_allclose(state.vel, 0.0, atol=tolerance, rtol=0.0)
