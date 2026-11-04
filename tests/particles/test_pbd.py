@@ -225,9 +225,10 @@ def test_unified_elastic_projection(n_envs, contact_distances, show_viewer, asse
                 ),
             )
         )
+    # Offset support-face diagonals keep edge projections separate from the point-face check.
     mixed_contact_rigid = scene.add_entity(
         morph=gs.morphs.Box(
-            pos=(3.05, 0.05, 0.4975),
+            pos=(3.15, 0.05, 0.4975),
             size=(0.5, 0.5, 0.007),
         ),
         material=gs.materials.Rigid(
@@ -368,6 +369,17 @@ def test_unified_elastic_projection(n_envs, contact_distances, show_viewer, asse
             positions[3, 2] -= max(thickness - gap, 0.0)
             assert_allclose(contact_elastic.get_particles_pos(), positions, atol=2e-7)
             assert_equal(contact_elastic.get_particles_pos()[..., :2], positions[:, :2])
+        contact_rigid.set_pos((0.04, 0.04, 0.6075 + 0.5 * thickness))
+        for offset, count in ((thickness, 2), (detection_distance, 1)):
+            positions = contact_elastic.init_particles.copy()
+            positions[:, 0] -= 2.0
+            positions[3, :2] = (-0.00721, 0.01347)
+            contact_elastic.set_particles_pos(positions)
+            mixed_contact_rigid.set_pos((0.04, 0.04, 0.6035 + 0.5 * thickness + offset))
+            scene.pbd_solver.project_collision()
+            positions[3, 2] -= 0.5 * thickness / count
+            assert_allclose(contact_elastic.get_particles_pos(), positions, atol=2e-7)
+        mixed_contact_rigid.set_pos((13.0, 0.0, 1.0))
         contact_rigid.set_pos((14.0, 0.0, 1.0))
         face_entity = face_entities[0]
         face_entity.fix_particles([3, 4])
@@ -434,6 +446,7 @@ def test_unified_elastic_projection(n_envs, contact_distances, show_viewer, asse
         if i_contact == 1:
             upper = tensor_to_array(mixed_contact_rigid.get_verts())[..., 2].max()
             positions[:3, 2] += weights * (upper - entity.init_particles[0, 2])
+            positions[:3, 2] = 0.5 * (positions[:3, 2] + entity.init_particles[:3, 2])
         assert_allclose(entity.get_particles_pos(), positions, atol=2e-7)
     assert_allclose(cloth.get_particles_pos(), cloth_positions, atol=2e-7)
     for entity, expected in zip(entities, expected_positions):
@@ -1084,6 +1097,8 @@ def test_one_way_rigid_surface_collision(n_envs, is_regular_grid, options_type, 
                     morph=gs.morphs.Box(
                         pos=(2.04, y + 0.04, 0.79),
                         size=(0.16, 0.16, 0.02),
+                        contype=1,
+                        conaffinity=0,
                     ),
                     material=gs.materials.Rigid(
                         coup_friction=mu_geom,
@@ -1191,7 +1206,7 @@ def test_one_way_rigid_surface_collision(n_envs, is_regular_grid, options_type, 
         positions[i_v, :2] = np.array(pbd_options.upper_bound[:2]) + 0.05
         elastic.set_particles_pos(positions, envs_idx=n_envs - 1 if n_envs else None)
         scene.pbd_solver.project_collision()
-        positions[i_v, :2] = pbd_options.upper_bound[:2]
+        positions[i_v, :2] = 0.5 * (positions[i_v, :2] + pbd_options.upper_bound[:2])
         particles_pos = tensor_to_array(elastic.get_particles_pos()).reshape((-1, elastic.n_particles, 3))
         assert_allclose(particles_pos[-1], positions, atol=1e-7)
         if n_envs:
@@ -1209,6 +1224,15 @@ def test_one_way_rigid_surface_collision(n_envs, is_regular_grid, options_type, 
 
         entity = friction_entities[-1]
         rigid = friction_rigids[-1]
+        for n_contacts in (1, 2, 3):
+            scene.reset()
+            for contact_rigid in friction_rigids[-n_contacts:]:
+                contact_rigid.set_pos(rigid.morph.pos)
+            entity.set_particles_vel((0.01, 0.0, -0.1))
+            scene.step()
+            assert_allclose(entity.get_particles_pos()[..., :3, :], entity.init_particles[:3], atol=2e-7)
+            assert_allclose(entity.get_particles_vel()[..., :3, :], 0.0, atol=2e-5)
+
         for linear_velocity, angular_velocity, normal_velocity in (
             ((0.0, 0.0, 0.0), (0.0, 0.0, 0.2), -0.1),
             ((0.02, -0.01, 0.03), (1.0, -0.5, 2.0), -0.5),

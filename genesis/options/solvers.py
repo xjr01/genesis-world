@@ -1148,10 +1148,11 @@ class PBSTFOptions(Options):
 class PBDUnifiedOptions(Options):
     """Options for unified position-based dynamics (PBD) of cloth and elastic solids.
 
-    Each iteration applies elastic corrections, then full vertex-face and domain contact corrections, followed by
-    edge-edge corrections averaged per participating vertex at the updated positions. Contacts use the elastic boundary
-    and rigid collision meshes. More iterations improve shape preservation and contact convergence under load at increased
-    runtime cost. Finer mesh sampling resolves smaller features at increased memory and runtime cost.
+    Each iteration applies elastic corrections, then vertex-face and domain contact corrections, followed by edge-edge
+    corrections at the updated positions. Each contact stage averages corrections per participating vertex to limit
+    overshoot where multiple contacts overlap. Contacts use the elastic boundary and rigid collision meshes.
+    More iterations improve shape preservation and contact convergence under load at increased runtime cost.
+    Finer mesh sampling resolves smaller features at increased memory and runtime cost.
     Constraint acceleration extrapolates consecutive iterates before contact projection. Larger values can improve shape
     recovery with fewer iterations, with a greater risk of overshoot under changing contacts.
     Zero uses the current correction alone.

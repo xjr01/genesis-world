@@ -295,13 +295,14 @@ def func_apply_delta(acceleration: float, particles: V_ANNOTATION, particles_ng:
 
 @qd.func
 def func_apply_particle_contact_delta(i_p, i_b, particles: V_ANNOTATION, errno: qd.Tensor):
-    pos = particles[i_p, i_b].pos + particles[i_p, i_b].dpos
+    delta = particles[i_p, i_b].dpos / qd.max(particles[i_p, i_b].n_contact_constraints, 1)
+    pos = particles[i_p, i_b].pos + delta
     if qd.math.isnan(pos).any() or qd.math.isinf(pos).any():
         qd.atomic_or(errno[i_b], ErrorCode.INVALID_PBD_STATE)
     else:
         particles[i_p, i_b].pos = pos
         # Translate the elastic history with the contact correction so extrapolation remains elastic-only.
-        particles[i_p, i_b].pos_iter += particles[i_p, i_b].dpos
+        particles[i_p, i_b].pos_iter += delta
     particles[i_p, i_b].dpos = qd.Vector.zero(gs.qd_float, 3)
 
 
@@ -313,6 +314,10 @@ def func_apply_contact_delta(particles: V_ANNOTATION, errno: qd.Tensor):
 
 @qd.func
 def func_accumulate_contact(i_b, indices, residual, gradients, weights, particles: V_ANNOTATION, errno: qd.Tensor):
+    # Detection-band candidates retain their count across the target gap to keep relaxation continuous.
+    for i_v in qd.static(range(indices.n)):
+        if weights[i_v] > 0.0:
+            qd.atomic_add(particles[indices[i_v], i_b].n_contact_constraints, 1)
     multiplier = gs.qd_float(0.0)
     if residual < 0.0:
         denominator = gs.qd_float(0.0)
@@ -428,30 +433,24 @@ def func_accumulate_vertex_contacts(
     for i_p, i_b in qd.ndrange(particles.shape[0], particles.shape[1]):
         if particles_ng[i_p, i_b].active and particles[i_p, i_b].free:
             for i_axis in qd.static(range(3)):
-                normal = qd.Vector.zero(gs.qd_float, 3)
-                normal[i_axis] = 1.0
-                func_accumulate_contact(
-                    i_b,
-                    qd.Vector([i_p]),
-                    particles[i_p, i_b].pos[i_axis]
-                    - solver.boundary.lower_qd[i_axis]
-                    - solver._options.collision_thickness,
-                    qd.Matrix.cols([normal]),
-                    qd.Vector([1.0]),
-                    particles,
-                    errno,
-                )
-                func_accumulate_contact(
-                    i_b,
-                    qd.Vector([i_p]),
-                    solver.boundary.upper_qd[i_axis]
-                    - particles[i_p, i_b].pos[i_axis]
-                    - solver._options.collision_thickness,
-                    qd.Matrix.cols([-normal]),
-                    qd.Vector([1.0]),
-                    particles,
-                    errno,
-                )
+                for i_side in qd.static(range(2)):
+                    normal = qd.Vector.zero(gs.qd_float, 3)
+                    normal[i_axis] = 1.0 if i_side == 0 else -1.0
+                    distance = qd.select(
+                        i_side == 0,
+                        particles[i_p, i_b].pos[i_axis] - solver.boundary.lower_qd[i_axis],
+                        solver.boundary.upper_qd[i_axis] - particles[i_p, i_b].pos[i_axis],
+                    )
+                    if distance <= solver._options.contact_detection_distance:
+                        func_accumulate_contact(
+                            i_b,
+                            qd.Vector([i_p]),
+                            distance - solver._options.collision_thickness,
+                            qd.Matrix.cols([normal]),
+                            qd.Vector([1.0]),
+                            particles,
+                            errno,
+                        )
             if qd.static(isinstance(solver._rigid_surface, RigidSurface)):
                 for i_g_ in range(surface_info.projection_geoms_idx.shape[0]):
                     i_g = surface_info.projection_geoms_idx[i_g_]
@@ -501,7 +500,7 @@ def func_accumulate_vertex_contacts(
                     else:
                         residual = sdf.sdf_func_world(i_g, i_b, pos, dyn_state.geoms, dyn_info.geoms, collider_info.sdf)
                         residual -= solver._options.collision_thickness
-                        if residual < 0.0:
+                        if residual <= solver._options.contact_detection_distance - solver._options.collision_thickness:
                             normal = geom.qd_normalize(
                                 sdf.sdf_func_grad_world_local_consistent(
                                     i_g,
@@ -516,7 +515,10 @@ def func_accumulate_vertex_contacts(
                             )
                     if qd.math.isnan(residual) or qd.math.isinf(residual) or qd.math.isnan(normal).any():
                         qd.atomic_or(errno[i_b], ErrorCode.INVALID_CONTACT_NAN)
-                    else:
+                    elif residual < 0.0 or (
+                        normal.norm_sqr() > 0.0
+                        and residual <= solver._options.contact_detection_distance - solver._options.collision_thickness
+                    ):
                         func_accumulate_rigid_contact(
                             i_b,
                             i_g,
@@ -743,7 +745,7 @@ def func_edge_contacts(
     """Accumulate unique edge-pair corrections at fixed positions and average them per participating vertex."""
     if qd.static(not is_diagnostic):
         for i_p, i_b in qd.ndrange(solver.n_particles, solver._B):
-            solver._edge_contact_counts[i_p, i_b] = 0
+            solver.particles[i_p, i_b].n_contact_constraints = 0
     for i_e, i_b in qd.ndrange(solver._surface_edge_adjacency.edge_offsets.shape[0] - 1, solver._B):
         if qd.static(not is_diagnostic and solver._options.is_recording_edge_contacts):
             solver._detected_edge_contacts[i_e, i_b] = False
@@ -937,18 +939,11 @@ def func_edge_contacts(
                                                 surface_info,
                                                 solver,
                                             )
-                                            # Count separated candidates in the detection band too, keeping averaging
-                                            # stable as individual constraints enter or leave the target gap.
-                                            for slot in qd.static(range(2)):
-                                                if weights[slot] > 0.0:
-                                                    qd.atomic_add(solver._edge_contact_counts[indices[slot], i_b], 1)
                     node_idx = func_bvh_successor(0, node_idx, -1, solver._rigid_surface.bvh.nodes)
 
     if qd.static(not is_diagnostic):
         for i_p, i_b in qd.ndrange(solver.n_particles, solver._B):
-            count = solver._edge_contact_counts[i_p, i_b]
-            if count > 0:
-                solver.particles[i_p, i_b].dpos /= count
+            if solver.particles[i_p, i_b].n_contact_constraints > 0:
                 func_apply_particle_contact_delta(i_p, i_b, solver.particles, solver._errno)
 
 
@@ -970,6 +965,7 @@ def func_store_contact_positions(particles: V_ANNOTATION):
     for i_p, i_b in qd.ndrange(particles.shape[0], particles.shape[1]):
         particles[i_p, i_b].contact_pos = particles[i_p, i_b].pos
         particles[i_p, i_b].dpos = qd.Vector.zero(gs.qd_float, 3)
+        particles[i_p, i_b].n_contact_constraints = 0
 
 
 @qd.kernel
@@ -1295,9 +1291,8 @@ class PBDUnifiedSolver(Solver):
     Supports cloth and tetrahedral elastic entities. Rigid geoms with ``needs_coup=True`` supply prescribed
     boundaries. Each iteration averages elastic corrections by each vertex's participating constraint count, then
     projects vertex-face and domain contacts, followed by edge-edge contacts detected at the updated positions.
-    Vertex-face and domain corrections accumulate before a simultaneous update. All unique elastic-rigid edge pairs
-    contribute inverse-mass corrections from the same positions, averaged by each vertex's incident edge-contact count
-    before updating positions.
+    Each contact stage averages normal and tangential corrections together by each vertex's participating contact count.
+    Unique elastic-rigid edge pairs contribute inverse-mass corrections at the positions updated by vertex-face contacts.
     Surface contacts use elastic boundary faces and rigid collision-mesh triangles.
     Coulomb friction bounds tangential corrections by the normal multiplier. Static and kinetic coefficients each
     combine the elastic material coefficient with the rigid coupling coefficient by maximum.
@@ -1340,7 +1335,6 @@ class PBDUnifiedSolver(Solver):
         self._surface_query_baseline = None
         self._surface_query_updates = 0
         self._surface_edge_adjacency = None
-        self._edge_contact_counts = None
         self._detected_edge_contacts = None
         self._edge_history_substep = None
         self._edge_history_positions = None
@@ -1423,6 +1417,7 @@ class PBDUnifiedSolver(Solver):
             momentum_vel=gs.qd_vec3,
             dpos=gs.qd_vec3,
             n_elastic_constraints=gs.qd_int,
+            n_contact_constraints=gs.qd_int,
             vel=gs.qd_vec3,
         ).field(shape=(self.n_particles, self._B), layout=qd.Layout.SOA)
         self.particles_ng = qd.types.struct(active=gs.qd_bool).field(
@@ -1601,7 +1596,6 @@ class PBDUnifiedSolver(Solver):
                 self._detected_edge_contacts = qd.field(
                     gs.qd_bool, shape=(len(self._surface_edge_adjacency.endpoints), self._B)
                 )
-            self._edge_contact_counts = qd.field(gs.qd_int, shape=(self.n_particles, self._B))
             rigid_faces = np.concatenate(tuple(geom.init_faces + geom.vert_start for geom in surface_geoms))
             self._contact_faces = qd.field(gs.qd_ivec3, shape=len(rigid_faces))
             self._contact_faces.from_numpy(rigid_faces)
@@ -1725,7 +1719,7 @@ class PBDUnifiedSolver(Solver):
         kernel_project_elastic_constraints(self)
 
     def project_collision(self):
-        """Apply simultaneous vertex-face and domain corrections, then average edge-edge corrections per vertex."""
+        """Average contact corrections per vertex, first for vertex-face and domain contacts, then for edge contacts."""
         if gs.use_zerocopy and gs.backend == gs.metal:
             torch.mps.synchronize()
         self.update_contact_bvh()
