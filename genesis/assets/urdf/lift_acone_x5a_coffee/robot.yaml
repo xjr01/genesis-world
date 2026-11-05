@@ -1,0 +1,277 @@
+schema_version: 1
+id: lift_acone_x5a_coffee
+joints:
+- name: joint_lift
+  kind: prismatic
+  lower: 0.0
+  upper: 0.86
+  velocity_limit: 0.5
+  home: 0.0
+  stiffness: 20000.0
+  damping: 800.0
+  effort_limit: 500.0
+- name: left_joint1
+  kind: revolute
+  lower: -10.0
+  upper: 10.0
+  velocity_limit: 6.0
+  home: 0.0
+  stiffness: 1500.0
+  damping: 40.0
+  effort_limit: 30.0
+- name: left_joint2
+  kind: revolute
+  lower: -10.0
+  upper: 10.0
+  velocity_limit: 6.0
+  home: 0.0
+  stiffness: 1500.0
+  damping: 40.0
+  effort_limit: 30.0
+- name: left_joint3
+  kind: revolute
+  lower: -10.0
+  upper: 10.0
+  velocity_limit: 6.0
+  home: 0.0
+  stiffness: 1500.0
+  damping: 40.0
+  effort_limit: 30.0
+- name: left_joint4
+  kind: revolute
+  lower: -10.0
+  upper: 10.0
+  velocity_limit: 6.0
+  home: 0.0
+  stiffness: 1500.0
+  damping: 40.0
+  effort_limit: 30.0
+- name: left_joint5
+  kind: revolute
+  lower: -10.0
+  upper: 10.0
+  velocity_limit: 6.0
+  home: 0.0
+  stiffness: 1500.0
+  damping: 40.0
+  effort_limit: 30.0
+- name: left_joint6
+  kind: revolute
+  lower: -10.0
+  upper: 10.0
+  velocity_limit: 6.0
+  home: 0.0
+  stiffness: 1500.0
+  damping: 40.0
+  effort_limit: 30.0
+- name: left_joint7
+  kind: prismatic
+  lower: 0.0
+  upper: 0.044
+  velocity_limit: 0.05
+  home: 0.044
+  stiffness: 1000.0
+  damping: 30.0
+  effort_limit: 20.0
+- name: left_joint8
+  kind: prismatic
+  lower: 0.0
+  upper: 0.044
+  velocity_limit: 0.05
+  home: 0.044
+  stiffness: 1000.0
+  damping: 30.0
+  effort_limit: 20.0
+- name: right_joint1
+  kind: revolute
+  lower: -10.0
+  upper: 10.0
+  velocity_limit: 6.0
+  home: 0.0
+  stiffness: 1500.0
+  damping: 40.0
+  effort_limit: 30.0
+- name: right_joint2
+  kind: revolute
+  lower: -10.0
+  upper: 10.0
+  velocity_limit: 6.0
+  home: 0.0
+  stiffness: 1500.0
+  damping: 40.0
+  effort_limit: 30.0
+- name: right_joint3
+  kind: revolute
+  lower: -10.0
+  upper: 10.0
+  velocity_limit: 6.0
+  home: 0.0
+  stiffness: 1500.0
+  damping: 40.0
+  effort_limit: 30.0
+- name: right_joint4
+  kind: revolute
+  lower: -10.0
+  upper: 10.0
+  velocity_limit: 6.0
+  home: 0.0
+  stiffness: 1500.0
+  damping: 40.0
+  effort_limit: 30.0
+- name: right_joint5
+  kind: revolute
+  lower: -10.0
+  upper: 10.0
+  velocity_limit: 6.0
+  home: 0.0
+  stiffness: 1500.0
+  damping: 40.0
+  effort_limit: 30.0
+- name: right_joint6
+  kind: revolute
+  lower: -10.0
+  upper: 10.0
+  velocity_limit: 6.0
+  home: 0.0
+  stiffness: 1500.0
+  damping: 40.0
+  effort_limit: 30.0
+- name: right_joint7
+  kind: prismatic
+  lower: 0.0
+  upper: 0.044
+  velocity_limit: 0.05
+  home: 0.044
+  stiffness: 1000.0
+  damping: 30.0
+  effort_limit: 20.0
+- name: right_joint8
+  kind: prismatic
+  lower: 0.0
+  upper: 0.044
+  velocity_limit: 0.05
+  home: 0.044
+  stiffness: 1000.0
+  damping: 30.0
+  effort_limit: 20.0
+groups:
+  lift:
+  - joint_lift
+  left_arm:
+  - left_joint1
+  - left_joint2
+  - left_joint3
+  - left_joint4
+  - left_joint5
+  - left_joint6
+  left_gripper:
+  - left_joint7
+  - left_joint8
+  right_arm:
+  - right_joint1
+  - right_joint2
+  - right_joint3
+  - right_joint4
+  - right_joint5
+  - right_joint6
+  right_gripper:
+  - right_joint7
+  - right_joint8
+tool_frames:
+  left_grasp:
+    parent_link: left_link6
+    link_from_tcp:
+      position_m:
+      - 0.15757000232458115
+      - -3.084653468544518e-05
+      - 0.0005769215511620504
+  right_grasp:
+    parent_link: right_link6
+    link_from_tcp:
+      position_m:
+      - 0.15757000232458115
+      - -3.084653468544518e-05
+      - 0.0005769215511620504
+  left:
+    parent_link: left_link6
+    link_from_tcp:
+      position_m:
+      - 0.0
+      - 0.0
+      - 0.0
+  right:
+    parent_link: right_link6
+    link_from_tcp:
+      position_m:
+      - 0.0
+      - 0.0
+      - 0.0
+resources:
+  model:
+    file: urdf/lift_acone_x5a.urdf
+    sha256: 4bb6f38b43a00d2c46e2b5ce2c5fac1a6a6dad1d5e52f7247b014b6a05924456
+  collision:
+    file: urdf/lift_acone_x5a.urdf
+    sha256: 4bb6f38b43a00d2c46e2b5ce2c5fac1a6a6dad1d5e52f7247b014b6a05924456
+  visual:
+    file: urdf/lift_acone_x5a.urdf
+    sha256: 4bb6f38b43a00d2c46e2b5ce2c5fac1a6a6dad1d5e52f7247b014b6a05924456
+dependencies:
+- file: meshes/lift/arm_base_link.stl
+  sha256: 5ae45d7934fe9f3d6885f95e7a687d61be2e2fea254ee0080159943f3820b5ff
+- file: meshes/lift/base_link.stl
+  sha256: 8f7102abd0d7bedbfe4376c325d1379af5b4e06af18e3e36ec1ffbac8698c5a8
+- file: meshes/lift/h_base.stl
+  sha256: e6753707f9a5831e35b9db72a22ae051fa1cab4841a3701e7befcd489040bd5e
+- file: meshes/lift/h_link1.stl
+  sha256: cd07a2b550c8dd4ac14634b5c724f51daac162f33e33724356c6676b95dbb760
+- file: meshes/lift/h_link2.stl
+  sha256: b428dc605dae74f039bb5ab8cd1dcaf7fdbee97bfed535fb70a20582155cf0d8
+- file: meshes/lift/lift.stl
+  sha256: 8f6ef4ad43331f6f2296dd63fbba1b118841f5f99cd609bd6b76743adb40335d
+- file: meshes/lift/wheel_1.stl
+  sha256: f5efffd0e3d02158f455c20942c9ac29d3ded0e138b9a2ffde31d1d9370ec5c1
+- file: meshes/lift/wheel_2.stl
+  sha256: 747236a3d23cb65aacb0a9000c831282b01a7b476df26b16f66e0785bcc927d3
+- file: meshes/lift/wheel_3.stl
+  sha256: fc5992f26a5c90bd159b26e0066faf371c8d7f81f7c397c703bf3ea49b1277df
+- file: meshes/x5a/link1.STL
+  sha256: 04a52b86a5b28c847377a9167e7effab0478fa591052e83b0b32cf8709bb3885
+- file: meshes/x5a/link2.STL
+  sha256: 2865da6a962c814abaf9251497bcf5f5e3b67610e3b657ddcaa9de8b3d45e83e
+- file: meshes/x5a/link3.STL
+  sha256: 3ac2411b0cbffcf4808cae4c215cfeab607f240cd124eeba209ac7986ac047c0
+- file: meshes/x5a/link4.STL
+  sha256: 3447ddef920c22e4607b887e1cc588037dfb51c37825c4cac86a5391425469c4
+- file: meshes/x5a/link5.STL
+  sha256: 934b3e70ce2987f8de999de29d8ef72c8370dced8e9fdf6f9ddd3e7e24c1e464
+- file: meshes/x5a/link6.STL
+  sha256: 32dca4ededcf3215163207b9aea1046114ae59921555d1e068ee46fa6e53915e
+- file: meshes/x5a/link7.STL
+  sha256: f21213e7eab04ac757646c145af56677e6e16a8355249ed0b71a2b79209e92b6
+- file: meshes/x5a/link8.STL
+  sha256: 3cde01e375769351782d62fa980cf79f28cd10051cc2b405961e66f380be12c2
+- file: meshes/finger_convex/link7_00.obj
+  sha256: 138726923dad5e41fc7dace9c9e35ed300d6911553b7a29414adc508af3066ec
+- file: meshes/finger_convex/link7_01.obj
+  sha256: c47a6066b6c0f3c60180f0c35099fdadc74340655c2e6417b2e7e704f72e81b3
+- file: meshes/finger_convex/link7_02.obj
+  sha256: be0093fc8a0db634f91e010a580d3126f6d92da1c8c7ba691c7cb440a7b5dc1b
+- file: meshes/finger_convex/link7_03.obj
+  sha256: 129116bc383bce07350ac751c3819447c38c08c2149c72ba497a5e62eb7d3236
+- file: meshes/finger_convex/link7_04.obj
+  sha256: c89cbc90e4c05258628c1e930f3576af8568c3afbbaeecd6dd92dc1482b42341
+- file: meshes/finger_convex/link7_05.obj
+  sha256: 0da49e9fa2cb1bb81e247d24a3a797dadca66721542d78fcb6c8790d0a44b0a1
+- file: meshes/finger_convex/link8_00.obj
+  sha256: f80cf396ab076ffd3cd00913213cf441c3b810aab69efed27dd4d2c749d2e5b0
+- file: meshes/finger_convex/link8_01.obj
+  sha256: b5b52d2b226ddaa71c9812b95d5a4a98b6ca2df0db6ab6dcf91ceedf4d82c835
+- file: meshes/finger_convex/link8_02.obj
+  sha256: 3e784fb7e8188962149296e5461c9ce4c2d6308587483e4da2c500be951a6873
+- file: meshes/finger_convex/link8_03.obj
+  sha256: 32f42247b13c4fb32f6ea99523a1da4fcdeeb87abfd41d7ae2c60c6cbd69dac3
+- file: meshes/finger_convex/link8_04.obj
+  sha256: f8a25b9a38ed005a5f14364b2706c1632b26bba182fddb99ba9ad90c3c285d08
+- file: meshes/finger_convex/link8_05.obj
+  sha256: 1744210956f58ddaeab7b4ea7ffcedca16e1549138dacf22cf9f1bb78cd0ee49

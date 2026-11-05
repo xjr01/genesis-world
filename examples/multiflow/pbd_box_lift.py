@@ -1,17 +1,18 @@
-"""Clamp and lift with the coffee demo's robot, tabletop, and deformable sponge.
+"""Replay the coffee robot's sponge grasp and pickup with unified position-based dynamics (PBD).
 
-Run with python -m examples.multiflow.pbd_box_lift -g -v. Unified position-based dynamics (PBD) is the default;
---solver original selects the separate stretch/volume solver. --solver fem selects implicit corotated finite element
-method (FEM) elasticity on a coarser mesh. The right hand starts at the sponge, closes for
-0.6 seconds, settles until 1.0 second, then lifts vertically 0.15 meters in 4 seconds and holds. Sponge tracking error
-above 1 cm stops the example. --check-penetration measures vertex intrusion against the hand and fingers and unified
-PBD surface crossings against every coupled rigid geom, including the table, with extra geometry queries. It also
-enables robot self-collision checks and stops on contact; ordinary playback skips these checks for faster stepping.
---damping controls unified PBD deformation damping in 1/s; use zero to compare elastic oscillations.
-With --vis, Space plays/pauses and Left/Right browse simulation time steps. For unified PBD, T switches to individual
-solver iterations with colored collision edges, recorded after point/face projection and before edge projection.
-T switches back to completed time steps with plain meshes. D cycles wireframe modes. The viewer starts paused
-in time-step mode and keeps visited steps and iterations in memory.
+Run with python -m examples.multiflow.pbd_box_lift -g -v. The bundled coffee sponge contains 401 vertices and
+1509 tetrahedra, spanning 100 x 73 x 31.8 mm. The Z-up scene uses the coffee lift robot and its recorded joint
+position targets from 37.62 to 39.02 seconds. Fingers close over 0.6 seconds and settle until 1 second; the recorded
+1.4-second pickup then plays at its original speed, followed by a 0.5-second hold. The sponge moves through contact.
+The closure follows tools/coffee_sponge_lift_probe.py's quintic mode with 6 mm indentation per finger.
+The rendered tetrahedral boundary exposes the imported discretization. Asset hashes and recording provenance
+are in coffee_sponge/source.json.
+
+Sponge tracking error above 1 cm stops the example. --check-penetration measures vertex intrusion and surface
+crossings and checks robot self-collision, at the cost of extra geometry queries. --damping controls deformation
+damping in 1/s; higher values settle faster but recover slower. With --vis, Space plays/pauses and Left/Right browse
+time steps. T switches to solver iterations with colored collision edges; D cycles wireframe modes. The viewer
+starts paused and retains visited steps and iterations in memory.
 """
 
 import argparse
@@ -19,9 +20,7 @@ import math
 import os
 import sys
 import time
-import xml.etree.ElementTree as ET
 from colorsys import hsv_to_rgb
-from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from queue import SimpleQueue
@@ -37,7 +36,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import genesis as gs
 from genesis.ext.pyrender.jit_render import RenderBuffer
 from genesis.utils import geom
-from genesis.utils.element import create_tetrahedral_grid
 from genesis.utils.misc import tensor_to_array
 from genesis.vis.keybindings import Key, Keybind
 
@@ -64,9 +62,8 @@ class LiftFrame:
 class LiftPlayback:
     """Browse recorded render frames while retaining the latest physics and robot controller state."""
 
-    def __init__(self, scene, sponge, is_unified):
+    def __init__(self, scene, sponge):
         self.scene = scene
-        self.is_unified = is_unified
         self.requests: SimpleQueue[Key] = SimpleQueue()
         self.frames: list[LiftFrame] = []
         self.step_frames: list[LiftFrame] = []
@@ -74,8 +71,8 @@ class LiftPlayback:
         self.frame = 0
         self.is_paused = True
         self.is_iteration_playback = False
-        self.iterations_per_step = scene.sim.substeps * scene.pbd_options.max_solver_iterations if is_unified else 1
-        self.sponge_node = scene.visualizer.context.static_nodes[(0, sponge.uid)] if is_unified else None
+        self.iterations_per_step = scene.sim.substeps * scene.pbd_options.max_solver_iterations
+        self.sponge_node = scene.visualizer.context.static_nodes[(0, sponge.uid)]
         self.rigid_geoms = tuple(
             geom
             for entity in scene.rigid_solver.entities
@@ -91,12 +88,9 @@ class LiftPlayback:
             Keybind(name="play_pause", key=Key.SPACE, callback=self.requests.put, args=(Key.SPACE,)),
             Keybind(name="previous_frame", key=Key.LEFT, callback=self.requests.put, args=(Key.LEFT,)),
             Keybind(name="next_frame", key=Key.RIGHT, callback=self.requests.put, args=(Key.RIGHT,)),
+            Keybind(name="toggle_iteration_playback", key=Key.T, callback=self.requests.put, args=(Key.T,)),
         )
-        if is_unified:
-            scene.viewer.register_keybinds(
-                Keybind(name="toggle_iteration_playback", key=Key.T, callback=self.requests.put, args=(Key.T,))
-            )
-            gs.logger.info("T: switch between time steps and solver iterations with colored collision edges.")
+        gs.logger.info("T: switch between time steps and solver iterations with colored collision edges.")
         gs.logger.info(
             "Space: play/pause. Left/Right: previous/next frame in the current mode. D: wireframe. Close the viewer to exit."
         )
@@ -109,7 +103,7 @@ class LiftPlayback:
         edge_positions = np.empty((0, 2, 3), dtype=gs.np_float)
         step_frame = LiftFrame(step, 0, 0, buffers, None, edges_idx, edge_positions)
         self.step_frames.append(step_frame)
-        if self.is_unified and step:
+        if step:
             history = self.scene.pbd_solver.get_edge_contact_history()
             vertices = tensor_to_array(self.scene.pbd_solver.get_visual_vertex_positions(history.positions))
             positions = tensor_to_array(history.positions)
@@ -174,8 +168,7 @@ class LiftPlayback:
         label = f"{mode} | Step {saved.step} | t={frame_time:.4f}s"
         if self.is_iteration_playback and saved.step:
             label += f" | Substep {saved.substep + 1} | Iteration {saved.iteration + 1} | Edges {len(saved.edges_idx)}"
-        if self.is_unified:
-            label += " | T: switch mode"
+        label += " | T: switch mode"
         self.scene.viewer.show_frame(buffers, label=label)
 
     def advance(self, n_steps):
@@ -214,44 +207,10 @@ class LiftPlayback:
         return False
 
 
-def get_sponge_positions(sponge):
-    """Return simulation vertex positions with shape [n_vertices, 3] in this single-environment scene."""
-    if isinstance(sponge, gs.engine.entities.FEMEntity):
-        return sponge.get_state().pos[0]
-    return sponge.get_particles_pos()
-
-
-def solve_tool_pose(robot, link, dofs_idx_local, pos, quat, local_point, qpos):
-    """Solve a tool-center pose and reject unreachable or non-finite inverse kinematics targets."""
-    qpos, error = robot.inverse_kinematics(
-        link=link,
-        pos=pos,
-        quat=quat,
-        local_point=local_point,
-        init_qpos=qpos,
-        max_samples=1,
-        max_solver_iters=100,
-        pos_tol=1e-6,
-        rot_tol=1e-6,
-        dofs_idx_local=dofs_idx_local,
-        return_error=True,
-    )
-    error = tensor_to_array(error)
-    if not np.isfinite(error).all() or np.linalg.norm(error[..., :3]) > 2e-4 or np.linalg.norm(error[..., 3:]) > 2e-4:
-        raise RuntimeError(f"Cannot reach {link.name} tool pose: {error}.")
-    return qpos
-
-
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("-v", "--vis", dest="is_viewer_shown", action="store_true")
     parser.add_argument("-g", "--gpu", dest="is_gpu_enabled", action="store_true")
-    parser.add_argument(
-        "--solver",
-        choices=("original", "unified", "fem"),
-        default="unified",
-        help="Sponge deformation: original or unified PBD on a finer mesh, or implicit FEM on a coarser mesh",
-    )
     parser.add_argument("--dt", type=float, default=0.002, help="Simulation step duration in seconds")
     parser.add_argument("--substeps", type=int, default=1, help="More substeps resolve contacts at extra cost")
     parser.add_argument(
@@ -260,7 +219,9 @@ def main():
         default=80.0,
         help="Unified PBD damping rate in 1/s; higher values settle faster but recover slower",
     )
-    parser.add_argument("-t", "--seconds", type=float, default=5.5, help="Duration; lifting finishes at 5 seconds")
+    parser.add_argument(
+        "-t", "--seconds", type=float, default=2.9, help="Duration; the recorded pickup finishes at 2.4 seconds"
+    )
     parser.add_argument(
         "--check-penetration",
         dest="is_penetration_checked",
@@ -278,74 +239,50 @@ def main():
         args.seconds = min(args.seconds, 0.02)
 
     gs.init(backend=gs.gpu if args.is_gpu_enabled else gs.cpu, seed=0, precision="32")
-    sponge_size = (0.04, 0.06, 0.08)
-    sponge_start = (0.0, -0.044, -0.17)
-    lift_displacement = np.array((0.0, 0.15, 0.0))
+    asset_dir = Path(__file__).with_name("coffee_sponge")
+    with np.load(asset_dir / "sponge.npz", allow_pickle=False) as archive:
+        vertices, elements = archive["vertices"], archive["elements"]
+    with np.load(asset_dir / "pickup.npz", allow_pickle=False) as archive:
+        recorded_time = archive["time"]
+        joint_names = tuple(archive["joint_names"])
+        joint_targets = archive["joint_targets"]
+        initial_qpos = archive["initial_qpos"]
+        sponge_pos = archive["sponge_pos"]
+        sponge_quat = archive["sponge_quat"]
     lift_start = 1.0
-    lift_duration = 4.0
-    tool_center = (0.14747, 0.001786, 0.0)
-    grip_quat = (
-        Rotation.from_euler("x", 15, degrees=True) * Rotation.from_matrix(((0, -1, 0), (-1, 0, 0), (0, 0, -1)))
-    ).as_quat(scalar_first=True)
-    left_quat = (
-        Rotation.from_euler("y", -20, degrees=True)
-        * Rotation.from_euler("z", -30, degrees=True)
-        * Rotation.from_matrix(((1, 0, 0), (0, 0, -1), (0, 1, 0)))
-    ).as_quat(scalar_first=True)
+    # Rotation changes the centroid of the sponge whose authored origin lies on its bottom face.
+    sponge_centers = sponge_pos + Rotation.from_quat(sponge_quat, scalar_first=True).apply(vertices.mean(axis=0))
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
             dt=args.dt,
             substeps=args.substeps,
-            gravity=(0.0, -9.8, 0.0),
+            gravity=(0.0, 0.0, -9.81),
         ),
         rigid_options=gs.options.RigidOptions(
             integrator=gs.integrator.implicitfast,
             enable_self_collision=args.is_penetration_checked,
-            enable_neutral_collision=True,
             noslip_iterations=10,
             enable_torsional_friction=True,
             enable_rolling_friction=True,
             constraint_timeconst=0.004,
         ),
-        fem_options=(
-            gs.options.FEMOptions(
-                # The tabletop supports the sponge in this Y-up scene; the solver floor is Z-aligned.
-                floor_height=-1.0,
-                use_implicit_solver=True,
-                n_pcg_iterations=120,
-            )
-            if args.solver == "fem"
-            else None
-        ),
-        pbd_options=(
-            gs.options.PBDUnifiedOptions(
-                particle_size=0.005,
-                lower_bound=(-0.4, -1.0 / 15.0, -4.0 / 15.0),
-                upper_bound=(0.4, 8.0 / 15.0, 4.0 / 15.0),
-                max_solver_iterations=30,
-                constraint_acceleration=0.0,
-                collision_thickness=5e-5,
-                contact_detection_distance=1.5e-4,
-                is_recording_edge_contacts=args.is_viewer_shown,
-            )
-            if args.solver == "unified"
-            else gs.options.PBDOptions(
-                particle_size=0.005,
-                lower_bound=(-0.4, -1.0 / 15.0, -4.0 / 15.0),
-                upper_bound=(0.4, 8.0 / 15.0, 4.0 / 15.0),
-                max_stretch_solver_iterations=30,
-                max_volume_solver_iterations=30,
-            )
-            if args.solver == "original"
-            else None
+        pbd_options=gs.options.PBDUnifiedOptions(
+            particle_size=0.005,
+            lower_bound=(-0.8, -0.8, 0.82),
+            upper_bound=(0.9, 0.65, 1.8),
+            max_solver_iterations=30,
+            constraint_acceleration=0.0,
+            collision_thickness=5e-5,
+            contact_detection_distance=1.5e-4,
+            is_recording_edge_contacts=args.is_viewer_shown,
         ),
         vis_options=gs.options.VisOptions(
             ambient_light=(0.4, 0.4, 0.4),
         ),
         viewer_options=gs.options.ViewerOptions(
-            camera_pos=(0.40, 0.38, -0.30),
-            camera_lookat=(0.0, -0.005, 0.0),
-            camera_up=(0.0, 1.0, 0.0),
+            camera_pos=(0.90, -0.72, 1.48),
+            camera_lookat=(0.36, -0.12, 1.0),
+            camera_up=(0.0, 0.0, 1.0),
             camera_fov=50,
         ),
         show_viewer=args.is_viewer_shown,
@@ -353,93 +290,74 @@ def main():
     table = scene.add_entity(
         morph=gs.morphs.Box(
             fixed=True,
-            lower=(-0.4, -0.065, -4.0 / 15.0),
-            upper=(0.4, -0.045, 4.0 / 15.0),
+            lower=(-0.7, -0.4, 0.88),
+            upper=(0.7, 0.4, 0.9),
         ),
         material=gs.materials.Rigid(friction=3.0, coup_friction=0.0, is_coup_reaction_enabled=False),
         surface=gs.surfaces.Default(color=(0.36, 0.24, 0.14)),
         name="table",
     )
-    robot_path = Path(gs.utils.get_assets_dir()) / "urdf/sim1_acone/acone_collision.urdf"
-    robot_xml = ET.parse(robot_path).getroot()
-    # Finger contacts use the displayed surface and its authored local transform.
-    for link in robot_xml.findall("link"):
-        if link.attrib["name"] in ("right_link27", "right_link28"):
-            visual = link.find("visual")
-            collision = link.find("collision")
-            for tag in ("origin", "geometry"):
-                collision.remove(collision.find(tag))
-                collision.append(deepcopy(visual.find(tag)))
-    for mesh_node in robot_xml.iter("mesh"):
-        mesh_node.set("filename", str(robot_path.parent / mesh_node.attrib["filename"]))
     robot = scene.add_entity(
         morph=gs.morphs.URDF(
-            pos=(-0.06, -0.55, 0.52),
-            quat=(0.5, -0.5, 0.5, 0.5),
-            file=ET.tostring(robot_xml, encoding="unicode"),
+            pos=(0.0, -0.74, 0.052),
+            quat=(math.sqrt(0.5), 0.0, 0.0, -math.sqrt(0.5)),
+            file=str(Path(gs.utils.get_assets_dir()) / "urdf/lift_acone_x5a_coffee/urdf/lift_acone_x5a_pbd.urdf"),
+            # Prepared closed collision surfaces retain well-defined contact normals through import.
+            decimate=False,
+            watertighten=None,
             convexify=False,
             fixed=True,
+            merge_fixed_links=False,
         ),
-        material=gs.materials.Rigid(
-            # High friction favors sticking at the narrow fingertip contact patches.
-            coup_friction=1000.0,
-            is_coup_reaction_enabled=False,
-            sdf_cell_size=0.0005,
-            gravity_compensation=1.0,
-        ),
-        name="sim1",
-    )
-    vertices, elements = create_tetrahedral_grid(
-        lower=tuple(-0.5 * size for size in sponge_size),
-        upper=tuple(0.5 * size for size in sponge_size),
-        resolution=(4, 6, 8) if args.solver == "fem" else (10, 7, 20),
+        material=gs.materials.Rigid(coup_friction=1000.0, is_coup_reaction_enabled=False),
+        name="coffee_robot",
     )
     sponge = scene.add_entity(
         morph=gs.morphs.TetrahedralMesh(
-            pos=(sponge_start[0], sponge_start[1] + 0.5 * sponge_size[1], sponge_start[2]),
+            pos=sponge_pos[0],
+            quat=sponge_quat[0],
             vertices=vertices,
             elements=elements,
         ),
-        material=(
-            gs.materials.FEM.Elastic(E=1e4, rho=30.0, model="linear_corotated")
-            if args.solver == "fem"
-            else gs.materials.PBD.Elastic(
-                rho=30.0,
-                # Stronger relaxation maintains grip stiffness within the fixed iteration budget.
-                stretch_relaxation=3.0 if args.solver == "unified" else 1.0,
-                volume_relaxation=3.0 if args.solver == "unified" else 1.0,
-                damping=args.damping if args.solver == "unified" else 0.0,
-            )
+        material=gs.materials.PBD.Elastic(
+            rho=30.0,
+            stretch_relaxation=3.0,
+            volume_relaxation=3.0,
+            damping=args.damping,
         ),
         surface=gs.surfaces.Default(color=(0.95, 0.68, 0.12), smooth=False),
         name="sponge",
     )
     scene.build()
-    hands = tuple(robot.get_link(name) for name in ("right_link26", "left_link16"))
+    right_hand = robot.get_link(name="right_link6")
     arms_dofs_idx = tuple(
-        tuple(robot.get_joint(f"{side}_joint{idx}").dofs_idx_local[0] for idx in range(start, start + 6))
-        for side, start in (("right", 21), ("left", 11))
+        tuple(robot.get_joint(f"{side}_joint{idx}").dofs_idx_local[0] for idx in range(1, 7))
+        for side in ("right", "left")
     )
     fingers_dofs_idx = tuple(
-        tuple(robot.get_joint(f"{side}_joint{idx}").dofs_idx_local[0] for idx in indices)
-        for side, indices in (("right", (27, 28)), ("left", (17, 18)))
+        tuple(robot.get_joint(f"{side}_joint{idx}").dofs_idx_local[0] for idx in (7, 8)) for side in ("right", "left")
     )
-    fingers_qs_idx = tuple(
-        tuple(robot.get_joint(f"{side}_joint{idx}").qs_idx_local[0] for idx in indices)
-        for side, indices in (("right", (27, 28)), ("left", (17, 18)))
-    )
-    right_fingers = tuple(robot.get_link(f"right_link{idx}") for idx in (27, 28))
+    right_fingers = tuple(robot.get_link(f"right_link{idx}") for idx in (7, 8))
+    controlled_dofs_idx = tuple(robot.get_joint(name).dofs_idx_local[0] for name in joint_names)
+    right_arm_columns = tuple(joint_names.index(f"right_joint{idx}") for idx in range(1, 7))
+    robot.set_dofs_kp(kp=2000.0)
+    robot.set_dofs_kv(kv=100.0)
+    robot.set_dofs_force_range(lower=-200.0, upper=200.0)
     for dofs in arms_dofs_idx:
-        robot.set_dofs_kp(kp=[5000, 5000, 5000, 1500, 1500, 1500], dofs_idx_local=dofs)
-        robot.set_dofs_kv(kv=[100, 100, 100, 30, 30, 30], dofs_idx_local=dofs)
-        robot.set_dofs_force_range(lower=[-27, -27, -27, -7, -7, -7], upper=[27, 27, 27, 7, 7, 7], dofs_idx_local=dofs)
-    for dofs in fingers_dofs_idx:
-        robot.set_dofs_kp(kp=3000, dofs_idx_local=dofs)
-        robot.set_dofs_kv(kv=30, dofs_idx_local=dofs)
-        robot.set_dofs_force_range(lower=-20, upper=20, dofs_idx_local=dofs)
+        robot.set_dofs_kp(kp=1500.0, dofs_idx_local=dofs)
+        robot.set_dofs_kv(kv=40.0, dofs_idx_local=dofs)
+        robot.set_dofs_force_range(lower=-30.0, upper=30.0, dofs_idx_local=dofs)
+    for dofs, kp, kv in zip(fingers_dofs_idx, (10000.0, 3000.0), (300.0, 30.0)):
+        robot.set_dofs_kp(kp, dofs_idx_local=dofs)
+        robot.set_dofs_kv(kv, dofs_idx_local=dofs)
+        robot.set_dofs_force_range(lower=-20.0, upper=20.0, dofs_idx_local=dofs)
+    lift_dofs_idx = robot.get_joint(name="joint_lift").dofs_idx_local
+    robot.set_dofs_kp(kp=20000.0, dofs_idx_local=lift_dofs_idx)
+    robot.set_dofs_kv(kv=500.0, dofs_idx_local=lift_dofs_idx)
+    robot.set_dofs_force_range(lower=-5000.0, upper=5000.0, dofs_idx_local=lift_dofs_idx)
     for link in right_fingers:
-        link.set_friction(2.0)
-        link.set_friction_torsional(0.001)
+        link.set_friction(friction=2.0)
+        link.set_friction_torsional(friction_torsional=0.005)
     scene.rigid_solver.set_geoms_friction_rolling(friction_rolling=0.0)
     contact_geoms_idx = tuple(
         collision_geom.idx for link in (*right_fingers, table.base_link) for collision_geom in link.geoms
@@ -447,22 +365,29 @@ def main():
     scene.rigid_solver.set_sol_params(
         sol_params=[0.004, 1.0, 0.99, 0.999, 0.001, 0.5, 2.0], geoms_idx=contact_geoms_idx
     )
-    qpos = robot.get_qpos()
-    qpos[list(arms_dofs_idx[0])] = qpos.new_tensor((0.0, 3.0, 1.5, -1.4, -1.4, 0.0))
-    qpos[list(arms_dofs_idx[1])] = qpos.new_tensor((0.5, 2.8, 1.3, -1.5, 1.0, 0.0))
-    qpos[list(fingers_qs_idx[0])] = 0.028
-    qpos[list(fingers_qs_idx[1])] = 0.0007
-    grip_pos = np.array(sponge_start) + (0.0, sponge_size[1] - 0.005, 0.0)
-    for hand, dofs, pos, quat in zip(hands, arms_dofs_idx, (grip_pos, (-0.19, 0.125, 0.0)), (grip_quat, left_quat)):
-        qpos = solve_tool_pose(robot, hand, dofs, pos, quat, tool_center, qpos)
-    robot.set_qpos(qpos)
-    for dofs in arms_dofs_idx:
-        robot.control_dofs_position_velocity(qpos[list(dofs)], velocity=0.0, dofs_idx_local=dofs)
-    robot.control_dofs_position(0.0007, dofs_idx_local=fingers_dofs_idx[1])
+    if len(initial_qpos) != robot.n_qs:
+        raise RuntimeError("The bundled pickup coordinates must match the coffee robot's joints.")
+    finger_opening = 0.04395019377660751
+    for idx in (7, 8):
+        initial_qpos[robot.get_joint(f"right_joint{idx}").qs_idx_local[0]] = finger_opening
+    robot.set_qpos(initial_qpos)
+    robot.control_dofs_position(position=0.0)
+    robot.control_dofs_position(joint_targets[0], dofs_idx_local=controlled_dofs_idx)
+    robot.control_dofs_position(finger_opening, dofs_idx_local=fingers_dofs_idx[0])
 
+    steps = math.ceil(args.seconds / scene.dt)
+    times = (np.arange(steps) + 1) * scene.dt
+    elapsed = np.clip(times - lift_start, recorded_time[0], recorded_time[-1])
+    indices = np.clip(np.searchsorted(recorded_time, elapsed, side="right"), 1, len(recorded_time) - 1)
+    fraction = ((elapsed - recorded_time[indices - 1]) / (recorded_time[indices] - recorded_time[indices - 1]))[:, None]
+    recorded_arm_targets = joint_targets[:, right_arm_columns]
+    arm_delta = recorded_arm_targets[indices] - recorded_arm_targets[indices - 1]
+    arm_targets = gs.tensor(recorded_arm_targets[indices - 1] + fraction * arm_delta)
+    centers = sponge_centers[indices - 1] + fraction * (sponge_centers[indices] - sponge_centers[indices - 1])
+    previous_target = gs.tensor(recorded_arm_targets[0])
     contact_meshes = []
     if args.is_penetration_checked:
-        for link in (hands[0], *right_fingers):
+        for link in (right_hand, *right_fingers):
             for collision_geom in link.geoms:
                 # libigl requires float64 vertices and int64 face indices.
                 mesh_vertices = collision_geom.init_verts.astype(np.float64)
@@ -478,7 +403,6 @@ def main():
     surface_indices = np.unique(sponge.surface_triangles)
     surface_faces = sponge.surface_triangles.astype(np.int64) if args.is_penetration_checked else None
     measurement_stride = max(1, round(0.1 / scene.dt))
-    steps = math.ceil(args.seconds / scene.dt)
     max_penetration = 0.0
     max_penetrating_vertices = 0
     max_rigid_penetration = 0.0
@@ -492,7 +416,7 @@ def main():
     lift_delta = np.zeros(3)
     playback = None
     if args.is_viewer_shown and "PYTEST_VERSION" not in os.environ:
-        playback = LiftPlayback(scene, sponge, is_unified=args.solver == "unified")
+        playback = LiftPlayback(scene, sponge)
         playback.record_frame(step=0)
     step = 0
     while step < steps or playback is not None:
@@ -501,24 +425,19 @@ def main():
         time = (step + 1) * scene.dt
         fraction = min(time / 0.6, 1.0)
         progress = fraction**3 * (10.0 + fraction * (-15.0 + 6.0 * fraction))
-        robot.control_dofs_position(0.028 - 0.01 * progress, dofs_idx_local=fingers_dofs_idx[0])
+        robot.control_dofs_position(finger_opening - 0.01345 * progress, dofs_idx_local=fingers_dofs_idx[0])
         if time >= lift_start:
             if sponge_lift_start is None:
-                sponge_lift_start = tensor_to_array(get_sponge_positions(sponge).mean(dim=-2))
+                sponge_lift_start = tensor_to_array(sponge.get_particles_pos().mean(dim=-2))
                 gs.logger.info(f"{time:.3f}s: start lifting.")
-            fraction = min((time - lift_start) / lift_duration, 1.0)
-            progress = fraction**3 * (10.0 + fraction * (-15.0 + 6.0 * fraction))
-            lift_delta = progress * lift_displacement
-            target_qpos = solve_tool_pose(
-                robot, hands[0], arms_dofs_idx[0], grip_pos + lift_delta, grip_quat, tool_center, qpos
-            )
-            velocity = (target_qpos[list(arms_dofs_idx[0])] - qpos[list(arms_dofs_idx[0])]) / scene.dt
-            robot.control_dofs_position_velocity(
-                target_qpos[list(arms_dofs_idx[0])], velocity, dofs_idx_local=arms_dofs_idx[0]
-            )
-            qpos = target_qpos
+            lift_delta = centers[step] - sponge_centers[0]
+            target = arm_targets[step]
+            velocity = (target - previous_target) / scene.dt
+            robot.control_dofs_position_velocity(target, velocity, dofs_idx_local=arms_dofs_idx[0])
+            previous_target = target
         scene.step(update_visualizer=playback is None)
         scene.rigid_solver.check_errno()
+        scene.pbd_solver.check_errno()
         if args.is_penetration_checked:
             contacts = robot.get_contacts(with_entity=robot)
             if contacts["geom_a"].numel():
@@ -535,7 +454,7 @@ def main():
         if step % measurement_stride != 0 and step != steps:
             continue
         positions = tensor_to_array(
-            get_sponge_positions(sponge), dtype=np.float64 if args.is_penetration_checked else None
+            sponge.get_particles_pos(), dtype=np.float64 if args.is_penetration_checked else None
         )
         if not np.isfinite(positions).all():
             raise RuntimeError("Sponge vertices contain non-finite values.")
@@ -544,8 +463,8 @@ def main():
             tracking_error = np.linalg.norm(displacement - lift_delta)
             max_tracking_error = max(max_tracking_error, tracking_error)
             gs.logger.info(
-                f"{time:.3f}s: sponge travel={1000 * displacement[1]:.3f}mm, "
-                f"target={1000 * lift_delta[1]:.3f}mm, tracking error={1000 * tracking_error:.3f}mm."
+                f"{time:.3f}s: sponge travel={1000 * displacement[2]:.3f}mm, "
+                f"target={1000 * lift_delta[2]:.3f}mm, tracking error={1000 * tracking_error:.3f}mm."
             )
             if tracking_error > 0.01:
                 raise RuntimeError(f"The sponge slipped from the gripper at {time:.3f}s: {tracking_error:.6f}m.")
@@ -591,21 +510,20 @@ def main():
                 f"rigid penetrating vertices={rigid_count}, depth={1000 * rigid_depth:.6f}mm; "
                 f"minimum tetrahedron volume={volumes.min():.6e}m^3."
             )
-            if args.solver == "unified":
-                diagnostics = scene.pbd_solver.get_collision_diagnostics()
-                edge_penetration = diagnostics.edge_penetration[0].item()
-                edge_contacts = diagnostics.edge_contacts[0].item()
-                triangle_intersections = diagnostics.triangle_intersections[0].item()
-                unpaired_intersections = diagnostics.unpaired_intersections[0].item()
-                max_edge_penetration = max(max_edge_penetration, edge_penetration)
-                max_edge_contacts = max(max_edge_contacts, edge_contacts)
-                max_triangle_intersections = max(max_triangle_intersections, triangle_intersections)
-                max_unpaired_intersections = max(max_unpaired_intersections, unpaired_intersections)
-                gs.logger.info(
-                    f"{time:.3f}s: surface triangle intersections={triangle_intersections}, "
-                    f"edge contacts={edge_contacts}, edge gap={1000 * edge_penetration:.6f}mm, "
-                    f"unpaired intersections={unpaired_intersections}."
-                )
+            diagnostics = scene.pbd_solver.get_collision_diagnostics()
+            edge_penetration = diagnostics.edge_penetration[0].item()
+            edge_contacts = diagnostics.edge_contacts[0].item()
+            triangle_intersections = diagnostics.triangle_intersections[0].item()
+            unpaired_intersections = diagnostics.unpaired_intersections[0].item()
+            max_edge_penetration = max(max_edge_penetration, edge_penetration)
+            max_edge_contacts = max(max_edge_contacts, edge_contacts)
+            max_triangle_intersections = max(max_triangle_intersections, triangle_intersections)
+            max_unpaired_intersections = max(max_unpaired_intersections, unpaired_intersections)
+            gs.logger.info(
+                f"{time:.3f}s: surface triangle intersections={triangle_intersections}, "
+                f"edge contacts={edge_contacts}, edge gap={1000 * edge_penetration:.6f}mm, "
+                f"unpaired intersections={unpaired_intersections}."
+            )
     if sponge_lift_start is not None:
         gs.logger.info(f"Maximum sponge tracking error: {1000 * max_tracking_error:.3f}mm.")
     if args.is_penetration_checked:
@@ -615,13 +533,12 @@ def main():
             f"peak rigid vertex penetration: {1000 * max_rigid_penetration:.6f}mm; "
             f"maximum penetrating rigid vertices: {max_penetrating_rigid_vertices}."
         )
-        if args.solver == "unified":
-            gs.logger.info(
-                f"Peak crossed-edge gap: {1000 * max_edge_penetration:.6f}mm; "
-                f"maximum edge contacts: {max_edge_contacts}; "
-                f"maximum surface triangle intersections: {max_triangle_intersections}; "
-                f"maximum unpaired intersections: {max_unpaired_intersections}."
-            )
+        gs.logger.info(
+            f"Peak crossed-edge gap: {1000 * max_edge_penetration:.6f}mm; "
+            f"maximum edge contacts: {max_edge_contacts}; "
+            f"maximum surface triangle intersections: {max_triangle_intersections}; "
+            f"maximum unpaired intersections: {max_unpaired_intersections}."
+        )
 
 
 if __name__ == "__main__":
