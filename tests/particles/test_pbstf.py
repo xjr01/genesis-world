@@ -1493,6 +1493,69 @@ def test_concentration_transport(n_envs, diffusion_coeff, show_viewer):
 
 @pytest.mark.required
 @pytest.mark.parametrize("backend", [gs.cuda])
+@pytest.mark.parametrize("n_envs", [0, 2])
+def test_prescribed_particle_motion(n_envs, show_viewer):
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=0.01,
+            gravity=(0.0, 0.0, 0.0),
+        ),
+        pbstf_options=gs.options.PBSTFOptions(
+            particle_size=0.1,
+            max_solver_iterations=1,
+            lower_bound=(-1.0, -1.0, -1.0),
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(0.8, -1.5, 0.8),
+            camera_lookat=(0.25, 0.0, 0.0),
+        ),
+        show_viewer=show_viewer,
+    )
+    liquid = scene.add_entity(
+        morph=gs.morphs.Particles(
+            positions=((0.0, 0.0, 0.0), (0.05, 0.0, 0.0), (0.5, 0.0, 0.0)),
+        ),
+        material=gs.materials.PBSTF.Liquid(
+            surface_distance_compliance=0.0,
+            interior_distance_compliance=0.0,
+            surface_viscosity=0.0,
+            interior_viscosity=0.0,
+        ),
+    )
+    scene.build(n_envs=n_envs)
+    liquid.set_particles_vel((0.1, 0.0, 0.0), particles_idx_local=0)
+    liquid.fix_particles(particles_idx_local=(0, 2), zero_velocity=False)
+    initial_state = scene.get_state()
+    scene.step()
+    positions = liquid.get_particles_pos()
+    assert_allclose(positions[..., 0, :], (0.001, 0.0, 0.0), atol=1e-7)
+    # The moving support contributes its displacement to the free particle's distance correction.
+    assert_allclose(positions[..., 1, :], (0.101, 0.0, 0.0), atol=1e-7)
+    assert_allclose(positions[..., 2, :], (0.5, 0.0, 0.0), atol=1e-7)
+    assert_allclose(liquid.get_particles_vel()[..., 0, :], (0.1, 0.0, 0.0), atol=1e-7)
+
+    liquid.release_particle(particles_idx_local=0, envs_idx=0 if n_envs else None)
+    scene.reset(initial_state)
+    scene.step()
+    assert_allclose(liquid.get_particles_pos(), positions, atol=1e-7)
+
+    scene.reset(initial_state)
+    liquid.fix_particles(particles_idx_local=0)
+    scene.step()
+    assert_allclose(liquid.get_particles_pos()[..., 0, :], (0.0, 0.0, 0.0), atol=1e-7)
+
+    scene.reset(initial_state)
+    liquid.release_particle(particles_idx_local=0, envs_idx=0 if n_envs else None)
+    scene.step()
+    positions = liquid.get_particles_pos()
+    expected = (-0.0245, 0.0, 0.0)
+    assert_allclose(positions[0, 0] if n_envs else positions[0], expected, atol=1e-7)
+    if n_envs:
+        assert_allclose(positions[1, 0], (0.001, 0.0, 0.0), atol=1e-7)
+
+
+@pytest.mark.required
+@pytest.mark.parametrize("backend", [gs.cuda])
 def test_pbstf_cuda(show_viewer):
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(dt=1e-3, gravity=(0.0, 0.0, 0.0)),

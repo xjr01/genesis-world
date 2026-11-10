@@ -311,6 +311,7 @@ class PBSTFSolverState(_ParticleFluidSolverState):
         self._static_colliders_pos = gs.zeros((scene.sim._B, solver._n_static_colliders, 3), **args)
         self._static_colliders_quat = gs.zeros((scene.sim._B, solver._n_static_colliders, 4), **args)
         self._c = gs.zeros((scene.sim._B, solver.n_particles), **args)
+        self._is_fixed = gs.zeros((scene.sim._B, solver.n_particles), dtype=gs.tc_bool, scene=scene)
         self._deformable_static_colliders_surface_vertices = None
         self._deformable_static_colliders_voxel_positions = None
         self._deformable_static_colliders_voxel_search_order = None
@@ -354,6 +355,7 @@ class PBSTFSolverState(_ParticleFluidSolverState):
         self._static_colliders_pos = self._static_colliders_pos.detach()
         self._static_colliders_quat = self._static_colliders_quat.detach()
         self._c = self._c.detach()
+        self._is_fixed = self._is_fixed.detach()
         if self._deformable_static_colliders_surface_vertices is not None:
             self._deformable_static_colliders_surface_vertices = (
                 self._deformable_static_colliders_surface_vertices.detach()
@@ -386,6 +388,10 @@ class PBSTFSolverState(_ParticleFluidSolverState):
     @property
     def c(self):
         return self._c
+
+    @property
+    def is_fixed(self):
+        return self._is_fixed
 
     @property
     def deformable_static_colliders_surface_vertices(self):

@@ -1,0 +1,28 @@
+sync:
+  defaults:
+    mode: two-way-safe
+    ignore:
+      vcs: true
+      paths:
+        - .agents
+        - .codex
+        - .remote-sync
+        - .aws
+        - .ssh
+        - .env
+        - .venv
+        - venv
+        - __pycache__
+        - .cache
+        - .pytest_cache
+        - .ruff_cache
+        - .mypy_cache
+        - .ipynb_checkpoints
+        - build
+        - dist
+        - tmp
+        - '*.egg-info'
+        - '*.pyc'
+        - '*.pyd'
+        - '*.so'
+        - '*.dll'

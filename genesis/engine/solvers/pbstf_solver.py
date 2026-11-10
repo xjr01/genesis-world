@@ -45,6 +45,14 @@ class _ColliderParticleCache:
 
 
 @qd.kernel
+def kernel_set_particles_fixed(
+    particles_idx: qd.types.ndarray(), envs_idx: qd.types.ndarray(), is_fixed: bool, particles: V_ANNOTATION
+):
+    for i, i_b in qd.ndrange(particles_idx.shape[1], envs_idx.shape[0]):
+        particles[particles_idx[i_b, i], envs_idx[i_b]].is_fixed = is_fixed
+
+
+@qd.kernel
 def kernel_update_collider_particle_cache(solver: V_ANNOTATION):
     solver._func_update_collider_particle_cache(is_enabled=True)
 
@@ -184,6 +192,8 @@ class PBSTFSolver(Solver):
                 or material.density_compliance != self._material.density_compliance
                 or material.surface_tension_compliance != self._material.surface_tension_compliance
                 or material.surface_distance_compliance != self._material.surface_distance_compliance
+                or material.surface_distance_ratio != self._material.surface_distance_ratio
+                or material.initial_density_ratio != self._material.initial_density_ratio
                 or material.interior_distance_compliance != self._material.interior_distance_compliance
                 or material.surface_viscosity != self._material.surface_viscosity
                 or material.interior_viscosity != self._material.interior_viscosity
@@ -278,7 +288,7 @@ class PBSTFSolver(Solver):
 
             if max_density <= gs.EPS:
                 gs.raise_exception("PBSTF particle mass calibration requires a positive reference density.")
-            self._default_mass = float(self._material.rho / max_density)
+            self._default_mass = float(self._material.initial_density_ratio * self._material.rho / max_density)
             self._kernel_set_particle_mass(self._default_mass)
             self._particle_volume = self._default_mass / self._material.rho
             self._kernel_reorder_particles(0)
@@ -549,6 +559,7 @@ class PBSTFSolver(Solver):
             lmd=gs.qd_float,
             grad_i=gs.qd_vec3,
             surface=gs.qd_bool,
+            is_fixed=gs.qd_bool,
             c=gs.qd_float,  # concentration (multiflow demo: 0=water, 1=coffee)
             dc=gs.qd_float,  # Jacobi buffer for the concentration diffusion pass
         )
@@ -1428,6 +1439,20 @@ class PBSTFSolver(Solver):
     # ------------------------------------------------------------------
 
     @qd.func
+    def _inverse_mass(self, i, i_b):
+        inverse_mass = gs.qd_float(0.0)
+        if not self.particles_reordered[i, i_b].is_fixed:
+            inverse_mass = 1.0 / self.particles_info_reordered[i, i_b].mass
+        return inverse_mass
+
+    @qd.func
+    def _fixed_displacement(self, i, i_b):
+        displacement = qd.Vector.zero(gs.qd_float, 3)
+        if self.particles_reordered[i, i_b].is_fixed:
+            displacement = self.particles_reordered[i, i_b].vel * self._substep_dt / self._max_solver_iterations
+        return displacement
+
+    @qd.func
     def _density_target(self, i, i_b):
         target = self.particles_info_reordered[i, i_b].rho_rest
         if self.on_surface[i, i_b]:
@@ -1445,12 +1470,13 @@ class PBSTFSolver(Solver):
             result.density += mass_j * self.cubic_kernel(delta.norm())
             grad_j = mass_j / rho_rest * self.cubic_gradient_kernel(delta)
             result.grad_i -= grad_j
-            result.denominator += grad_j.norm_sqr() / mass_j
+            result.denominator += grad_j.norm_sqr() * self._inverse_mass(j, i_b)
+            result.fixed_delta += grad_j.dot(self._fixed_displacement(j, i_b))
 
     @qd.func
     def _func_prepare_density_constraints(self):
         for i, i_b in qd.ndrange(self._n_particles, self._B):
-            self.particles_reordered[i, i_b].dpos = qd.Vector.zero(gs.qd_float, 3)
+            self.particles_reordered[i, i_b].dpos = self._fixed_displacement(i, i_b)
             if (
                 self.particles_ng_reordered[i, i_b].active
                 and not self._is_particle_absorbed_reordered(i, i_b)
@@ -1462,6 +1488,7 @@ class PBSTFSolver(Solver):
                     density=mass_i * self.cubic_kernel(0.0),
                     grad_i=qd.Vector.zero(gs.qd_float, 3),
                     denominator=self._material.density_compliance / self._default_mass,
+                    fixed_delta=gs.qd_float(0.0),
                 )
                 self.sh.for_all_neighbors(
                     i,
@@ -1471,8 +1498,9 @@ class PBSTFSolver(Solver):
                     self._task_density_constraint,
                     i_b,
                 )
-                result.denominator += result.grad_i.norm_sqr() / mass_i
-                constraint = result.density / rho_rest - 1.0
+                result.denominator += result.grad_i.norm_sqr() * self._inverse_mass(i, i_b)
+                result.fixed_delta += result.grad_i.dot(self._fixed_displacement(i, i_b))
+                constraint = result.density / rho_rest - 1.0 + result.fixed_delta
                 lmd = gs.qd_float(0.0)
                 if result.denominator > gs.EPS:
                     lmd = -constraint / result.denominator
@@ -1489,7 +1517,7 @@ class PBSTFSolver(Solver):
             mass_j = self.particles_info_reordered[j, i_b].mass
             delta = pos_i - pos_j
             grad_j = mass_j / rho_rest * self.cubic_gradient_kernel(delta)
-            correction = self.particles_reordered[i, i_b].lmd / mass_j * grad_j
+            correction = self.particles_reordered[i, i_b].lmd * self._inverse_mass(j, i_b) * grad_j
             for axis in qd.static(range(3)):
                 qd.atomic_add(self.particles_reordered[j, i_b].dpos[axis], correction[axis])
 
@@ -1501,8 +1529,11 @@ class PBSTFSolver(Solver):
                 and not self._is_particle_absorbed_reordered(i, i_b)
                 and self.density_constraint_enabled[i, i_b]
             ):
-                mass_i = self.particles_info_reordered[i, i_b].mass
-                correction_i = self.particles_reordered[i, i_b].lmd / mass_i * self.particles_reordered[i, i_b].grad_i
+                correction_i = (
+                    self.particles_reordered[i, i_b].lmd
+                    * self._inverse_mass(i, i_b)
+                    * self.particles_reordered[i, i_b].grad_i
+                )
                 for axis in qd.static(range(3)):
                     qd.atomic_add(self.particles_reordered[i, i_b].dpos[axis], correction_i[axis])
                 unused = gs.qd_int(0)
@@ -1555,23 +1586,22 @@ class PBSTFSolver(Solver):
                     self._surface_gradient[i, i_b, k] += self._triangle_area_gradient(j, j_next, i, i_b)
                     self._surface_gradient[i, i_b, k_next] += self._triangle_area_gradient(j_next, i, j, i_b)
 
-                mass_i = self.particles_info_reordered[i, i_b].mass
                 denominator = self._material.surface_tension_compliance / self._default_mass
-                denominator += grad_i.norm_sqr() / mass_i
+                denominator += grad_i.norm_sqr() * self._inverse_mass(i, i_b)
+                constraint += grad_i.dot(self._fixed_displacement(i, i_b))
                 for k in range(n):
                     j = self.local_mesh_neighbors[i, i_b, k]
-                    denominator += (
-                        self._surface_gradient[i, i_b, k].norm_sqr() / self.particles_info_reordered[j, i_b].mass
-                    )
+                    denominator += self._surface_gradient[i, i_b, k].norm_sqr() * self._inverse_mass(j, i_b)
+                    constraint += self._surface_gradient[i, i_b, k].dot(self._fixed_displacement(j, i_b))
                 lmd = gs.qd_float(0.0)
                 if denominator > gs.EPS:
                     lmd = -constraint / denominator
-                correction_i = lmd / mass_i * grad_i
+                correction_i = lmd * self._inverse_mass(i, i_b) * grad_i
                 for axis in qd.static(range(3)):
                     qd.atomic_add(self.particles_reordered[i, i_b].dpos[axis], correction_i[axis])
                 for k in range(self.n_neighbors[i, i_b]):
                     j = self.local_mesh_neighbors[i, i_b, k]
-                    correction_j = lmd / self.particles_info_reordered[j, i_b].mass * self._surface_gradient[i, i_b, k]
+                    correction_j = lmd * self._inverse_mass(j, i_b) * self._surface_gradient[i, i_b, k]
                     for axis in qd.static(range(3)):
                         qd.atomic_add(self.particles_reordered[j, i_b].dpos[axis], correction_j[axis])
 
@@ -1595,16 +1625,21 @@ class PBSTFSolver(Solver):
                 * 0.5
                 * (qd.pow(mass_i / self._default_mass, 1.0 / 1.5) + qd.pow(mass_j / self._default_mass, 1.0 / 1.5))
             )
+            if self.on_surface[i, i_b]:
+                target *= self._material.surface_distance_ratio
             if distance > gs.EPS and distance < target:
                 constraint = distance - target
                 compliance = self._material.interior_distance_compliance
                 if self.on_surface[i, i_b]:
                     compliance = self._material.surface_distance_compliance
-                denominator = compliance / self._default_mass + 1.0 / mass_i + 1.0 / mass_j
-                lmd = -constraint / denominator
                 grad_i = delta / distance
-                correction_i = lmd / mass_i * grad_i
-                correction_j = -lmd / mass_j * grad_i
+                constraint += grad_i.dot(self._fixed_displacement(i, i_b) - self._fixed_displacement(j, i_b))
+                denominator = compliance / self._default_mass + self._inverse_mass(i, i_b) + self._inverse_mass(j, i_b)
+                lmd = gs.qd_float(0.0)
+                if denominator > gs.EPS:
+                    lmd = -constraint / denominator
+                correction_i = lmd * self._inverse_mass(i, i_b) * grad_i
+                correction_j = -lmd * self._inverse_mass(j, i_b) * grad_i
                 for axis in qd.static(range(3)):
                     qd.atomic_add(self.particles_reordered[i, i_b].dpos[axis], correction_i[axis])
                     qd.atomic_add(self.particles_reordered[j, i_b].dpos[axis], correction_j[axis])
@@ -1632,6 +1667,7 @@ class PBSTFSolver(Solver):
         for i, i_b in qd.ndrange(self._n_particles, self._B):
             if (
                 self.particles_ng_reordered[i, i_b].active
+                and not self.particles_reordered[i, i_b].is_fixed
                 and not self._is_particle_absorbed_reordered(i, i_b)
                 and self.on_surface[i, i_b]
             ):
@@ -1684,17 +1720,18 @@ class PBSTFSolver(Solver):
         for i, i_b in qd.ndrange(self._n_particles, self._B):
             if self.particles_ng_reordered[i, i_b].active and not self._is_particle_absorbed_reordered(i, i_b):
                 pos = self.particles_reordered[i, i_b].pos
-                vel = self.particles_reordered[i, i_b].vel + self._substep_dt * self._gravity[i_b]
-                for i_ff in qd.static(range(len(self._ffs))):
-                    vel += self._substep_dt * self._ffs[i_ff].get_acc(pos, vel, t, i)
                 self.particles_reordered[i, i_b].ipos = pos
-                self.particles_reordered[i, i_b].vel = vel
-                self.particles_reordered[i, i_b].pos = pos + self._substep_dt * vel
+                if not self.particles_reordered[i, i_b].is_fixed:
+                    vel = self.particles_reordered[i, i_b].vel + self._substep_dt * self._gravity[i_b]
+                    for i_ff in qd.static(range(len(self._ffs))):
+                        vel += self._substep_dt * self._ffs[i_ff].get_acc(pos, vel, t, i)
+                    self.particles_reordered[i, i_b].vel = vel
+                    self.particles_reordered[i, i_b].pos = pos + self._substep_dt * vel
 
     @qd.kernel
     def _kernel_update_velocities_from_positions(self):
         for i, i_b in qd.ndrange(self._n_particles, self._B):
-            if self.particles_ng_reordered[i, i_b].active:
+            if self.particles_ng_reordered[i, i_b].active and not self.particles_reordered[i, i_b].is_fixed:
                 self.particles_reordered[i, i_b].vel = (
                     self.particles_reordered[i, i_b].pos - self.particles_reordered[i, i_b].ipos
                 ) / self._substep_dt
@@ -1736,7 +1773,11 @@ class PBSTFSolver(Solver):
     @qd.kernel
     def _kernel_apply_viscosity(self):
         for i, i_b in qd.ndrange(self._n_particles, self._B):
-            if self.particles_ng_reordered[i, i_b].active and not self._is_particle_absorbed_reordered(i, i_b):
+            if (
+                self.particles_ng_reordered[i, i_b].active
+                and not self._is_particle_absorbed_reordered(i, i_b)
+                and not self.particles_reordered[i, i_b].is_fixed
+            ):
                 self.particles_reordered[i, i_b].vel += self.particles_reordered[i, i_b].dpos
                 if qd.static(len(self._adhesion_friction_static_colliders_idx) > 0):
                     if self.particles_reordered[i, i_b].surface:
@@ -1923,7 +1964,7 @@ class PBSTFSolver(Solver):
         if self.is_active:
             envs_idx = self._scene._sanitize_envs_idx(envs_idx)
             pbstf_absorption.kernel_clear_errno(envs_idx, self._errno)
-            self._kernel_set_state(f, envs_idx, state.pos, state.vel, state.active, state.c)
+            self._kernel_set_state(f, envs_idx, state.pos, state.vel, state.active, state.c, state.is_fixed)
             if self._n_static_colliders > 0:
                 pbstf_absorption.kernel_set_static_colliders_pose(
                     self._n_static_colliders,
@@ -1991,6 +2032,7 @@ class PBSTFSolver(Solver):
         vel: qd.types.ndarray(),
         active: qd.types.ndarray(),
         c: qd.types.ndarray(),
+        is_fixed: qd.types.ndarray(),
     ):
         for i, i_b_local in qd.ndrange(self._n_particles, envs_idx.shape[0]):
             i_b = envs_idx[i_b_local]
@@ -1999,12 +2041,13 @@ class PBSTFSolver(Solver):
                 self.particles[i, i_b].vel[axis] = vel[i_b, i, axis]
             self.particles_ng[i, i_b].active = active[i_b, i]
             self.particles[i, i_b].c = c[i_b, i]
+            self.particles[i, i_b].is_fixed = is_fixed[i_b, i]
 
     def get_state(self, f):
         if not self.is_active:
             return None
         state = PBSTFSolverState(self.scene)
-        self._kernel_get_state(f, state.pos, state.vel, state.active, state.c)
+        self._kernel_get_state(f, state.pos, state.vel, state.active, state.c, state.is_fixed)
         if self._n_static_colliders > 0:
             pbstf_absorption.kernel_get_static_colliders_pose(
                 self._n_static_colliders,
@@ -2062,6 +2105,7 @@ class PBSTFSolver(Solver):
         vel: qd.types.ndarray(),
         active: qd.types.ndarray(),
         c: qd.types.ndarray(),
+        is_fixed: qd.types.ndarray(),
     ):
         for i, i_b in qd.ndrange(self._n_particles, self._B):
             for axis in qd.static(range(3)):
@@ -2069,6 +2113,7 @@ class PBSTFSolver(Solver):
                 vel[i_b, i, axis] = self.particles[i, i_b].vel[axis]
             active[i_b, i] = self.particles_ng[i, i_b].active
             c[i_b, i] = self.particles[i, i_b].c
+            is_fixed[i_b, i] = self.particles[i, i_b].is_fixed
 
     def update_render_fields(self):
         self._kernel_update_render_fields(self.sim.cur_substep_local)
@@ -2103,6 +2148,7 @@ class PBSTFSolver(Solver):
             self.particles[i, i_b].ipos = self.particles[i, i_b].pos
             self.particles[i, i_b].vel = qd.Vector.zero(gs.qd_float, 3)
             self.particles[i, i_b].surface = False
+            self.particles[i, i_b].is_fixed = False
             self.particles[i, i_b].c = c_init[i_]
             self.particles[i, i_b].dc = 0.0
 
@@ -2185,6 +2231,15 @@ class PBSTFSolver(Solver):
             i_b = envs_idx[i_b_]
             for axis in qd.static(range(3)):
                 vels[i_b_, i_, axis] = self.particles[i, i_b].vel[axis]
+
+    def set_particles_fixed(self, particles_idx, envs_idx, is_fixed):
+        if gs.use_zerocopy:
+            particles_is_fixed = qd_to_torch(self.particles.is_fixed, transpose=True, copy=False)
+            particles_is_fixed[envs_idx[:, None], particles_idx] = is_fixed
+            if gs.backend == gs.metal:
+                torch.mps.synchronize()
+        else:
+            kernel_set_particles_fixed(particles_idx, envs_idx, is_fixed, self.particles)
 
     @qd.kernel
     def _kernel_set_particles_active(
