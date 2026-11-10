@@ -278,7 +278,12 @@ def find_volume_contacts(
                                     bvh.leaves_idx[i_b, node - bvh.n_aabbs + 1] - collision.n_faces - collision.n_edges
                                 )
                                 ids = collision.tet_indices[i_e]
-                                if (ids != i_v).all():
+                                is_eligible = (ids != i_v).all()
+                                if qd.static(not options.is_self_collision_enabled):
+                                    is_eligible = (
+                                        is_eligible and vertices.entity_idx[i_v] != vertices.entity_idx[ids[0]]
+                                    )
+                                if is_eligible:
                                     weights = tetrahedron_weights(
                                         point,
                                         vertices.prev[ids[0], i_b],
@@ -366,6 +371,10 @@ def find_volume_contacts(
                                 i_f = bvh.leaves_idx[i_b, node - bvh.n_aabbs + 1]
                                 ids = collision.faces[i_f]
                                 is_eligible = vertices.is_volume[ids[0]]
+                                if qd.static(not options.is_self_collision_enabled):
+                                    is_eligible = (
+                                        is_eligible and vertices.entity_idx[i_v] != vertices.entity_idx[ids[0]]
+                                    )
                                 if is_eligible:
                                     is_eligible = (collision.tet_indices[collision.face_tets[i_f]] != i_v).all()
                                 if is_eligible:
@@ -584,6 +593,8 @@ def find_shell_contacts(
                     has_shell = False
                     for i in qd.static(range(4)):
                         has_shell = has_shell or not vertices.is_volume[ids[i]]
+                    if qd.static(not options.is_self_collision_enabled):
+                        is_eligible = is_eligible and vertices.entity_idx[ids[0]] != vertices.entity_idx[ids[2]]
                     if is_eligible and has_shell:
                         a, b, c, d = (
                             vertices.pos[ids[0], i_b],

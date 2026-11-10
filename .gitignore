@@ -163,3 +163,6 @@ outputs/
 
 # Local agent memory (not versioned)
 /.agents/
+
+# Local SSH transport, credentials access, and synchronization state
+/.remote-sync/

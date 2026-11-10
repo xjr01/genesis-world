@@ -119,6 +119,7 @@ class VBDSolver(Solver):
                 if options.shell_ground_friction_epsilon is None
                 else options.shell_ground_friction_epsilon
             ),
+            is_self_collision_enabled=options.is_self_collision_enabled,
         )
         self.vertices = None
         self.elements = None
@@ -419,9 +420,11 @@ class VBDSolver(Solver):
         surface_pairs = np.concatenate((edges, edges[:, ::-1]))
         neighbor_offsets, order = incidence(surface_pairs[:, 0], n_vertices)
         self.config.has_shell = bool((~is_volume).any())
+        self.config.has_mesh_contact = self.options.is_self_collision_enabled or len(self.entities) > 1
         self.config.max_contact_thickness = float(2.0 * radius.max())
         if (
             self.config.has_shell
+            and self.config.has_mesh_contact
             and self.options.contact_search_radius <= self.config.max_contact_thickness + self.options.contact_d_hat
         ):
             gs.raise_exception("VBD contact_search_radius must exceed the maximum shell thickness plus contact_d_hat.")
@@ -512,7 +515,7 @@ class VBDSolver(Solver):
                 break
         self.initial_scale.fill(1.0)
         limit_initialization(self.initial_scale, self.vertices, self.elements)
-        if self.collision.n_tets:
+        if self.collision.n_tets and self.config.has_mesh_contact:
             update_bounds(
                 is_previous=True, is_swept=False, vertices=self.vertices, collision=self.collision, bvh=self.bvh
             )
@@ -527,14 +530,17 @@ class VBDSolver(Solver):
                 options=self.config,
                 errno=self.errno,
             )
+        if self.collision.n_tets:
             apply_prediction(
                 is_shell=False,
                 scale=self.initial_scale,
                 vertices=self.vertices,
                 collision=self.collision,
                 planes=self.planes,
+                options=self.config,
                 errno=self.errno,
             )
+        if self.collision.n_tets and self.config.has_mesh_contact:
             update_bounds(
                 is_previous=False, is_swept=True, vertices=self.vertices, collision=self.collision, bvh=self.bvh
             )
@@ -561,14 +567,16 @@ class VBDSolver(Solver):
             volume_pairs = torch.empty((0, 4), dtype=gs.tc_int, device=gs.device)
             volume_batches = torch.empty(0, dtype=gs.tc_int, device=gs.device)
         is_rebuild_required = True
-        has_iteration_control = self.config.has_shell or self.options.convergence_tolerance > 0.0
+        has_iteration_control = (
+            self.config.has_shell and self.config.has_mesh_contact
+        ) or self.options.convergence_tolerance > 0.0
         iteration = 0
         check_interval = 1 if has_iteration_control else self.options.iterations
         while iteration < self.options.iterations:
             if is_rebuild_required:
                 pairs, batches = volume_pairs, volume_batches
                 kinds = torch.full((len(pairs),), 2, dtype=gs.tc_int, device=gs.device)
-                if self.config.has_shell:
+                if self.config.has_shell and self.config.has_mesh_contact:
                     update_bounds(
                         is_previous=False,
                         is_swept=False,
@@ -624,15 +632,16 @@ class VBDSolver(Solver):
                     pairs = torch.cat((pairs, shell_pairs))
                     batches = torch.cat((batches, shell_batches))
                     kinds = torch.cat((kinds, shell_kinds))
-                    if iteration == 0:
-                        apply_prediction(
-                            is_shell=True,
-                            scale=self.initial_scale,
-                            vertices=self.vertices,
-                            collision=self.collision,
-                            planes=self.planes,
-                            errno=self.errno,
-                        )
+                if self.config.has_shell and iteration == 0:
+                    apply_prediction(
+                        is_shell=True,
+                        scale=self.initial_scale,
+                        vertices=self.vertices,
+                        collision=self.collision,
+                        planes=self.planes,
+                        options=self.config,
+                        errno=self.errno,
+                    )
                 n_contacts = len(pairs)
                 slots = (pairs * self._B + batches[:, None]).reshape(n_contacts * 4)
                 entries = torch.argsort(slots, stable=True)

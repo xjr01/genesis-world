@@ -26,7 +26,9 @@ class VBDConfig(metaclass=AutoInitMeta):
     shell_ground_d_hat: float
     shell_ground_friction: float
     shell_ground_friction_epsilon: float
+    is_self_collision_enabled: bool
     has_shell: bool = False
+    has_mesh_contact: bool = False
     max_contact_thickness: float = 0.0
 
 

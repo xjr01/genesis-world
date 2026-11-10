@@ -184,7 +184,7 @@ def solve_color(
                         qd.atomic_or(errno[None], ErrorCode.INVALID_VBD_STATE)
                     is_searching = False
             if vertices.is_fixed[i_v, i_b] or is_searching:
-                if qd.static(options.has_shell) and not vertices.is_fixed[i_v, i_b]:
+                if qd.static(options.has_shell and options.has_mesh_contact) and not vertices.is_fixed[i_v, i_b]:
                     accumulated = pos + direction - vertices.collision_origin[i_v, i_b]
                     if accumulated.norm() > vertices.bound[i_v, i_b]:
                         direction = (

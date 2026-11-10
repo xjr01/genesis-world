@@ -33,6 +33,7 @@ class Benchmark:
     scene_dt: float
     scene_substeps: int
     iterations: int | None
+    is_self_collision_enabled: bool | None
     is_line_search_enabled: bool | None
     contact_d_hat: float
     contact_search_radius: float | None
@@ -96,6 +97,13 @@ def main():
     )
     parser.add_argument("--precision", choices=("32", "64"), default="32")
     parser.add_argument("--iterations", type=int, help="VBD iterations per substep (default: 15).")
+    parser.add_argument(
+        "--self-collision",
+        dest="is_self_collision_enabled",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable VBD self-contact (default); --no-self-collision permits self-intersection and saves searches.",
+    )
     parser.add_argument(
         "--line-search",
         dest="is_line_search_enabled",
@@ -166,6 +174,7 @@ def main():
             )
         if (
             args.plastic
+            or not args.is_self_collision_enabled
             or args.is_line_search_enabled
             or args.is_contact_diagnostics_enabled
             or any(
@@ -251,6 +260,7 @@ def main():
         vbd_options = gs.options.VBDOptions(
             iterations=args.iterations,
             convergence_tolerance=args.tolerance,
+            is_self_collision_enabled=args.is_self_collision_enabled,
             contact_d_hat=args.contact_distance,
             shell_contact_stiffness=args.contact_stiffness,
             contact_search_radius=args.search_radius,
@@ -401,6 +411,7 @@ def main():
         scene.dt,
         scene.sim.substeps,
         args.iterations,
+        args.is_self_collision_enabled if args.solver == "vbd" else None,
         args.is_line_search_enabled if args.solver == "vbd" else None,
         args.contact_distance,
         args.search_radius,

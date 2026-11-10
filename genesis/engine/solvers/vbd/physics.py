@@ -220,13 +220,14 @@ def apply_prediction(
     vertices: V_ANNOTATION,
     collision: V_ANNOTATION,
     planes: V_ANNOTATION,
+    options: V_ANNOTATION,
     errno: qd.Tensor,
 ):
     for i_v, i_b in vertices.pos:
         if (errno[None] & ErrorCode.INVALID_VBD_STATE) == 0 and vertices.is_volume[i_v] != is_shell:
             fraction = scale[vertices.entity_idx[i_v], i_b]
             displacement = fraction * (vertices.next_pos[i_v, i_b] - vertices.pos[i_v, i_b])
-            if qd.static(collision.has_shell):  # noqa: SIM102
+            if qd.static(collision.has_shell and options.has_mesh_contact):  # noqa: SIM102
                 if is_shell:
                     translation = qd.Vector.zero(gs.qd_float, 3)
                     i_entity = vertices.entity_idx[i_v]
@@ -252,12 +253,13 @@ def apply_prediction(
                             displacement -= translation
                             displacement *= qd.min(1.0, vertices.bound[i_v, i_b] / qd.max(displacement.norm(), 1e-30))
                             displacement += translation
-                        if qd.static(planes.n_planes > 0):
-                            # See initialize_shell_bounds for the plane-normal prediction limit.
-                            for i_p in range(planes.n_planes):
-                                normal = planes.normal[i_p]
-                                gap = vertices.pos[i_v, i_b].dot(normal) - planes.offset[i_p] - vertices.radius[i_v]
-                                displacement -= qd.min(0.0, displacement.dot(normal) + qd.max(0.0, gap)) * normal
+            if qd.static(collision.has_shell and planes.n_planes > 0):  # noqa: SIM102
+                if is_shell and not vertices.is_fixed[i_v, i_b]:
+                    # See initialize_shell_bounds for the plane-normal prediction limit.
+                    for i_p in range(planes.n_planes):
+                        normal = planes.normal[i_p]
+                        gap = vertices.pos[i_v, i_b].dot(normal) - planes.offset[i_p] - vertices.radius[i_v]
+                        displacement -= qd.min(0.0, displacement.dot(normal) + qd.max(0.0, gap)) * normal
             vertices.pos[i_v, i_b] += displacement
 
 

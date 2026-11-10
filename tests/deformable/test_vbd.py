@@ -172,7 +172,8 @@ def test_vertex_controls_and_state(n_envs, has_shell, show_viewer):
 
 @pytest.mark.parametrize("n_envs", [0, 2])
 @pytest.mark.parametrize("is_line_search_enabled", [False, True])
-def test_ground_and_self_contact(n_envs, is_line_search_enabled, show_viewer):
+@pytest.mark.parametrize("is_self_collision_enabled", [False, True])
+def test_ground_and_self_contact(n_envs, is_line_search_enabled, is_self_collision_enabled, show_viewer):
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
             dt=0.005,
@@ -180,6 +181,7 @@ def test_ground_and_self_contact(n_envs, is_line_search_enabled, show_viewer):
             gravity=(0, 0, -9.81),
         ),
         vbd_options=gs.options.VBDOptions(
+            is_self_collision_enabled=is_self_collision_enabled,
             is_contact_diagnostics_enabled=True,
             is_line_search_enabled=is_line_search_enabled,
         ),
@@ -192,6 +194,48 @@ def test_ground_and_self_contact(n_envs, is_line_search_enabled, show_viewer):
     scene.add_entity(
         morph=gs.morphs.Plane(),
     )
+    self_shell = scene.add_entity(
+        morph=gs.morphs.MeshSet(
+            pos=(0.8, 0.4, 0.2),
+            files=(
+                trimesh.Trimesh(
+                    vertices=(
+                        (-0.02, -0.02, 0.0),
+                        (0.02, -0.02, 0.0),
+                        (0.0, 0.02, 0.0),
+                        (-0.002, -0.002, 0.0006),
+                        (0.002, -0.002, 0.0006),
+                        (0.0, 0.002, 0.0006),
+                    ),
+                    faces=((0, 1, 2), (3, 4, 5)),
+                    process=False,
+                ),
+            ),
+        ),
+        material=gs.materials.VBD.Cloth(),
+    )
+    self_solid = scene.add_entity(
+        morph=gs.morphs.TetrahedralMesh(
+            pos=(1.1, 0.4, 0.4),
+            vertices=(
+                (0.0, 0.0, 0.0),
+                (0.2, 0.0, 0.0),
+                (0.0, 0.2, 0.0),
+                (0.0, 0.0, -0.001),
+                (0.03, 0.03, 0.003),
+                (0.032, 0.03, 0.003),
+                (0.03, 0.032, 0.003),
+                (0.03, 0.03, 0.005),
+            ),
+            elements=((0, 2, 1, 3), (4, 5, 6, 7)),
+        ),
+        material=gs.materials.VBD.Elastic(
+            E=1000000.0,
+        ),
+    )
+    # Stationary constraints isolate settling from motion-triggered collision searches in the driven contact phase.
+    self_shell.set_vertex_constraints(np.arange(self_shell.n_vertices))
+    self_solid.set_vertex_constraints(np.arange(self_solid.n_vertices))
     entities = []
     for height in (0.0005, 0.0015):
         mesh = trimesh.Trimesh(
@@ -409,13 +453,13 @@ def test_ground_and_self_contact(n_envs, is_line_search_enabled, show_viewer):
     for _ in range(2):
         scene.step()
     n_substeps = 2 * scene.sim.substeps
-    displacement = -9.81 * (scene.dt / scene.sim.substeps) ** 2 * n_substeps * (n_substeps + 1) / 2
+    free_fall_displacement = -9.81 * (scene.dt / scene.sim.substeps) ** 2 * n_substeps * (n_substeps + 1) / 2
     assert_allclose(
         falling.get_state().pos[..., 2] - initial_falling[..., 2],
-        displacement + initial_velocity * 2 * scene.dt,
+        free_fall_displacement + initial_velocity * 2 * scene.dt,
         atol=2e-6,
     )
-    assert_allclose(dense.get_state().pos - initial_dense, [0.0, 0.0, displacement], atol=2e-7)
+    assert_allclose(dense.get_state().pos - initial_dense, [0.0, 0.0, free_fall_displacement], atol=2e-7)
     for index in range(2):
         lower_pos = approaching_entities[2 * index].get_state().pos
         upper_pos = approaching_entities[2 * index + 1].get_state().pos
@@ -510,6 +554,25 @@ def test_ground_and_self_contact(n_envs, is_line_search_enabled, show_viewer):
             depth = initial[:, 0, 2] - compressed.init_positions[0, 2]
             assert (interior.get_state().pos[..., 2].mean(dim=-1) < initial[..., 2].mean(dim=-1) - depth / 2).all()
     assert_allclose(support, weight, atol=2e-5)
+    scene.reset()
+    state = scene.vbd_solver.get_state(f=0)
+    for entity, n_fixed, velocity in ((self_shell, 3, -1.0), (self_solid, 4, -8.0)):
+        indices = slice(entity.v_start + n_fixed, entity.v_start + entity.n_vertices)
+        state.is_fixed[:, indices] = False
+        state.vel[:, indices, 2] = velocity
+    scene.vbd_solver.set_state(f=0, state=state)
+    for _ in range(2):
+        scene.step()
+    for entity, n_fixed, velocity in ((self_shell, 3, -1.0), (self_solid, 4, -8.0)):
+        positions = entity.get_state().pos
+        if is_self_collision_enabled:
+            assert (positions[:, n_fixed:, 2] > positions[:, :1, 2]).all()
+        else:
+            assert_allclose(
+                positions[:, n_fixed:, 2],
+                entity.init_positions[n_fixed:, 2] + free_fall_displacement + velocity * 2 * scene.dt,
+                atol=2e-6,
+            )
 
 
 @pytest.mark.parametrize("n_envs", [0, 2])

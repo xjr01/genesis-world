@@ -14,6 +14,8 @@ class VBDOptions(Options):
     convergence_tolerance stops when every accepted vertex correction is below this distance in metres: larger
     values save work at the cost of residual force imbalance. The default zero runs every iteration and skips the
     convergence reduction; positive values can save iterations during simple motion at the cost of convergence checks.
+    is_self_collision_enabled resists self-intersection within each entity at the cost of collision searches.
+    False saves this work and permits self-intersection; contact with other entities and ground planes remains active.
     contact_d_hat is the contact activation gap outside the physical surface in metres. Shell contact accounts for
     contact_thickness before applying this gap.
     Larger gaps improve clearance under load at the cost of a wider visible separation and more contact work.
@@ -47,6 +49,7 @@ class VBDOptions(Options):
     gravity: Vec3FType | None = None
     iterations: PositiveInt = 20
     convergence_tolerance: NonNegativeFloat = 0.0
+    is_self_collision_enabled: StrictBool = True
     contact_d_hat: NonNegativeFloat = 0.00001
     contact_min_volume_ratio: NonNegativeFloat = 0.01
     friction_epsilon: PositiveFloat = 0.001
