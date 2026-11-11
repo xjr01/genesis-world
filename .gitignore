@@ -163,3 +163,6 @@ outputs/
 
 # Local agent memory (not versioned)
 /.agents/
+
+# Local remote synchronization tools and state
+/.remote-sync/
