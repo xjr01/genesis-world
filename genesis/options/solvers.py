@@ -1596,6 +1596,39 @@ class DEMOptions(Options):
             self._hash_grid_res = np.ceil(np.array(self.hash_grid_res) / self.hash_grid_cell_size).astype(gs.np_int)
 
 
+class FLIPStaticColliderOptions(Options):
+    """One-way fluid boundary pose.
+
+    ``is_kinematic`` permits prescribed motion at the cost of rebuilding grid boundary weights each fluid step.
+    Fixed boundaries cache their distance field on the fluid grid. Quaternions use w-x-y-z order.
+    """
+
+    pos: Vec3FType = (0.0, 0.0, 0.0)
+    quat: UnitVec4FType = (1.0, 0.0, 0.0, 0.0)
+    is_kinematic: StrictBool = False
+
+
+class FLIPMeshStaticColliderOptions(FLIPStaticColliderOptions):
+    """Watertight mesh boundary. Higher ``sdf_res`` resolves thinner walls at greater build and memory cost."""
+
+    type: Literal["mesh"] = "mesh"
+    file: str
+    scale: PositiveFloat = 1.0
+    sdf_res: StrictInt = Field(default=150, ge=16)
+
+
+class FLIPSphereStaticColliderOptions(FLIPStaticColliderOptions):
+    """Analytic spherical fluid boundary centered at ``pos``."""
+
+    type: Literal["sphere"] = "sphere"
+    radius: PositiveFloat
+
+
+FLIPStaticColliderOptionsType = Annotated[
+    FLIPMeshStaticColliderOptions | FLIPSphereStaticColliderOptions, Field(discriminator="type")
+]
+
+
 class FLIPOptions(Options):
     """
     Options configuring the FLIPSolver.
@@ -1609,6 +1642,9 @@ class FLIPOptions(Options):
 
     Parameters
     ----------
+    static_colliders : list, optional
+        One-way mesh and sphere boundaries. Fixed geometry is cached; kinematic geometry accepts end-of-step pose
+        targets through ``scene.flip_solver.set_static_colliders_pose`` at additional grid-update cost.
     dt : float, optional
         Time duration for each simulation step in seconds. If none, it will inherit from `SimOptions`. Defaults to None.
     gravity : tuple, optional
@@ -1653,6 +1689,7 @@ class FLIPOptions(Options):
         Duration in seconds of the rotation drive. Defaults to 2.0, matching the reference.
     """
 
+    static_colliders: list[FLIPStaticColliderOptionsType] = Field(default_factory=list)
     dt: PositiveFloat | None = None
     gravity: Vec3FType | None = None
 

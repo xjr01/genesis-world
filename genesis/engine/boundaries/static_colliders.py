@@ -26,6 +26,7 @@ from genesis.utils.triangle_qd import (
 _COLLIDER_CONE = 0
 _COLLIDER_MESH = 1
 _COLLIDER_BOX = 2
+_COLLIDER_SPHERE = 3
 _SDF_CACHE_SCHEMA = "pbstf-static-collider-v1"
 
 
@@ -37,7 +38,7 @@ class MeshSDFData:
 
 
 class StaticCollider(ABC):
-    """One-way PBSTF collider geometry expressed in a mutable local frame."""
+    """One-way collider geometry expressed in a mutable local frame."""
 
     kind: int
 
@@ -55,6 +56,27 @@ class StaticCollider(ABC):
     @abstractmethod
     def from_options(cls, options):
         """Construct a collider from its solver-facing options object."""
+
+
+class SphereStaticCollider(StaticCollider):
+    """Analytic spherical boundary in a mutable local frame."""
+
+    kind = _COLLIDER_SPHERE
+    type = "sphere"
+
+    def __init__(self, radius, pos, quat):
+        super().__init__(
+            pos,
+            quat,
+            is_collider_adhesion_friction_enabled=False,
+            collider_adhesion_compliance=10.0,
+            collider_friction=0.0,
+        )
+        self.radius = radius
+
+    @classmethod
+    def from_options(cls, options):
+        return cls(options.radius, options.pos, options.quat)
 
 
 class BoxStaticCollider(StaticCollider):
@@ -760,6 +782,13 @@ def query_static_collider(collider_idx, env_idx, pos, colliders_pos, colliders_q
         closest_local, normal_local, is_inside, surface_distance = _query_cone_local(pos_local, collider)
     elif qd.static(collider.kind == _COLLIDER_MESH):
         closest_local, normal_local, is_inside, surface_distance = _query_mesh_local(env_idx, pos_local, collider)
+    elif qd.static(collider.kind == _COLLIDER_SPHERE):
+        radius = pos_local.norm()
+        if radius > gs.EPS:
+            normal_local = pos_local / radius
+        closest_local = normal_local * collider.radius
+        is_inside = radius < collider.radius
+        surface_distance = qd.abs(radius - collider.radius)
     closest = gu.qd_transform_by_trans_quat(closest_local, collider_pos, collider_quat)
     normal = gu.qd_transform_by_quat(normal_local, collider_quat)
     return closest, normal, is_inside, surface_distance
@@ -891,12 +920,13 @@ def create_static_collider(options) -> StaticCollider:
 
 
 __all__ = [
-    "StaticCollider",
-    "AbsorbentStaticCollider",
     "AbsorbentBoxStaticCollider",
+    "AbsorbentStaticCollider",
     "BoxStaticCollider",
     "ConeStaticCollider",
     "MeshStaticCollider",
+    "SphereStaticCollider",
+    "StaticCollider",
     "build_deformable_surface_bvh",
     "create_static_collider",
     "load_or_build_mesh_sdf",

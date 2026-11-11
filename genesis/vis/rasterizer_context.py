@@ -1137,40 +1137,43 @@ class RasterizerContext:
 
     def on_flip(self):
         if self.sim.flip_solver.is_active:
-            for flip_entity in self.sim.flip_solver.entities:
-                for idx in self.rendered_envs_idx:
-                    if flip_entity.surface.vis_mode == "particle":
-                        if self.render_particle_as == "sphere":
-                            mesh = mu.create_sphere(
-                                self.sim.flip_solver.particle_radius * self.particle_size_scale, subdivisions=1
-                            )
-                            mesh.visual = mu.surface_uvs_to_trimesh_visual(
-                                flip_entity.surface, n_verts=len(mesh.vertices)
-                            )
-                            tfs = np.tile(np.eye(4), (flip_entity.n_particles, 1, 1))
-                            tfs[:, :3, 3] = flip_entity.init_particles
-                            self.add_static_node(
-                                flip_entity, pyrender.Mesh.from_trimesh(mesh, smooth=True, poses=tfs), i_b=idx
-                            )
+            for entity in self.sim.flip_solver.entities:
+                if entity.surface.vis_mode == "recon":
+                    self.add_dynamic_node(entity, None)
+                else:
+                    for idx in self.rendered_envs_idx:
+                        mesh = mu.create_sphere(
+                            self.sim.flip_solver.particle_radius * self.particle_size_scale, subdivisions=1
+                        )
+                        mesh.visual = mu.surface_uvs_to_trimesh_visual(entity.surface, n_verts=len(mesh.vertices))
+                        poses = np.tile(np.eye(4), (entity.n_particles, 1, 1))
+                        poses[:, :3, 3] = entity.init_particles
+                        self.add_static_node(
+                            entity, pyrender.Mesh.from_trimesh(mesh, smooth=True, poses=poses), i_b=idx
+                        )
 
     def update_flip(self):
-        if self.sim.flip_solver.is_active:
-            particles_all = qd_to_numpy(self.sim.flip_solver.particles_render.pos) + self.scene.envs_offset
-            active_all = qd_to_numpy(self.sim.flip_solver.particles_render.active).astype(dtype=np.bool_, copy=False)
-            for flip_entity in self.sim.flip_solver.entities:
+        solver = self.sim.flip_solver
+        if solver.is_active:
+            positions = qd_to_numpy(solver.particles_render.pos, transpose=True) + self.scene.envs_offset[:, None, :]
+            is_active = qd_to_numpy(solver.particles_render.active, transpose=True)
+            for entity in solver.entities:
                 for idx in self.rendered_envs_idx:
-                    particles_env = particles_all[:, idx]
-                    active_env = active_all[:, idx]
-
-                    if flip_entity.surface.vis_mode == "particle":
-                        if self.render_particle_as == "sphere":
-                            tfs = np.tile(np.eye(4), (flip_entity.n_particles, 1, 1))
-                            tfs[:, :3, 3] = particles_env[flip_entity.particle_start : flip_entity.particle_end]
-                            # absorbed (inactive) particles get a zero transform, making them invisible
-                            tfs[~active_env[flip_entity.particle_start : flip_entity.particle_end]] = 0.0
-
-                            node = self.static_nodes[(idx, flip_entity.uid)]
-                            self.jit.update_buffer(node, "model", tfs.transpose((0, 2, 1)))
+                    span = slice(entity.particle_start, entity.particle_end)
+                    if entity.surface.vis_mode == "recon":
+                        mesh = pu.particles_to_mesh(
+                            positions=positions[idx, span][is_active[idx, span]],
+                            radius=solver.particle_radius,
+                            backend=entity.surface.recon_backend,
+                        )
+                        mesh.visual = mu.surface_uvs_to_trimesh_visual(entity.surface, n_verts=len(mesh.vertices))
+                        self.add_dynamic_node(entity, pyrender.Mesh.from_trimesh(mesh, smooth=True))
+                    else:
+                        poses = np.tile(np.eye(4), (entity.n_particles, 1, 1))
+                        poses[:, :3, 3] = positions[idx, span]
+                        poses[~is_active[idx, span]] = 0.0
+                        node = self.static_nodes[(idx, entity.uid)]
+                        self.jit.update_buffer(node, "model", poses.transpose((0, 2, 1)))
 
     def on_fem(self):
         if self.sim.fem_solver.is_active:

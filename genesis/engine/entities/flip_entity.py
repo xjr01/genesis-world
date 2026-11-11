@@ -1,20 +1,20 @@
 import numpy as np
 import torch
 
+import igl
+
 import genesis as gs
-import genesis.utils.geom as gu
 from genesis.engine.entities.particle_entity import ParticleEntity
+from genesis.utils import geom
 
 
 class FLIPEntity(ParticleEntity):
     """
     Entity for FLIP (Fluid-Implicit-Particle) liquid particles.
 
-    Particles are seeded on a stratified pattern, following the reference implementation's `SeedParticles`:
-    the domain cell grid is refined by `seed_sub_factor` per axis, one jittered sample is placed per sub-cell,
-    and samples are kept only when they lie inside the liquid morph with a margin of
-    `0.874 * dx` (`1.01 * sqrt(3) / 2 * dx`), so the initial particle distribution is uniform and
-    one particle radius away from the free surface.
+    The sampling grid uses ``seed_sub_factor`` subdivisions per fluid cell and one jittered sample per subdivision.
+    Primitive volumes use a ``1.01 * sqrt(3) / 2 * dx`` surface clearance. Watertight mesh volumes use half a sampling
+    interval, resolving filled cavities up to their walls and opening while keeping seed centers inside the volume.
 
     Parameters
     ----------
@@ -25,7 +25,7 @@ class FLIPEntity(ParticleEntity):
     material : FLIP.Base
         The material definition.
     morph : Morph
-        Geometry or volumetric shape used for seeding particles. Only primitive morphs are supported.
+        Geometry or volumetric shape used for seeding particles. Primitive and watertight mesh morphs are supported.
     surface : Surface
         Surface material or texture information associated with the entity.
     particle_size : float
@@ -65,10 +65,10 @@ class FLIPEntity(ParticleEntity):
 
     def sample(self):
         """
-        Stratified seeding inside the primitive morph, following the reference `SeedParticles`.
+        Seed a primitive or a watertight mesh with a stratified volume distribution.
         """
-        if not isinstance(self._morph, gs.options.morphs.Primitive):
-            gs.raise_exception(f"FLIPEntity only supports primitive morphs. Got: {self._morph}.")
+        if not isinstance(self._morph, (gs.options.morphs.Primitive, gs.options.morphs.Mesh)):
+            gs.raise_exception(f"FLIPEntity supports primitive and watertight mesh morphs. Got: {self._morph}.")
 
         dx = self._solver.dx
         sub = self._solver.seed_sub_factor
@@ -83,20 +83,28 @@ class FLIPEntity(ParticleEntity):
         candidates = (
             lower + (sub_idx + 0.5) * (dx / sub) + (rng.random(sub_idx.shape[0] * 3).reshape(-1, 3) - 0.5) * (dx / sub) / 2.0
         )
-        particles = candidates[self._inside_with_margin(candidates, margin)]
+        if isinstance(self._morph, gs.options.morphs.Mesh):
+            mesh = self._vmesh.trimesh.copy()
+            mesh.merge_vertices(merge_tex=True, merge_norm=True)
+            if not mesh.is_watertight:
+                gs.raise_exception("FLIP liquid mesh seeding requires a watertight volume.")
+            distances, *_ = igl.signed_distance(candidates, mesh.vertices, mesh.faces)
+            particles = candidates[distances <= -0.5 * dx / sub]
+        else:
+            particles = candidates[self._inside_with_margin(candidates, margin)]
 
         if particles.shape[0] == 0:
             gs.raise_exception("Entity has zero particles.")
 
         # transform vmesh and particles by the morph pose (offset composed onto the morph pose)
-        pos, quat = gu.transform_pos_quat_by_trans_quat(
+        pos, quat = geom.transform_pos_quat_by_trans_quat(
             np.array(self._morph.offset_pos, dtype=gs.np_float),
             np.array(self._morph.offset_quat, dtype=gs.np_float),
             np.array(self._morph.pos, dtype=gs.np_float),
             np.array(self._morph.quat, dtype=gs.np_float),
         )
-        self._vmesh.apply_transform(gu.trans_quat_to_T(pos, quat))
-        particles = gu.transform_by_trans_quat(particles, pos, quat)
+        self._vmesh.apply_transform(geom.trans_quat_to_T(pos, quat))
+        particles = geom.transform_by_trans_quat(particles, pos, quat)
 
         if not self._solver.boundary.is_inside(particles):
             gs.raise_exception(
@@ -107,7 +115,7 @@ class FLIPEntity(ParticleEntity):
         self._vverts = np.zeros((0, 3), dtype=gs.np_float)
         self._vfaces = np.zeros((0, 3), dtype=gs.np_int)
 
-        self._particles = np.asarray(particles, dtype=gs.np_float, order="C")
+        self._particles = np.ascontiguousarray(particles)
         self._init_particles_offset = gs.tensor(self._particles) - gs.tensor(pos)
         self._n_particles = len(self._particles)
 

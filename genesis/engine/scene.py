@@ -502,6 +502,7 @@ class Scene(RBC):
                 gs.materials.MPM.Sand,
                 gs.materials.MPM.Snow,
                 gs.materials.SPH.Liquid,
+                gs.materials.FLIP.Liquid,
                 gs.materials.IPBF.Liquid,
                 gs.materials.IPBSTF.Liquid,
                 gs.materials.PBSTF.Liquid,
@@ -515,7 +516,7 @@ class Scene(RBC):
                     f"Unsupported `surface.vis_mode` for material {material}: '{surface.vis_mode}'. Expected one of: ['particle', 'recon']."
                 )
 
-        elif isinstance(material, (gs.materials.DEM.Base, gs.materials.FLIP.Base)):
+        elif isinstance(material, gs.materials.DEM.Base):
             if surface.vis_mode is None:
                 surface.vis_mode = "particle"
 

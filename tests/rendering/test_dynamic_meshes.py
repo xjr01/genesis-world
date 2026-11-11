@@ -61,6 +61,39 @@ def test_pbd_reconstruction_uses_pbd_particle_radius(monkeypatch, renderer):
 
 
 @pytest.mark.required
+@pytest.mark.parametrize("vis_mode", ["particle", "recon"])
+@pytest.mark.parametrize("renderer_type", [RENDERER_TYPE.RASTERIZER])
+def test_flip_surface_visibility(vis_mode, renderer):
+    scene = gs.Scene(
+        flip_options=gs.options.FLIPOptions(
+            grid_res=24,
+            lower_bound=(-0.1, -0.1, 0.0),
+            upper_bound=(0.1, 0.1, 0.2),
+            seed_sub_factor=2,
+        ),
+        renderer=renderer,
+        show_viewer=False,
+    )
+    water = scene.add_entity(
+        morph=gs.morphs.Sphere(
+            pos=(0.0, 0.0, 0.1),
+            radius=0.04,
+        ),
+        material=gs.materials.FLIP.Liquid(),
+        surface=gs.surfaces.Default(color=(0.05, 0.4, 0.9), vis_mode=vis_mode),
+    )
+    camera = scene.add_camera(res=(96, 96), pos=(0.0, -0.4, 0.1), lookat=(0.0, 0.0, 0.1))
+    scene.build()
+    visible, _, _, _ = camera.render()
+    water.set_particles_active(water.get_particles_active() & False)
+    scene.flip_solver.update_render_fields()
+    empty, _, _, _ = camera.render(force_render=True)
+    difference = np.abs(visible * 1.0 - empty)
+    assert (difference.max(axis=-1) > 10).sum() > 100
+    assert (difference[35:61, 35:61].max(axis=-1) > 10).sum() > 100
+
+
+@pytest.mark.required
 @pytest.mark.parametrize("backend", [gs.cuda])
 @pytest.mark.parametrize("renderer_type", [RENDERER_TYPE.RASTERIZER])
 @pytest.mark.parametrize("n_envs", [0, 2])

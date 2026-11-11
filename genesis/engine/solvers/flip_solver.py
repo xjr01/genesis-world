@@ -1,14 +1,17 @@
 import math
 
 import numpy as np
+
 import quadrants as qd
 
 import genesis as gs
 from genesis.engine.boundaries import CubeBoundary
 from genesis.engine.entities import FLIPEntity
-from genesis.utils.misc import qd_to_torch
+from genesis.utils.array_class import ErrorCode
+from genesis.utils.misc import qd_to_numpy, qd_to_torch
 
-from .base_solver import Solver
+from . import flip_boundary
+from .base_solver import Solver, StateChange, mutates
 
 
 @qd.data_oriented
@@ -41,6 +44,11 @@ class FLIPSolver(Solver):
 
     def __init__(self, scene, sim, options):
         super().__init__(scene, sim, options)
+
+        self._solid_boundary = None
+        self._errno = None
+        self._collider_options = options.static_colliders
+        self._has_solid_boundary = bool(options.static_colliders)
 
         self._lower_bound = np.array(options.lower_bound, dtype=gs.np_float)
         self._upper_bound = np.array(options.upper_bound, dtype=gs.np_float)
@@ -86,6 +94,10 @@ class FLIPSolver(Solver):
             for entity in self._entities:
                 entity._add_to_solver()
             self._build_open_masks()
+            self._errno = qd.field(gs.qd_int, shape=(self._B,))
+            self._errno.fill(0)
+            if self._collider_options:
+                self._solid_boundary = flip_boundary.FLIPBoundary(self, self._collider_options)
 
         # coupled mode: drive the DEM advance before each water step (C++ Advance order)
         self._dem_coupling = (
@@ -117,7 +129,7 @@ class FLIPSolver(Solver):
 
         # FIXME: _gravity must be a raw qd.field() -- see comment in mpm_solver.py
         if self._gravity is not None:
-            gravity = self._gravity.to_numpy()
+            gravity = qd_to_numpy(self._gravity, transpose=True)
             self._gravity = qd.field(dtype=gs.qd_vec3, shape=(self._B,))
             self._gravity.from_numpy(gravity)
 
@@ -263,19 +275,14 @@ class FLIPSolver(Solver):
                 npos = lo[None, None, None, :] + np.stack(ngrids, axis=-1) * self._dx
                 phi = R - np.hypot(npos[..., 0] - self._center_x, npos[..., 1] - self._center_y)
                 # the 4 corner nodes of a face: c00, c01, c11, c10 along the two non-axis directions
-                s0 = [slice(None)] * 3
-                s1 = [slice(None)] * 3
-                axes2 = [a for a in range(3) if a != axis]
-                def corner(o1, o2):
-                    sl = [slice(None)] * 3
-                    sl[axes2[0]] = slice(o1, o1 + shape[axes2[0]])
-                    sl[axes2[1]] = slice(o2, o2 + shape[axes2[1]])
-                    sl[axis] = slice(0, shape[axis])
-                    return phi[tuple(sl)]
-                c00 = corner(0, 0)
-                c01 = corner(0, 1)
-                c11 = corner(1, 1)
-                c10 = corner(1, 0)
+                axes2 = tuple(a for a in range(3) if a != axis)
+                slices = [slice(None)] * 3
+                slices[axis] = slice(0, shape[axis])
+                corners = np.lib.stride_tricks.sliding_window_view(phi, (2, 2), axis=axes2)[tuple(slices)]
+                c00 = corners[..., 0, 0]
+                c01 = corners[..., 0, 1]
+                c11 = corners[..., 1, 1]
+                c10 = corners[..., 1, 0]
                 center = (c00 + c01 + c11 + c10) * 0.25
                 frac = (
                     self._corner_fraction(center, c00, c01)
@@ -441,7 +448,11 @@ class FLIPSolver(Solver):
         self.grid2mat.fill(-1)
         for cell in qd.grouped(self.grid2mat):
             if self.levelset[cell] <= 0.0:
-                self.grid2mat[cell] = 1
+                if qd.static(self._has_solid_boundary):
+                    if self._solid_boundary.cells[cell] > 0.0:
+                        self.grid2mat[cell] = 1
+                else:
+                    self.grid2mat[cell] = 1
 
     @qd.kernel
     def _kernel_enforce_particles_boundary(self, f: qd.i32):
@@ -692,12 +703,18 @@ class FLIPSolver(Solver):
         for idx in qd.grouped(self.vel_u):
             if self.open_u[idx] == 0.0:
                 self.vel_u[idx] = 0.0
+                if qd.static(self._has_solid_boundary):
+                    self.vel_u[idx] = self._solid_boundary.wall_u[idx]
         for idx in qd.grouped(self.vel_v):
             if self.open_v[idx] == 0.0:
                 self.vel_v[idx] = 0.0
+                if qd.static(self._has_solid_boundary):
+                    self.vel_v[idx] = self._solid_boundary.wall_v[idx]
         for idx in qd.grouped(self.vel_w):
             if self.open_w[idx] == 0.0:
                 self.vel_w[idx] = 0.0
+                if qd.static(self._has_solid_boundary):
+                    self.vel_w[idx] = self._solid_boundary.wall_w[idx]
 
     # ------------------------------ pressure solve ------------------------------
 
@@ -728,6 +745,15 @@ class FLIPSolver(Solver):
                                 w_open = self.open_v[face]
                             else:
                                 w_open = self.open_w[face]
+                            if qd.static(self._has_solid_boundary):
+                                wall_velocity = gs.qd_float(0.0)
+                                if d == 0:
+                                    wall_velocity = self._solid_boundary.wall_u[face]
+                                elif d == 1:
+                                    wall_velocity = self._solid_boundary.wall_v[face]
+                                else:
+                                    wall_velocity = self._solid_boundary.wall_w[face]
+                                rhs -= s * (1.0 - w_open) * wall_velocity
                             if w_open > 0.0:
                                 coef = w_open * 0.5 * (f_r + self.target_fraction[nb])
                                 face_vel = gs.qd_float(0.0)
@@ -786,8 +812,10 @@ class FLIPSolver(Solver):
             id0 = self.grid2mat[c0]
             id1 = self.grid2mat[c1]
             if id0 >= 0 and id1 >= 0:
-                # C++ ApplyProjection also stores the gradient (m_GradPressure1); both scale with the open weight
+                # Prescribed boundaries apply the solid face area when converting liquid velocity to flux below.
                 w_f = self.open_u[idx]
+                if qd.static(self._has_solid_boundary):
+                    w_f = 1.0
                 self.vel_u[idx] = self.vel_u[idx] - (self.p_x[c1] - self.p_x[c0]) * w_f
                 self.grad_p_u[idx] = (self.p_x[c1] - self.p_x[c0]) * w_f
             elif id0 >= 0 or id1 >= 0:
@@ -796,7 +824,15 @@ class FLIPSolver(Solver):
                 theta = phi0 / (phi0 - phi1)
                 p_inner = self.p_x[c0] if id0 >= 0 else self.p_x[c1]
                 intf = 1.0 / max(theta if id0 >= 0 else 1.0 - theta, 0.001)
-                self.vel_u[idx] = self.vel_u[idx] + (1.0 if id0 >= 0 else -1.0) * p_inner * intf * self.open_u[idx]
+                w_f = self.open_u[idx]
+                if qd.static(self._has_solid_boundary):
+                    w_f = 1.0
+                self.vel_u[idx] = self.vel_u[idx] + (1.0 if id0 >= 0 else -1.0) * p_inner * intf * w_f
+            if qd.static(self._has_solid_boundary):
+                # Area-averaged flux keeps particle transport resolved as an open face shrinks to a thin solid gap.
+                self.vel_u[idx] = (
+                    self.open_u[idx] * self.vel_u[idx] + (1.0 - self.open_u[idx]) * self._solid_boundary.wall_u[idx]
+                )
         for idx in qd.grouped(self.vel_v):
             i, j, k = idx
             if self.open_v[idx] == 0.0:
@@ -806,8 +842,9 @@ class FLIPSolver(Solver):
             id0 = self.grid2mat[c0]
             id1 = self.grid2mat[c1]
             if id0 >= 0 and id1 >= 0:
-                # C++ ApplyProjection also stores the gradient (m_GradPressure1); both scale with the open weight
                 w_f = self.open_v[idx]
+                if qd.static(self._has_solid_boundary):
+                    w_f = 1.0
                 self.vel_v[idx] = self.vel_v[idx] - (self.p_x[c1] - self.p_x[c0]) * w_f
                 self.grad_p_v[idx] = (self.p_x[c1] - self.p_x[c0]) * w_f
             elif id0 >= 0 or id1 >= 0:
@@ -816,7 +853,14 @@ class FLIPSolver(Solver):
                 theta = phi0 / (phi0 - phi1)
                 p_inner = self.p_x[c0] if id0 >= 0 else self.p_x[c1]
                 intf = 1.0 / max(theta if id0 >= 0 else 1.0 - theta, 0.001)
-                self.vel_v[idx] = self.vel_v[idx] + (1.0 if id0 >= 0 else -1.0) * p_inner * intf * self.open_v[idx]
+                w_f = self.open_v[idx]
+                if qd.static(self._has_solid_boundary):
+                    w_f = 1.0
+                self.vel_v[idx] = self.vel_v[idx] + (1.0 if id0 >= 0 else -1.0) * p_inner * intf * w_f
+            if qd.static(self._has_solid_boundary):
+                self.vel_v[idx] = (
+                    self.open_v[idx] * self.vel_v[idx] + (1.0 - self.open_v[idx]) * self._solid_boundary.wall_v[idx]
+                )
         for idx in qd.grouped(self.vel_w):
             i, j, k = idx
             if self.open_w[idx] == 0.0:
@@ -826,8 +870,9 @@ class FLIPSolver(Solver):
             id0 = self.grid2mat[c0]
             id1 = self.grid2mat[c1]
             if id0 >= 0 and id1 >= 0:
-                # C++ ApplyProjection also stores the gradient (m_GradPressure1); both scale with the open weight
                 w_f = self.open_w[idx]
+                if qd.static(self._has_solid_boundary):
+                    w_f = 1.0
                 self.vel_w[idx] = self.vel_w[idx] - (self.p_x[c1] - self.p_x[c0]) * w_f
                 self.grad_p_w[idx] = (self.p_x[c1] - self.p_x[c0]) * w_f
             elif id0 >= 0 or id1 >= 0:
@@ -836,7 +881,14 @@ class FLIPSolver(Solver):
                 theta = phi0 / (phi0 - phi1)
                 p_inner = self.p_x[c0] if id0 >= 0 else self.p_x[c1]
                 intf = 1.0 / max(theta if id0 >= 0 else 1.0 - theta, 0.001)
-                self.vel_w[idx] = self.vel_w[idx] + (1.0 if id0 >= 0 else -1.0) * p_inner * intf * self.open_w[idx]
+                w_f = self.open_w[idx]
+                if qd.static(self._has_solid_boundary):
+                    w_f = 1.0
+                self.vel_w[idx] = self.vel_w[idx] + (1.0 if id0 >= 0 else -1.0) * p_inner * intf * w_f
+            if qd.static(self._has_solid_boundary):
+                self.vel_w[idx] = (
+                    self.open_w[idx] * self.vel_w[idx] + (1.0 - self.open_w[idx]) * self._solid_boundary.wall_w[idx]
+                )
 
     @qd.kernel
     def _kernel_save_velocity(self, f: qd.i32):
@@ -948,7 +1000,7 @@ class FLIPSolver(Solver):
                 if id0 >= 0 or id1 >= 0:
                     p0 = self.p_x[c0] if id0 >= 0 else 0.0
                     p1 = self.p_x[c1] if id1 >= 0 else 0.0
-                    self.dpos_u[idx] = (p1 - p0) * self._dx
+                    self.dpos_u[idx] = (p1 - p0) * self._dx * self.open_u[idx]
         for idx in qd.grouped(self.dpos_v):
             i, j, k = idx
             self.dpos_v[idx] = 0.0
@@ -960,7 +1012,7 @@ class FLIPSolver(Solver):
                 if id0 >= 0 or id1 >= 0:
                     p0 = self.p_x[c0] if id0 >= 0 else 0.0
                     p1 = self.p_x[c1] if id1 >= 0 else 0.0
-                    self.dpos_v[idx] = (p1 - p0) * self._dx
+                    self.dpos_v[idx] = (p1 - p0) * self._dx * self.open_v[idx]
         for idx in qd.grouped(self.dpos_w):
             i, j, k = idx
             self.dpos_w[idx] = 0.0
@@ -972,7 +1024,7 @@ class FLIPSolver(Solver):
                 if id0 >= 0 or id1 >= 0:
                     p0 = self.p_x[c0] if id0 >= 0 else 0.0
                     p1 = self.p_x[c1] if id1 >= 0 else 0.0
-                    self.dpos_w[idx] = (p1 - p0) * self._dx
+                    self.dpos_w[idx] = (p1 - p0) * self._dx * self.open_w[idx]
 
     @qd.kernel
     def _kernel_apply_correction_particles(self, f: qd.i32):
@@ -1001,6 +1053,9 @@ class FLIPSolver(Solver):
                             idx = self._func_clamp_idx(idx, qd.Vector(self.dpos_w.shape, dt=gs.qd_int) - 1)
                             val += self.dpos_w[idx] * w
                     dpos[axis] = val
+                if qd.static(self._has_solid_boundary):
+                    # Limit density corrections to resolve thin solid boundaries between successive projections.
+                    dpos *= qd.min(1.0, 0.25 * self._dx / qd.max(dpos.norm(), gs.EPS))
                 self.particles[i_p, i_b].pos = pos + dpos
 
     # ------------------------------ water absorption ------------------------------
@@ -1119,29 +1174,68 @@ class FLIPSolver(Solver):
         return float((qd_to_torch(fa) * qd_to_torch(fb)).sum().item())
 
     def _pcg_solve(self, f, matvec_kernel):
-        # Jacobi-PCG, matrix-free; solves A x = rhs with the system prepared in p_rhs / p_diag
-        self.p_x.fill(0.0)
-        self.p_r.copy_from(self.p_rhs)
-        self._kernel_pcg_init(f)
-        rho = self._dot(self.p_r, self.p_z)
-        rhs_norm = math.sqrt(max(self._dot(self.p_rhs, self.p_rhs), 1e-30))
-        for _ in range(self._pcg_max_iter):
-            matvec_kernel(f)
-            alpha = rho / max(self._dot(self.p_d, self.p_ap), 1e-30)
-            self._kernel_pcg_update(f, alpha)
-            res = math.sqrt(max(self._dot(self.p_r, self.p_r), 0.0))
-            if res < self._pcg_tol * rhs_norm:
-                break
-            self._kernel_pcg_precond(f)
-            rho_new = self._dot(self.p_r, self.p_z)
-            self._kernel_pcg_update_dir(f, rho_new / max(rho, 1e-30))
-            rho = rho_new
+        """Solve the grid system, reconciling sealed components if prescribed boundaries close a liquid gap."""
+        for attempt in range(2):
+            self.p_x.fill(0.0)
+            self.p_r.copy_from(self.p_rhs)
+            self._kernel_pcg_init(f)
+            rho = self._dot(self.p_r, self.p_z)
+            if rho == 0.0:
+                return
+            rhs_norm = math.sqrt(max(self._dot(self.p_rhs, self.p_rhs), 1e-30))
+            res = rhs_norm
+            for _ in range(self._pcg_max_iter):
+                matvec_kernel(f)
+                curvature = self._dot(self.p_d, self.p_ap)
+                if self._has_solid_boundary and (curvature <= 0.0 or not math.isfinite(curvature)):
+                    break
+                alpha = rho / max(curvature, 1e-30)
+                self._kernel_pcg_update(f, alpha)
+                res = math.sqrt(max(self._dot(self.p_r, self.p_r), 0.0))
+                if res < self._pcg_tol * rhs_norm:
+                    return
+                self._kernel_pcg_precond(f)
+                rho_new = self._dot(self.p_r, self.p_z)
+                self._kernel_pcg_update_dir(f, rho_new / max(rho, 1e-30))
+                rho = rho_new
+            if self._has_solid_boundary and attempt == 0 and res >= self._pcg_tol * rhs_norm:
+                diagonal = qd_to_numpy(self.p_diag, transpose=True, copy=True)
+                rhs = qd_to_numpy(self.p_rhs, transpose=True, copy=True)
+                is_fluid = qd_to_numpy(self.grid2mat, transpose=True) >= 0
+                fractions = qd_to_numpy(self.target_fraction, transpose=True)
+                face_weights = (
+                    qd_to_numpy(self.open_w, transpose=True),
+                    qd_to_numpy(self.open_u, transpose=True),
+                    qd_to_numpy(self.open_v, transpose=True),
+                )
+                if flip_boundary.make_flux_compatible(diagonal, rhs, is_fluid, face_weights, fractions):
+                    self.p_diag.from_numpy(np.moveaxis(diagonal, 0, -1))
+                    self.p_rhs.from_numpy(np.moveaxis(rhs, 0, -1))
+                    continue
+            if self._has_solid_boundary and (not math.isfinite(res) or res > rhs_norm):
+                gs.raise_exception("FLIP grid pressure solve diverged.")
+            return
 
     # ------------------------------------------------------------------------------------
     # ------------------------------------ stepping --------------------------------------
     # ------------------------------------------------------------------------------------
 
+    @gs.assert_built
+    @mutates(StateChange.GEOMETRY)
+    def set_static_colliders_pose(self, pos, quat, colliders_idx=None, envs_idx=None):
+        """Submit end-of-next-step poses for kinematic boundaries, interpolated across the fluid substeps.
+
+        Positions and w-x-y-z quaternions broadcast across selected colliders. Each target is consumed by one
+        scene step; subsequent steps hold the committed pose. The solver supports a single environment.
+        """
+        self.scene._sanitize_envs_idx(envs_idx)
+        if self._solid_boundary is None:
+            gs.raise_exception("The FLIP scene has no solid boundaries.")
+        self._solid_boundary.set_pose(pos, quat, colliders_idx)
+
     def process_input(self, in_backward=False):
+        if self._solid_boundary is not None:
+            self._solid_boundary.begin_step(self.dt)
         for entity in self._entities:
             entity.process_input(in_backward=in_backward)
 
@@ -1160,17 +1254,28 @@ class FLIPSolver(Solver):
             max_vel = np.zeros(1, dtype=gs.np_float)
             self._kernel_max_face_vel(max_vel)
             cfl_dt = 2.0 * self._dx / max(float(max_vel[0]), 1e-12)
-            dt_f = min(cfl_dt, dt_remaining)
+            if self._solid_boundary is not None:
+                boundary_speed = np.linalg.norm(self._solid_boundary.velocity, axis=-1).max()
+                angular_speed = np.linalg.norm(self._solid_boundary.angular_velocity, axis=-1).max()
+                boundary_speed += angular_speed * np.linalg.norm(self._upper_bound - self._lower_bound)
+                cfl_dt = 0.5 * self._dx / max(float(max_vel[0]), boundary_speed, 1e-12)
+            dt_f = float(min(cfl_dt, dt_remaining))
             if self._dem_coupling:
                 # C++ Advance: MoveDEMParticles(dt_f) runs before the water path of each fluid step
                 self._sim.dem_solver.advance_coupled(f, dt_f)
             self._water_step(f, dt_f)
             dt_remaining -= dt_f
+        if self._solid_boundary is not None and self._solid_boundary.elapsed >= self.dt - 1e-12:
+            self._solid_boundary.finish_step()
 
     def _water_step(self, f, dt):
         # one full water step of the reference's Advance (water-only path)
         # 1. advect particles with the current grid velocity, rebuild the level set
+        if self._solid_boundary is not None:
+            self._solid_boundary.advance(self, dt)
         self._kernel_advect_particles(f, dt)
+        if self._solid_boundary is not None:
+            flip_boundary.kernel_project_particles(self, self._solid_boundary)
         self._kernel_reconstruct_levelset(f)
         self._kernel_set_unknowns(f)
 
@@ -1187,6 +1292,8 @@ class FLIPSolver(Solver):
             self._kernel_apply_correction_faces(f)
             self._kernel_apply_correction_particles(f)
             self._kernel_enforce_particles_boundary(f)
+            if self._solid_boundary is not None:
+                flip_boundary.kernel_project_particles(self, self._solid_boundary)
             self._kernel_reconstruct_levelset(f)
             self._kernel_set_unknowns(f)
 
@@ -1222,6 +1329,11 @@ class FLIPSolver(Solver):
 
         # 6. G2P (FLIP/PIC blend)
         self._kernel_g2p(f)
+        if self._solid_boundary is not None:
+            flip_boundary.kernel_project_particles(self, self._solid_boundary)
+        flip_boundary.kernel_check_finite(self, self._errno)
+        if np.bitwise_or.reduce(qd_to_numpy(self._errno, transpose=True)) & ErrorCode.INVALID_FLIP_STATE_NAN:
+            gs.raise_exception("FLIP produced non-finite particle positions or velocities.")
 
         # 7. water absorption by sand (C++ CacheFluidIndex / WetDEMParticle / RemoveDeadParticle;
         # absorbed fluid particles are deactivated in place instead of being erased)
