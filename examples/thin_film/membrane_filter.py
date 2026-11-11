@@ -4,6 +4,7 @@ Run with ``--vis`` for the viewer or ``--record`` for a camera movie. ``--check`
 and saves particle snapshots. Dimensions and sampling follow the C++ case 22; Y is vertical. Scale 75 gives 14,046
 particles (23,218 with the second membrane enabled in the reference). Gravity and timestep follow the paper's table 1.
 The default 64-bit arithmetic favors stability during impact; ``--precision 32`` reduces GPU cost.
+Use ``--export-particles`` to save per-step numerical checkpoints for offline rendering.
 """
 
 import argparse
@@ -17,6 +18,7 @@ from scipy.spatial import cKDTree
 
 import genesis as gs
 from genesis.utils import particle
+from genesis.utils.checkpoint_replay import CheckpointWriter
 from genesis.utils.misc import tensor_to_array
 
 
@@ -52,6 +54,9 @@ def main():
     parser.add_argument("--dt", type=float, default=1 / 30, help="Simulation timestep")
     parser.add_argument("--precision", choices=("32", "64"), default="64", help="64-bit arithmetic costs more GPU time")
     parser.add_argument("--check", action="store_true", help="Measure film coverage and save particle snapshots")
+    parser.add_argument(
+        "--export-particles", action="store_true", help="Export numerical checkpoints at every timestep"
+    )
     parser.add_argument("--surface", action="store_true", help="Reconstruct the liquid surface at extra rendering cost")
     parser.add_argument(
         "-o", "--output-dir", type=Path, default=Path("out/thin_film/membrane_filter"), help="Output directory"
@@ -113,8 +118,12 @@ def main():
     emitter.entity.set_particles_vel(0.0)
     emitter.entity.set_particles_active(True)
     gs.logger.info(f"Film: {film.n_particles}; droplet: {len(drop_positions)}; fixed rim: {len(rim_idx)}")
-    if args.record or args.check:
+    if args.record or args.check or args.export_particles:
         args.output_dir.mkdir(parents=True, exist_ok=True)
+    checkpoint_writer = None
+    if args.export_particles:
+        checkpoint_writer = CheckpointWriter(scene, args.output_dir / "checkpoints", args.dt)
+        np.savez_compressed(args.output_dir / "rim_indices.npz", rim_idx=rim_idx)
     if camera is not None:
         camera.start_recording(save_to_filename=str(args.output_dir / "membrane_filter.mp4"), fps=30)
     measurements = []
@@ -124,6 +133,8 @@ def main():
     steps = math.ceil(args.seconds / args.dt)
     try:
         for step in range(steps + 1):
+            if checkpoint_writer is not None:
+                checkpoint_writer.write_frame()
             if args.check:
                 film_positions = tensor_to_array(film.get_particles_pos())
                 droplet_positions = tensor_to_array(emitter.entity.get_particles_pos())
