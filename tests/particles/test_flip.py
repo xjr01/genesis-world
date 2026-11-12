@@ -14,13 +14,29 @@ from ..utils import assert_equal
 
 @pytest.mark.required
 @pytest.mark.parametrize("substeps", [1, 2])
-def test_prescribed_boundaries_displace_water(substeps, show_viewer):
+@pytest.mark.parametrize("is_mesh", [False, True])
+def test_prescribed_boundaries_displace_water(substeps, is_mesh, asset_tmp_path, show_viewer):
     rotation = (math.sqrt(0.5), math.sqrt(0.5), 0.0, 0.0)
     cup_asset = "meshes/drinking_glass/12-oz-glass.obj"
     radius = 0.9 * 0.070522047730 / 2.0
     start_height = 0.104291584329 + radius + 0.015
     stop_height = 0.012614391867 + radius
     dt = 1.0 / 240.0
+    if is_mesh:
+        sphere_file = asset_tmp_path / f"flip_static_collider_sphere_{substeps}.obj"
+        mesh.create_sphere(radius, subdivisions=4).export(sphere_file)
+        collider = gs.options.FLIPMeshStaticColliderOptions(
+            pos=(0.0, 0.0, start_height),
+            is_kinematic=True,
+            file=str(sphere_file),
+            sdf_res=128,
+        )
+    else:
+        collider = gs.options.FLIPSphereStaticColliderOptions(
+            pos=(0.0, 0.0, start_height),
+            is_kinematic=True,
+            radius=radius,
+        )
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
             dt=dt,
@@ -33,11 +49,7 @@ def test_prescribed_boundaries_displace_water(substeps, show_viewer):
                     file=cup_asset,
                     sdf_res=128,
                 ),
-                gs.options.FLIPSphereStaticColliderOptions(
-                    pos=(0.0, 0.0, start_height),
-                    is_kinematic=True,
-                    radius=radius,
-                ),
+                collider,
             ],
             grid_res=96,
             lower_bound=(-0.08, -0.08, 0.0),

@@ -177,14 +177,15 @@ def kernel_distances(solver: qd.template(), boundary: qd.template(), is_fixed: q
 def triangle_fraction(a, b, c):
     lo = qd.min(a, qd.min(b, c))
     hi = qd.max(a, qd.max(b, c))
-    mid = a + b + c - lo - hi
+    # Comparisons preserve small distances alongside the far-field sentinel; bounded edge ratios avoid overflow.
+    mid = qd.max(qd.min(a, b), qd.min(qd.max(a, b), c))
     fraction = gs.qd_float(0.0)
     if hi <= 0.0:
         fraction = 1.0
     elif mid <= 0.0:
-        fraction = 1.0 - hi * hi / ((hi - lo) * (hi - mid))
+        fraction = 1.0 - (hi / (hi - lo)) * (hi / (hi - mid))
     elif lo < 0.0:
-        fraction = lo * lo / ((lo - mid) * (lo - hi))
+        fraction = (lo / (lo - mid)) * (lo / (lo - hi))
     return fraction
 
 
