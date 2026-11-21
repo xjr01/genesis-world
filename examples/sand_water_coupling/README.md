@@ -13,7 +13,7 @@
 ```bash
 conda create -n genesis-sandwater python=3.11 -y
 conda run -n genesis-sandwater pip install torch --index-url https://download.pytorch.org/whl/cu126
-cd D:\workspace\python-workspace\genesis\genesis-world
+# Run from the repository root.
 conda run -n genesis-sandwater pip install -e ".[dev]"
 ```
 
@@ -32,10 +32,10 @@ conda run -n genesis-sandwater python litter_scoop_voxelize.py noplate 0.5
 
 `noplate` 保留铲斗真实开孔底板（输出文件名带 `slots`），`0.5` 是 phase9 半尺寸场景的网格缩放（输出文件名带 `_s0.5`）。
 
-备选：从仓库外的 experiments 目录直接复制（若存在）：
+To reuse an existing asset, set EXPERIMENTS_DIR to its experiments directory, then copy:
 
 ```bash
-copy D:\workspace\python-workspace\genesis\experiments\assets\litter_scoop_sdf_slots_s0.5.npz assets\
+copy "%EXPERIMENTS_DIR%\assets\litter_scoop_sdf_slots_s0.5.npz" assets\
 ```
 
 验证文件在位：
@@ -48,13 +48,11 @@ conda run -n genesis-sandwater python -c "import os; print(os.path.getsize('asse
 
 ## 快速开始
 
-先 `cd` 到本目录（下述命令均在此目录执行；脚本输出目录基于脚本自身位置，与工作目录无关）：
+From the repository root, enter this example directory before running the commands below:
 
 ```bash
-cd /d D:\workspace\python-workspace\genesis\genesis-world\examples\sand_water_coupling
+cd examples\sand_water_coupling
 ```
-
-（PowerShell 下去掉 `/d`。）
 
 **第 1 步：smoke 自检（约 3-4 分钟）**——建场景 + 30 步沉降 + 一次全重启 IK 求解后退出，验证资产、建床、GPU、IK 全链路：
 
