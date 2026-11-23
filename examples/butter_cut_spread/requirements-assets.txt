@@ -1,0 +1,2 @@
+# Offline annotated USD initialization. The Genesis solver consumes exported meshes.
+usd-core>=24.5

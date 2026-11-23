@@ -1,0 +1,10 @@
+{
+  "stage_range": [0, 60],
+  "edits": [
+    {"hand": "right", "frame": 30, "delta_m": [0, 0, 0.002], "support_radius": 20, "mode": "hold_after"}
+  ],
+  "semantic_keyframes": [
+    {"hand": "left", "frame": 0, "delta_m": [0, 0, 0]},
+    {"hand": "left", "frame": 60, "delta_m": [0, 0, 0.001]}
+  ]
+}

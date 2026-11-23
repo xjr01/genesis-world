@@ -1,10 +1,20 @@
 from typing import Annotated, Any, Literal
 
 import numpy as np
+
 from pydantic import Field, PrivateAttr, StrictBool, StrictInt, model_validator
 
 import genesis as gs
-from genesis.typing import NonNegativeFloat, NonNegativeInt, PositiveFloat, PositiveInt, UnitVec4FType, Vec3FType
+from genesis.typing import (
+    FArrayType,
+    NonNegativeFloat,
+    NonNegativeInt,
+    PositiveFloat,
+    PositiveInt,
+    UnitInterval,
+    UnitVec4FType,
+    Vec3FType,
+)
 
 from .options import Options
 
@@ -754,20 +764,29 @@ class SPHOptions(Options):
 
 
 class PBSTFStaticColliderOptions(Options):
-    """Base pose options for one-way PBSTF colliders.
+    """Pose and wall interaction options for one-way position-based surface tension flow (PBSTF) colliders.
 
     The pose can change after scene construction through
-    :meth:`PBSTFSolver.set_static_colliders_pose`. The collider remains one-way: it affects simulated particles and
-    receives no force or velocity response from them.
-    ``is_density_blocking`` toggles the per-neighbor density-separation test: when True (default) the collider blocks
-    density interactions between particle pairs it separates (thin internal obstacles); when False the collider only
-    projects particles out of its volume, skipping the per-neighbor test. Set False for boundary colliders whose
-    density response is already carried by boundary particles.
+    :meth:`PBSTFSolver.set_static_colliders_pose`. The collider remains one-way: it affects the liquid and receives no
+    force or velocity response from it.
+
+    ``is_collider_adhesion_friction_enabled`` enables adhesion and friction for this collider in PBSTF. Enabling them
+    promotes wetting and reduces sliding at extra contact-query cost; disabling them keeps geometric collision alone.
+    These parameters are fixed at construction and shared across environments. Adhesion acts on unabsorbed surface
+    particles near the wall: lower ``collider_adhesion_compliance`` strengthens attachment but makes detachment harder.
+    ``collider_friction`` damps their relative tangential motion within one particle diameter of the wall, reducing
+    sliding at the cost of kinetic energy; zero preserves tangential speed and one removes it.
+
+    Enable density blocking for thin obstacles that separate neighboring particles. Disable it for container walls
+    whose boundary particles already supply the density response to reduce per-neighbor work.
     """
 
     pos: Vec3FType = (0.0, 0.0, 0.0)
     quat: UnitVec4FType = (1.0, 0.0, 0.0, 0.0)
-    is_density_blocking: bool = True
+    is_density_blocking: StrictBool = True
+    is_collider_adhesion_friction_enabled: StrictBool = False
+    collider_adhesion_compliance: NonNegativeFloat = 10.0
+    collider_friction: UnitInterval = 0.1
 
 
 class PBSTFBoxStaticColliderOptions(PBSTFStaticColliderOptions):
@@ -797,6 +816,48 @@ class PBSTFInverseBoxStaticColliderOptions(PBSTFBoxStaticColliderOptions):
     """
 
     type: Literal["inverse_box"] = "inverse_box"
+
+
+class PBSTFAbsorbentStaticColliderOptionsMixin(Options):
+    """Absorption controls for a position-based surface tension flow (PBSTF) static collider.
+
+    ``absorption_rate`` limits sustained new captures per simulated second for each collider and environment, and sets
+    the nearest-voxel exponential inward-motion rate. Voxels farther from the contact move liquid inward progressively
+    more slowly. A higher value admits liquid faster but produces more abrupt local trajectories; a lower value reduces
+    throughput and preserves gradual motion. ``absorption_capacity_fraction`` is the fraction of collider volume
+    available for liquid at rest. A higher value stores more liquid before saturation, while a lower value resumes
+    ordinary collision behavior sooner.
+    """
+
+    absorption_rate: PositiveFloat
+    absorption_capacity_fraction: UnitInterval
+
+    @model_validator(mode="after")
+    def _validate_absorption_capacity(self):
+        if self.absorption_capacity_fraction <= 0.0:
+            gs.raise_exception("PBSTF absorbent collider `absorption_capacity_fraction` must be positive.")
+        return self
+
+
+class PBSTFAbsorbentBoxStaticColliderOptions(PBSTFAbsorbentStaticColliderOptionsMixin, PBSTFBoxStaticColliderOptions):
+    """Finite position-based surface tension flow (PBSTF) box with rate-limited nearby-voxel capture.
+
+    ``deformable_entity_name`` binds geometry to a tetrahedral finite element method (FEM) entity or a volumetric
+    position-based dynamics (PBD) entity using PBDUnifiedOptions. Binding makes absorption follow deformation; updating
+    the triangle surface and voxel search order adds runtime cost. Leaving it unset uses analytic box geometry.
+    ``sdf_res`` enables a signed distance field (SDF) cached after deformation stops. Higher resolutions retain smaller
+    features at cubic preprocessing and memory cost; ``None`` keeps exact triangle queries.
+    """
+
+    type: Literal["absorbent_box"] = "absorbent_box"
+    deformable_entity_name: str | None = None
+    sdf_res: StrictInt | None = Field(default=None, ge=16)
+
+    @model_validator(mode="after")
+    def _validate_sdf(self):
+        if self.sdf_res is not None and self.deformable_entity_name is None:
+            gs.raise_exception("PBSTF absorbent box collider `sdf_res` requires `deformable_entity_name`.")
+        return self
 
 
 class PBSTFConeStaticColliderOptions(PBSTFStaticColliderOptions):
@@ -832,12 +893,139 @@ class PBSTFMeshStaticColliderOptions(PBSTFStaticColliderOptions):
 
 
 PBSTFStaticColliderOptionsType = Annotated[
-    PBSTFBoxStaticColliderOptions
+    PBSTFAbsorbentBoxStaticColliderOptions
+    | PBSTFBoxStaticColliderOptions
     | PBSTFConeStaticColliderOptions
     | PBSTFInverseBoxStaticColliderOptions
     | PBSTFMeshStaticColliderOptions,
     Field(discriminator="type"),
 ]
+
+
+class IPBFOptions(Options):
+    """Options for implicit position-based fluids (IPBF).
+
+    ``particle_size`` controls resolution: smaller particles resolve thinner streams at higher memory and runtime cost.
+    ``dt`` and ``gravity`` inherit from the scene when omitted. ``lower_bound`` and ``upper_bound`` define the domain;
+    tighter bounds reduce the work required for boundary sampling. Hash-grid settings resolve from the particle size.
+
+    ``ipbf_iterations`` increases density convergence at extra runtime cost. ``alpha`` softens the density response;
+    zero enforces incompressibility most strongly and can produce larger position corrections. Rebuilding neighbors
+    every iteration improves searches during large corrections at additional cost. Artificial damping reduces
+    oscillation while dissipating motion; ``damping_alpha_star`` sets the softer reference response and
+    ``damping_beta`` controls its strength. Damping is disabled by default.
+
+    ``viscosity_xsph`` smooths relative velocities throughout the liquid, trading energetic motion for a calmer flow.
+    ``surface_viscosity_xsph`` applies this effect at the free surface and requires surface tension. Both default to zero.
+    ``diffusion_coeff`` is a dimensionless concentration exchange strength per substep. Zero preserves each particle's
+    concentration; positive values smooth concentration differences, with larger values mixing faster and potentially
+    overshooting for dense particle arrangements. It defaults to zero.
+
+    ``has_boundary_particles`` adds density support along the box floor and four side walls at the cost of extra
+    particles. It resolves to True for box boundaries and False for cylindrical boundaries. ``boundary_layers``
+    controls the sampled wall thickness in particle diameters. An explicit conflicting value raises an error.
+    ``boundary_cylinder`` specifies (center_x, center_y, radius, z_bottom[, z_top[, escape_band]]). A finite escape
+    band lets detached droplets fall freely; an unbounded wall retains them. ``boundary_pitcher`` specifies
+    (origin_x, origin_y, origin_z, axis_x, axis_y, axis_z, radius, length) for a movable open cylinder.
+    ``boundary_plane`` is (z0,) for an infinite floor or (z0, center_x, center_y, radius) for a disk.
+
+    Surface tension improves droplets and free-surface cohesion at extra computational and memory cost. The quadratic
+    ``st_model`` penalizes area changes with ``st_stiffness``; the linear model uses the material's surface tension
+    and ``st_alpha_ref`` density compliance. The distance constraint suppresses particle crowding but can stiffen
+    thin films; ``st_distance_stiffness`` controls its strength.
+
+    ``st_ring_radius_factor`` sets the surface search radius in particle diameters. ``st_topo_interval`` trades
+    responsiveness to changing surfaces against topology rebuild cost. ``st_lit_threshold`` and ``st_normal_compat``
+    control surface classification and the separation of opposing films. Larger neighbor capacities represent more
+    complex local surfaces at higher memory cost; capacity overflow raises an error.
+    """
+
+    dt: PositiveFloat | None = None
+    gravity: Vec3FType | None = None
+    particle_size: PositiveFloat = 0.02
+
+    lower_bound: Vec3FType = (-100.0, -100.0, 0.0)
+    upper_bound: Vec3FType = (100.0, 100.0, 100.0)
+    hash_grid_res: Vec3FType | None = None
+    hash_grid_cell_size: PositiveFloat | None = None
+    ipbf_iterations: PositiveInt = 2
+    alpha: NonNegativeFloat = 0.0
+    is_neighbor_search_rebuilt_per_iteration: StrictBool = False
+    is_damping_enabled: StrictBool = False
+    damping_alpha_star: PositiveFloat = 3.2e6
+    damping_beta: NonNegativeFloat = 60.0
+    has_boundary_particles: StrictBool | None = None
+    boundary_layers: PositiveInt = 2
+    boundary_cylinder: FArrayType | None = None
+    boundary_pitcher: FArrayType | None = None
+    boundary_plane: FArrayType | None = None
+    viscosity_xsph: NonNegativeFloat = 0.0
+    surface_viscosity_xsph: NonNegativeFloat = 0.0
+    diffusion_coeff: NonNegativeFloat = 0.0
+    is_surface_tension_enabled: StrictBool = False
+    st_model: Literal["quadratic", "linear"] = "quadratic"
+    st_stiffness: NonNegativeFloat = 5.4e4
+    st_alpha_ref: NonNegativeFloat = 1.5
+    is_st_distance_enabled: StrictBool = True
+    st_distance_stiffness: NonNegativeFloat = 1.0e3
+    st_ring_radius_factor: PositiveFloat = 3.0
+    st_topo_interval: PositiveInt = 1
+    st_lit_threshold: PositiveFloat = 1.0 / 9.0
+    st_normal_compat: NonNegativeFloat = 0.7071067811865476
+    st_max_surface_neighbors: PositiveInt = 128
+    st_max_localmesh_neighbors: PositiveInt = 64
+
+    _support_radius: float = PrivateAttr(default=0.0)
+    _hash_grid_res: np.ndarray = PrivateAttr(default=None)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _resolve_defaults(cls, data: dict) -> dict:
+        particle_size = data.get("particle_size", 0.02)
+        support_radius = 2 * particle_size
+        # with surface tension the single hash grid must also cover the one-ring search radius
+        # (section 3.2, option (i)); with ST off the cell size stays exactly 2 * particle_size
+        is_st_enabled = data.get("is_surface_tension_enabled", False)
+        if is_st_enabled:
+            support_radius = max(support_radius, data.get("st_ring_radius_factor", 3.0) * particle_size)
+        if data.get("hash_grid_cell_size") is None:
+            data["hash_grid_cell_size"] = support_radius
+        if data.get("has_boundary_particles") is None:
+            data["has_boundary_particles"] = data.get("boundary_cylinder") is None
+        elif data["has_boundary_particles"] and data.get("boundary_cylinder") is not None:
+            gs.raise_exception("Cylindrical boundaries require has_boundary_particles=False.")
+        return data
+
+    def model_post_init(self, context: Any) -> None:
+        if not np.all(np.array(self.upper_bound) > np.array(self.lower_bound)):
+            gs.raise_exception("Invalid pair of upper_bound and lower_bound.")
+
+        self._support_radius = 2 * self.particle_size
+
+        if self.hash_grid_cell_size < self._support_radius:
+            gs.raise_exception("`hash_grid_cell_size` should not be smaller than 2 * `particle_size`.")
+        if self.is_surface_tension_enabled:
+            ring_radius = self.st_ring_radius_factor * self.particle_size
+            if self.hash_grid_cell_size < ring_radius:
+                gs.raise_exception(
+                    "`hash_grid_cell_size` must cover the surface one-ring radius "
+                    "(`st_ring_radius_factor` * `particle_size`)."
+                )
+            if self.st_max_surface_neighbors < 3 or self.st_max_localmesh_neighbors < 3:
+                gs.raise_exception("ST neighbor capacities must be at least 3.")
+            if self.st_max_localmesh_neighbors > min(self.st_max_surface_neighbors, 128):
+                gs.raise_exception(
+                    "`st_max_localmesh_neighbors` must be at most min(`st_max_surface_neighbors`, 128) "
+                    "(the reverse one-ring index packs the ring slot in 7 bits)."
+                )
+
+        if self.hash_grid_res is None:
+            max_hash_grid_res = np.ceil(
+                (np.array(self.upper_bound) - np.array(self.lower_bound)) / self.hash_grid_cell_size
+            ).astype(gs.np_int)
+            self._hash_grid_res = np.minimum(max_hash_grid_res, np.array([150, 150, 150], dtype=gs.np_int))
+        else:
+            self._hash_grid_res = np.ceil(np.array(self.hash_grid_res) / self.hash_grid_cell_size).astype(gs.np_int)
 
 
 class IPBSTFOptions(Options):
@@ -929,11 +1117,18 @@ class PBSTFOptions(Options):
     ``max_localmesh_neighbors`` bounds the final one-ring vertices used by surface constraints. A higher value admits
     more irregular one-rings at the cost of constraint memory and time. Its default is the smaller of 64 and
     ``max_surface_neighbors``.
+
+    ``static_colliders`` are ordered by support priority when their particle-radius-expanded regions overlap. Earlier
+    entries preserve their exclusion region, while later entries yield at incompatible contacts. Put load-bearing
+    surfaces before moving tools so particles remain on the support; reverse the order when the tool must take priority.
+    ``diffusion_coeff`` blends passive concentrations between neighbors each substep. Zero preserves sharp labels;
+    positive values produce smoother mixtures at extra computational cost. It is a dimensionless mixing strength.
     """
 
     dt: PositiveFloat | None = None
     gravity: Vec3FType | None = None
 
+    diffusion_coeff: NonNegativeFloat = 0.0
     particle_size: PositiveFloat = 0.02
     kernel_scale: PositiveFloat = 6.0
     max_solver_iterations: PositiveInt = 100
@@ -989,9 +1184,59 @@ class PBSTFOptions(Options):
             self._hash_grid_res = np.ceil(np.array(self.hash_grid_res) / self.hash_grid_cell_size).astype(gs.np_int)
 
 
-class PBDOptions(Options):
+class PBDUnifiedOptions(Options):
+    """Options for unified position-based dynamics (PBD) of cloth and elastic solids.
+
+    Each iteration applies elastic corrections, then vertex-face and domain contact corrections, followed by edge-edge
+    corrections at the updated positions. Each contact stage averages corrections per participating vertex to limit
+    overshoot where multiple contacts overlap. Contacts use the elastic boundary and rigid collision meshes.
+    More iterations improve shape preservation and contact convergence under load at increased runtime cost.
+    Finer mesh sampling resolves smaller features at increased memory and runtime cost.
+    Constraint acceleration extrapolates consecutive iterates before contact projection. Larger values can improve shape
+    recovery with fewer iterations, with a greater risk of overshoot under changing contacts.
+    Zero uses the current correction alone.
+    Particle size controls mesh sampling. Explicit tetrahedral meshes retain their supplied vertices.
+    Recording constraint history retains input, post-elastic, and post-contact positions for convergence diagnostics,
+    using memory proportional to the particle count, environment count, and iteration count.
+    Recording edge contacts enables iteration-by-iteration visual inspection, retaining detection positions and flags.
+    Memory scales with particles, surface edges, environments, substeps, and iterations; disable it for normal runs.
+    Collision thickness is the target surface gap in meters: a small positive value smooths sliding over mesh features
+    at the cost of a visible gap. Contact detection distance includes nearby separated surfaces; keep it slightly larger
+    than the thickness to retain contacts around the target gap. Larger distances increase contact counts and runtime.
+    Setting both distances to zero restricts contact generation to intersections.
+    ``bvh_rebuild_check_interval`` sets the number of simulation substeps between search-efficiency checks; explicit
+    collision-projection calls each count as one substep for this purpose.
+    Smaller intervals react sooner to deformation at greater monitoring cost. ``bvh_rebuild_threshold`` is the relative
+    increase in average search work that triggers a trial reorganization: smaller values spend more time reorganizing,
+    while larger values tolerate slower searches. A trial is retained when the current queries require substantially
+    less work.
     """
-    Options configuring the PBDSolver.
+
+    dt: PositiveFloat | None = None
+    gravity: Vec3FType | None = None
+    particle_size: PositiveFloat = 1e-2
+    lower_bound: Vec3FType = (-100.0, -100.0, 0.0)
+    upper_bound: Vec3FType = (100.0, 100.0, 100.0)
+    max_solver_iterations: PositiveInt = 30
+    constraint_acceleration: Annotated[float, Field(ge=0.0, lt=1.0)] = 0.0
+    collision_thickness: NonNegativeFloat = 0.0
+    contact_detection_distance: NonNegativeFloat = 0.0
+    bvh_rebuild_check_interval: PositiveInt = 32
+    bvh_rebuild_threshold: Annotated[float, Field(ge=1.0)] = 1.5
+    is_recording_constraint_history: StrictBool = False
+    is_recording_edge_contacts: StrictBool = False
+
+    def model_post_init(self, context: Any) -> None:
+        if not np.all(np.array(self.upper_bound) > np.array(self.lower_bound)):
+            gs.raise_exception("Invalid pair of upper_bound and lower_bound.")
+        if self.contact_detection_distance <= self.collision_thickness and (
+            self.collision_thickness > 0.0 or self.contact_detection_distance > 0.0
+        ):
+            gs.raise_exception("contact_detection_distance must exceed collision_thickness when either is positive.")
+
+
+class PBDOptions(Options):
+    """Options configuring the PBDSolver.
 
     Note
     ----
@@ -1013,6 +1258,10 @@ class PBDOptions(Options):
         Maximum number of iterations for the solving density constraints. Defaults to 1.
     max_viscosity_solver_iterations : int, optional
         Maximum number of iterations for the solving viscosity constraints. Defaults to 1.
+    max_shape_matching_solver_iterations : int, optional
+        Maximum number of iterations for solving shape-matching constraints of `PBD.Solid` entities per substep.
+        More iterations make intact bodies stiffer at higher compute cost; fracture detection is unaffected.
+        Defaults to 2.
     particle_size : float, optional
         Particle diameter in meters. Defaults to 1e-2.
     hash_grid_res : tuple, optional
@@ -1023,27 +1272,100 @@ class PBDOptions(Options):
         Lower bound of the simulation domain. Defaults to (-100.0, -100.0, 0.0).
     upper_bound : tuple, shape (3,), optional
         Upper bound of the simulation domain. Defaults to (100.0, 100.0, 100.0).
+
+    Multi-fluid options
+    -------------------
+    ``diffusion_coeff`` exchanges concentration between neighboring liquid particles each substep. Zero preserves
+    particle concentrations; positive values smooth interfaces, with larger values mixing faster and potentially
+    overshooting in dense arrangements. The dimensionless coefficient defaults to zero.
+    ``velocity_damping`` retains this fraction of velocity each substep; values below one calm motion while removing
+    momentum. ``density_lambda_epsilon`` softens density corrections for robustness. Clamping negative density
+    constraints limits tensile artifacts while allowing low-density regions to expand.
+
+    Surface tension adds free-surface cohesion at extra runtime and memory cost. ``st_compliance`` and
+    ``st_distance_compliance`` soften area and distance constraints, respectively; smaller values stiffen thin films.
+    ``st_ring_radius_factor`` controls the search radius in particle diameters. ``st_topo_interval`` trades surface
+    responsiveness for fewer rebuilds. ``st_lit_threshold`` and ``st_normal_compat`` control surface classification
+    and separation of opposing films. ``st_surface_density_factor`` scales the density target at the free surface.
+    Larger neighbor capacities resolve more complex surfaces with higher memory cost; overflow raises an error.
+
+    Wall adhesion retains liquid films at a solid surface but slows detachment. It requires surface tension;
+    ``wall_adhesion_compliance`` softens attachment and ``wall_friction`` dissipates tangential motion. ``plane_friction``
+    independently damps liquid sliding on the table plane, trading sliding distance for settling speed.
+
+    ``boundary_cylinder`` is (center_x, center_y, radius, z_bottom[, z_top[, escape_band]]). A finite escape band lets
+    detached droplets fall freely. ``boundary_pitcher`` is (origin_x, origin_y, origin_z, axis_x, axis_y, axis_z,
+    radius, length), an open cylinder moved with ``set_pitcher_pose``. Material ``boundary_group=1`` assigns particles
+    to it until they leave. ``boundary_plane`` is (z0,) for an infinite floor or (z0, center_x, center_y, radius) for a disk.
+    ``boundary_pitcher_shell`` adds wall and bottom thickness to the pitcher tuple, optionally followed by lip rounding.
+    ``boundary_cup_shell`` is (center_x, center_y, z_bottom, radius, length, wall_thickness, bottom_thickness[, lip_round]).
+    Shell boundaries collide on both faces, allowing exterior wetting at greater collision cost.
+
+    ``boundary_ball_sets`` contains (npz_path, is_kinematic) pairs. Each asset supplies ``pos_local`` of shape (N, 3).
+    These samples add density support and swept wall contacts at the cost of additional neighbor searches. Optional
+    ``boundary_ball_initial_poses`` holds (position, quaternion) pairs, defaulting to identity poses. Pose updates use
+    ``set_boundary_ball_pose``. ``boundary_ball_radius`` defaults to half a particle diameter; larger radii close
+    sampling gaps but displace liquid farther from the wall. Optional positive ``mass_weight`` arrays adjust wall
+    density support when ``is_boundary_ball_mass_weight_enabled`` is True.
+
+    ``boundary_ball_smooth_barrel`` replaces sampled contact normals with an analytic upright shell near a selected
+    static ball set, smoothing wall motion at extra contact cost. Its tuple is (set_index, center_x, center_y,
+    inner_radius, outer_radius, z_min, z_max, excluded_azimuth, excluded_half_angle, excluded_z_min, excluded_z_max,
+    witness_margin). The excluded sector preserves separate seam geometry; the set uses an identity pose.
     """
 
     dt: PositiveFloat | None = None
     gravity: Vec3FType | None = None
-
-    # constraints solving iterations
     max_stretch_solver_iterations: PositiveInt = 4
     max_bending_solver_iterations: PositiveInt = 1
     max_volume_solver_iterations: PositiveInt = 1
     max_density_solver_iterations: PositiveInt = 1
     max_viscosity_solver_iterations: PositiveInt = 1
-
-    # self collision
+    max_shape_matching_solver_iterations: PositiveInt = 2
     particle_size: PositiveFloat = 1e-2
-
-    # spatial hashing
-    hash_grid_res: Vec3FType | None = None  # size of the spatially-repetitive hash grid in meters
-    hash_grid_cell_size: PositiveFloat | None = None  # size of the cubic cell in meters
+    hash_grid_res: Vec3FType | None = None
+    hash_grid_cell_size: PositiveFloat | None = None
 
     lower_bound: Vec3FType = (-100.0, -100.0, 0.0)
     upper_bound: Vec3FType = (100.0, 100.0, 100.0)
+    diffusion_coeff: NonNegativeFloat = 0.0
+    is_surface_tension_enabled: StrictBool = False
+    st_compliance: NonNegativeFloat = 2.0
+    is_st_distance_enabled: StrictBool = True
+    st_distance_compliance: NonNegativeFloat = 40.0
+    st_ring_radius_factor: PositiveFloat = 3.0
+    st_topo_interval: PositiveInt = 1
+    st_lit_threshold: PositiveFloat = 1.0 / 9.0
+    st_normal_compat: NonNegativeFloat = 0.7071067811865476
+    st_surface_density_factor: PositiveFloat = 1.0
+    st_max_surface_neighbors: PositiveInt = 128
+    st_max_localmesh_neighbors: PositiveInt = 64
+    velocity_damping: PositiveFloat = 1.0
+    density_lambda_epsilon: PositiveFloat = 100.0
+    is_density_clamped_negative: StrictBool = False
+    is_wall_adhesion_enabled: StrictBool = False
+    wall_adhesion_compliance: NonNegativeFloat = 20.0
+    wall_friction: NonNegativeFloat = 0.0
+    plane_friction: NonNegativeFloat = 0.0
+    boundary_cylinder: FArrayType | None = None
+    boundary_pitcher: FArrayType | None = None
+    boundary_plane: FArrayType | None = None
+    boundary_pitcher_shell: FArrayType | None = None
+    boundary_cup_shell: FArrayType | None = None
+
+    boundary_ball_sets: Annotated[
+        tuple[Annotated[tuple[str, bool], Field(strict=False)], ...], Field(strict=False)
+    ] = ()
+
+    boundary_ball_initial_poses: Annotated[
+        tuple[Annotated[tuple[Vec3FType, UnitVec4FType], Field(strict=False)], ...], Field(strict=False)
+    ] = ()
+
+    boundary_ball_radius: PositiveFloat | None = None
+
+    is_boundary_ball_mass_weight_enabled: StrictBool = False
+
+    boundary_ball_smooth_barrel: FArrayType | None = None
 
     _hash_grid_res: np.ndarray = PrivateAttr(default=None)
 
@@ -1065,6 +1387,109 @@ class PBDOptions(Options):
         if self.hash_grid_cell_size < 1.25 * self.particle_size:
             gs.raise_exception("`hash_grid_cell_size` should not be smaller than 1.25 * `particle_size`.")
 
+        if self.is_surface_tension_enabled:
+            if self.st_max_surface_neighbors < 3 or self.st_max_localmesh_neighbors < 3:
+                gs.raise_exception("ST neighbor capacities must be at least 3.")
+            if self.st_max_localmesh_neighbors > self.st_max_surface_neighbors:
+                gs.raise_exception("`st_max_localmesh_neighbors` must not exceed `st_max_surface_neighbors`.")
+
+        if self.is_wall_adhesion_enabled and not self.is_surface_tension_enabled:
+            gs.raise_exception("`is_wall_adhesion_enabled` requires `is_surface_tension_enabled` (on_surface gate).")
+
+        if self.boundary_plane is not None and len(self.boundary_plane) not in (1, 4):
+            gs.raise_exception("`boundary_plane` must be (z0,) or (z0, center_x, center_y, radius).")
+
+        if self.plane_friction > 0 and self.boundary_plane is None:
+            gs.raise_exception("`plane_friction` requires `boundary_plane` (nothing to friction without a plane).")
+
+        if self.boundary_pitcher_shell is not None:
+            if self.boundary_pitcher is not None:
+                gs.raise_exception("`boundary_pitcher_shell` and `boundary_pitcher` are mutually exclusive.")
+            if len(self.boundary_pitcher_shell) not in (10, 11):
+                gs.raise_exception(
+                    "`boundary_pitcher_shell` must be (ox, oy, oz, ax, ay, az, radius, length, "
+                    "t_wall, t_bottom[, lip_round])."
+                )
+
+        if self.boundary_cup_shell is not None:
+            if len(self.boundary_cup_shell) not in (7, 8):
+                gs.raise_exception(
+                    "`boundary_cup_shell` must be (cx, cy, z_bot, r_in, L, t_wall, t_bottom[, lip_round])."
+                )
+            if min(self.boundary_cup_shell[3:7]) <= 0.0:
+                gs.raise_exception("`boundary_cup_shell` requires r_in, L, t_wall and t_bottom > 0.")
+            if len(self.boundary_cup_shell) == 8 and self.boundary_cup_shell[7] < 0.0:
+                gs.raise_exception("`boundary_cup_shell` requires lip_round >= 0.")
+
+        for ball_set in self.boundary_ball_sets:
+            if len(ball_set) != 2 or not isinstance(ball_set[0], str) or not isinstance(ball_set[1], bool):
+                gs.raise_exception("`boundary_ball_sets` items must be (npz_path: str, kinematic: bool).")
+
+        if self.boundary_ball_initial_poses:
+            if len(self.boundary_ball_initial_poses) != len(self.boundary_ball_sets):
+                gs.raise_exception(
+                    "non-empty `boundary_ball_initial_poses` must have exactly one pose per `boundary_ball_sets` item."
+                )
+            for pose in self.boundary_ball_initial_poses:
+                if len(pose) != 2 or len(pose[0]) != 3 or len(pose[1]) != 4:
+                    gs.raise_exception("`boundary_ball_initial_poses` items must be (pos(3), quat(4, wxyz)).")
+                pos = np.array(pose[0])
+                quat = np.array(pose[1])
+                if not np.isfinite(pos).all() or not np.isfinite(quat).all():
+                    gs.raise_exception("`boundary_ball_initial_poses` requires finite pose values.")
+                quat_norm = np.linalg.norm(quat)
+                if not np.isfinite(quat_norm) or quat_norm <= np.finfo(gs.np_float).eps:
+                    gs.raise_exception("`boundary_ball_initial_poses` requires non-zero finite quaternions.")
+
+        if self.boundary_ball_smooth_barrel is not None:
+            barrel = self.boundary_ball_smooth_barrel
+            if len(barrel) != 12:
+                gs.raise_exception(
+                    "`boundary_ball_smooth_barrel` must be (set_index, center_x, center_y, "
+                    "inner_visible_radius, outer_visible_radius, visible_z_min, visible_z_max, "
+                    "excluded_azimuth_rad, excluded_half_angle_rad, excluded_z_min, "
+                    "excluded_z_max, witness_margin)."
+                )
+            i_set = int(barrel[0])
+            if i_set != barrel[0]:
+                gs.raise_exception("The boundary ball set index must be an integer.")
+            values = np.array(barrel[1:])
+            if not np.isfinite(values).all():
+                gs.raise_exception("`boundary_ball_smooth_barrel` requires finite values.")
+            if not 0 <= i_set < len(self.boundary_ball_sets):
+                gs.raise_exception("`boundary_ball_smooth_barrel` set_index is out of range.")
+            if self.boundary_ball_sets[i_set][1]:
+                gs.raise_exception("`boundary_ball_smooth_barrel` requires a static boundary-ball set.")
+            inner_radius, outer_radius = barrel[3], barrel[4]
+            z_min, z_max = barrel[5], barrel[6]
+            excluded_half_angle = barrel[8]
+            excluded_z_min, excluded_z_max, witness_margin = barrel[9], barrel[10], barrel[11]
+            if inner_radius <= 0.0 or outer_radius <= inner_radius:
+                gs.raise_exception(
+                    "`boundary_ball_smooth_barrel` requires 0 < inner_contact_radius < outer_contact_radius."
+                )
+            if z_max <= z_min:
+                gs.raise_exception("`boundary_ball_smooth_barrel` requires z_max > z_min.")
+            if excluded_z_max <= excluded_z_min:
+                gs.raise_exception("`boundary_ball_smooth_barrel` requires excluded_z_max > excluded_z_min.")
+            if witness_margin < 0.0:
+                gs.raise_exception("`boundary_ball_smooth_barrel` requires witness_margin >= 0.")
+            if excluded_half_angle < 0.0 or excluded_half_angle >= np.pi:
+                gs.raise_exception("`boundary_ball_smooth_barrel` requires 0 <= excluded_half_angle_rad < pi.")
+            if self.boundary_ball_initial_poses:
+                pos = np.array(self.boundary_ball_initial_poses[i_set][0])
+                quat = np.array(self.boundary_ball_initial_poses[i_set][1])
+                quat /= np.linalg.norm(quat)
+                identity_quat = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float64)
+                if not np.allclose(pos, 0.0, atol=1.0e-8, rtol=0.0) or not (
+                    np.allclose(quat, identity_quat, atol=1.0e-8, rtol=0.0)
+                    or np.allclose(quat, -identity_quat, atol=1.0e-8, rtol=0.0)
+                ):
+                    gs.raise_exception(
+                        "`boundary_ball_smooth_barrel` requires the selected set's initial pose "
+                        "to be identity (static upright barrel)."
+                    )
+
         if self.hash_grid_res is None:
             max_hash_grid_res = np.ceil(
                 (np.array(self.upper_bound) - np.array(self.lower_bound)) / self.hash_grid_cell_size
@@ -1072,6 +1497,257 @@ class PBDOptions(Options):
             self._hash_grid_res = np.minimum(max_hash_grid_res, np.array([150, 150, 150], dtype=gs.np_int))
         else:
             self._hash_grid_res = np.ceil(np.array(self.hash_grid_res) / self.hash_grid_cell_size).astype(gs.np_int)
+
+
+class DEMOptions(Options):
+    """
+    Options configuring the DEMSolver.
+
+    Note
+    ----
+    DEM (Discrete Element Method) solver for simulating granular materials (sand) as spherical particles,
+    following the contact model and time-stepping of the reference implementation. The solver runs its own
+    velocity-adaptive sub-substeps inside each simulator substep:
+    `ddt = min(2r / (max_vel + sqrt(9.8 * 2r)), m_ddt) * ddt_safety`, where
+    `m_ddt = radius * pi * sqrt(density / young) / 2`.
+
+    If spatial hashing parameters are not given, they are computed automatically from `particle_size` and bounds.
+
+    Parameters
+    ----------
+    dt : float, optional
+        Time duration for each simulation step in seconds. If none, it will inherit from `SimOptions`. Defaults to None.
+    gravity : tuple, optional
+        Gravity force in N/kg. If none, it will inherit from `SimOptions`. Defaults to None.
+    particle_size : float, optional
+        Particle diameter in meters. Defaults to 1e-2.
+    ddt_safety : float, optional
+        Safety factor applied after the C++ velocity-adaptive DEM substep calculation. Values below 1.0
+        deviate conservatively from the reference implementation at the cost of more solver work. Defaults to 1.0.
+    surface_tension_coeff : float, optional
+        Scale of the capillary (liquid-bridge) cohesion between wetted grains (the `surface_tensor_cof`
+        constant of the reference's `ComputeDemCapillaryForces`). Defaults to 0.007 (the reference value).
+    sdf_obstacle_force_contact : bool, optional
+        Experimental. Mesh-SDF obstacles (the moving tool's grid and any added static convex colliders) push
+        grains with a linear spring-dashpot force (`k_norm * penetration` along the obstacle normal, tangential
+        velocity damping clamped by the Coulomb cone) instead of the reference's Collider::Enforce position
+        projection and velocity reflection. The force form removes the tangential ejection of grains squeezed
+        in a closing obstacle-floor gap; the projection form is the reference semantics and stays the default.
+        Defaults to False.
+    boundary_force_contact : bool, optional
+        Experimental. The domain box and cylinder walls use the same force contact as `sdf_obstacle_force_contact`.
+        Separate switch so the wall and the obstacle surfaces can be attributed independently. Defaults to False.
+    boundary_tan_fric_scale : float, optional
+        Coulomb friction multiplier for the collider surfaces (domain box, cylinder, sieve, moving box and
+        mesh-SDF obstacles) relative to the grain-grain friction angle. Values below 1 let loads slide off tool
+        and wall surfaces more readily; grain-grain friction is unaffected. Defaults to 1.0.
+    capillary_range_scale : float, optional
+        Multiplier on the liquid-bridge rupture distance (the reference derives it from the bridge volume and a
+        30-degree contact angle). Values above 1 keep capillary cohesion active across larger grain separations,
+        stiffening wet clumps; the neighbor search covers the scaled range and grain-grain contact stiffness is
+        unaffected. Defaults to 1.0.
+    bond_enable : bool, optional
+        Experimental debug extreme: wetted grains can be connected by unbreakable axial elastic
+        bonds through an explicit ``create_wet_bonds`` call (no breakage criterion or bending moment).
+        Beyond the reference, which has no bond mechanism; intended for probing clump-release limits, not as
+        a product configuration. Defaults to False.
+    bond_break_strain : float, optional
+        Tensile strain at which an experimental wet-grain bond irreversibly breaks. ``None`` keeps
+        bonds unbreakable. Beyond the C++ reference and disabled by default. Defaults to None.
+    cylinder_radius : float, optional
+        If set, an additional static hollow-cylinder collider (axis along z through the domain center) confines
+        the grains, following the reference's rotate-scene boundary. Defaults to None (box domain only).
+    lower_bound : tuple, shape (3,), optional
+        Lower bound of the simulation domain. The domain walls act as a static box collider for the particles.
+        Defaults to (-1.0, -1.0, 0.0).
+    upper_bound : tuple, shape (3,), optional
+        Upper bound of the simulation domain. Defaults to (1.0, 1.0, 1.0).
+    hash_grid_res : tuple, optional
+        Size of the spatially-repetitive spatial hashing grid in meters. If none, it will be computed automatically. Defaults to None.
+    hash_grid_cell_size : float, optional
+        Size of the cubic cell of the spatial hashing grid in meters. This should be at least 1.25 * `particle_size`.
+        If none, it will be computed automatically. Defaults to None.
+    """
+
+    dt: PositiveFloat | None = None
+    gravity: Vec3FType | None = None
+
+    particle_size: PositiveFloat = 1e-2
+
+    ddt_safety: PositiveFloat = 1.0
+
+    surface_tension_coeff: PositiveFloat = 0.007  # capillary (liquid-bridge) cohesion scale
+
+    restitution: PositiveFloat = 1.0  # grain-grain normal restitution e. 1.0 = the reference's
+    # strictly-elastic contact (no damping). e < 1 adds a spring-dashpot normal damping
+    # c = 2*xi*sqrt(k_norm*m_eff) with xi from e = exp(-pi*xi/sqrt(1-xi^2)) (recorded deviation:
+    # the reference's DEMForce::getForce has no damping; added on user request 2026-08-22 to calm
+    # the scoop first-touch splash)
+
+    extra_normal_damping: NonNegativeFloat = 0.0  # additional normal damping coefficient in N*s/m; 0 = reference behavior
+
+    sdf_obstacle_force_contact: bool = False  # experimental force-based mesh-SDF obstacle contact
+
+    boundary_force_contact: bool = False  # experimental force-based domain box/cylinder contact
+
+    boundary_tan_fric_scale: PositiveFloat = 1.0  # Coulomb friction scale of the collider surfaces
+
+    capillary_range_scale: PositiveFloat = 1.0  # liquid-bridge rupture distance multiplier
+
+    bond_enable: bool = False  # experimental unbreakable wet-grain bonds (debug extreme)
+
+    bond_break_strain: PositiveFloat | None = None  # optional brittle tensile failure threshold
+
+    cylinder_radius: PositiveFloat | None = None
+
+    # spatial hashing
+    hash_grid_res: Vec3FType | None = None  # size of the spatially-repetitive hash grid in meters
+    hash_grid_cell_size: PositiveFloat | None = None  # size of the cubic cell in meters
+
+    lower_bound: Vec3FType = (-1.0, -1.0, 0.0)
+    upper_bound: Vec3FType = (1.0, 1.0, 1.0)
+
+    _hash_grid_res: np.ndarray = PrivateAttr(default=None)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _resolve_defaults(cls, data: dict) -> dict:
+        particle_size = data.get("particle_size", 1e-2)
+        # NOTE: 1.25 * particle_size = 2.5 * radius, which covers the neighbor-search cutoff of sqrt(6) * radius
+        # used by the DEM contact model, so a 3x3x3 cell neighborhood never misses a contact pair.
+        if data.get("hash_grid_cell_size") is None:
+            data["hash_grid_cell_size"] = 1.25 * particle_size
+        return data
+
+    def model_post_init(self, context: Any) -> None:
+        if not np.all(np.array(self.upper_bound) > np.array(self.lower_bound)):
+            gs.raise_exception("Invalid pair of upper_bound and lower_bound.")
+
+        if self.hash_grid_cell_size < 1.25 * self.particle_size:
+            gs.raise_exception("`hash_grid_cell_size` should not be smaller than 1.25 * `particle_size`.")
+
+        if self.hash_grid_res is None:
+            max_hash_grid_res = np.ceil(
+                (np.array(self.upper_bound) - np.array(self.lower_bound)) / self.hash_grid_cell_size
+            ).astype(gs.np_int)
+            self._hash_grid_res = np.minimum(max_hash_grid_res, np.array([150, 150, 150], dtype=gs.np_int))
+        else:
+            self._hash_grid_res = np.ceil(np.array(self.hash_grid_res) / self.hash_grid_cell_size).astype(gs.np_int)
+
+
+class FLIPStaticColliderOptions(Options):
+    """One-way fluid boundary pose.
+
+    ``is_kinematic`` permits prescribed motion at the cost of rebuilding grid boundary weights each fluid step.
+    Fixed boundaries cache their distance field on the fluid grid. Quaternions use w-x-y-z order.
+    """
+
+    pos: Vec3FType = (0.0, 0.0, 0.0)
+    quat: UnitVec4FType = (1.0, 0.0, 0.0, 0.0)
+    is_kinematic: StrictBool = False
+
+
+class FLIPMeshStaticColliderOptions(FLIPStaticColliderOptions):
+    """Watertight mesh boundary. Higher ``sdf_res`` resolves thinner walls at greater build and memory cost."""
+
+    type: Literal["mesh"] = "mesh"
+    file: str
+    scale: PositiveFloat = 1.0
+    sdf_res: StrictInt = Field(default=150, ge=16)
+
+
+class FLIPSphereStaticColliderOptions(FLIPStaticColliderOptions):
+    """Analytic spherical fluid boundary centered at ``pos``."""
+
+    type: Literal["sphere"] = "sphere"
+    radius: PositiveFloat
+
+
+FLIPStaticColliderOptionsType = Annotated[
+    FLIPMeshStaticColliderOptions | FLIPSphereStaticColliderOptions, Field(discriminator="type")
+]
+
+
+class FLIPOptions(Options):
+    """
+    Options configuring the FLIPSolver.
+
+    Note
+    ----
+    FLIP/PIC solver for free-surface liquids on a MAC grid, following the reference implementation
+    (`sand-water-coupling-PIC-DEM-3d`): trilinear particle<->grid transfers, FLIP/PIC blending 0.95,
+    pressure projection with free-surface Dirichlet condition, and a density-correction (position
+    correction) pass. Particles are seeded on a stratified `seed_sub_factor`^3 per-cell pattern.
+
+    Parameters
+    ----------
+    static_colliders : list, optional
+        One-way mesh and sphere boundaries. Fixed geometry is cached; kinematic geometry accepts end-of-step pose
+        targets through ``scene.flip_solver.set_static_colliders_pose`` at additional grid-update cost.
+    dt : float, optional
+        Time duration for each simulation step in seconds. If none, it will inherit from `SimOptions`. Defaults to None.
+    gravity : tuple, optional
+        Gravity force in N/kg. If none, it will inherit from `SimOptions`. Defaults to None.
+    grid_res : int, optional
+        Number of MAC grid cells per axis of the simulation domain. Defaults to 64.
+    lower_bound : tuple, shape (3,), optional
+        Lower bound of the simulation domain. The domain walls act as a static box collider. Defaults to (-0.5, -0.5, 0.0).
+    upper_bound : tuple, shape (3,), optional
+        Upper bound of the simulation domain. Defaults to (0.5, 0.5, 1.0).
+    seed_sub_factor : int, optional
+        Particle seeding subdivision per cell: `seed_sub_factor`^3 particles per cell. Defaults to 3 (27 per cell),
+        matching the reference implementation.
+    blend_factor : float, optional
+        FLIP/PIC blending factor: 1.0 is pure FLIP (energetic, noisy), 0.0 is pure PIC (diffusive).
+        Defaults to 0.95, matching the reference implementation.
+    density_correction : bool, optional
+        Whether to run the density-correction (position correction) pass each substep. Slightly costlier but
+        keeps the particle distribution uniform. Defaults to True, matching the reference implementation.
+    pcg_max_iter : int, optional
+        Maximum iterations of the GPU preconditioned conjugate gradient solver used for the pressure and
+        density-correction systems (the reference uses AMGCL). Defaults to 200.
+    pcg_tol : float, optional
+        Relative residual tolerance of the PCG solver. Defaults to 1e-4.
+    dem_coupling : bool, optional
+        Whether to two-way couple with the DEM solver (sand) when one is active: sand grains feel pressure
+        gradient / added-mass / drag forces and absorb water; the fluid sees the grains' displaced volume and
+        the coupling reaction force. Disable for a pure-water scene to skip all coupling work. Defaults to True.
+    viscosity_coeff : float, optional
+        Coefficient of the quadratic drag exchanged between sand grains and the surrounding fluid.
+        Lower values let water infiltrate deeper into the sand bed instead of spreading on the surface,
+        at the cost of weaker two-way coupling (grains are also dragged less by the flow). Defaults to 1.0,
+        matching the reference implementation.
+    cylinder_radius : float, optional
+        If set, an additional static hollow-cylinder collider (axis along z through the domain center) confines
+        the fluid and grains, following the reference's rotate-scene boundary. Defaults to None (box domain only).
+    rotate_omega : float, optional
+        Angular velocity in rad/s of the C++ rotate-scene drive: while `t < rotate_duration`, fluid faces in
+        sand-free cells (target fraction >= 0.8) receive the rigid-body rotation increment `omega x r * dt`.
+        Defaults to 0.0 (off).
+    rotate_duration : float, optional
+        Duration in seconds of the rotation drive. Defaults to 2.0, matching the reference.
+    """
+
+    static_colliders: list[FLIPStaticColliderOptionsType] = Field(default_factory=list)
+    dt: PositiveFloat | None = None
+    gravity: Vec3FType | None = None
+
+    grid_res: PositiveInt = 64
+    lower_bound: Vec3FType = (-0.5, -0.5, 0.0)
+    upper_bound: Vec3FType = (0.5, 0.5, 1.0)
+
+    seed_sub_factor: PositiveInt = 3
+    blend_factor: NonNegativeFloat = 0.95
+    density_correction: StrictBool = True
+
+    pcg_max_iter: PositiveInt = 200
+    pcg_tol: PositiveFloat = 1e-4
+    dem_coupling: StrictBool = True
+    viscosity_coeff: NonNegativeFloat = 1.0
+
+    cylinder_radius: PositiveFloat | None = None
+    rotate_omega: float = 0.0
+    rotate_duration: PositiveFloat = 2.0
 
 
 class FEMOptions(Options):

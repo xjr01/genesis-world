@@ -2,6 +2,7 @@ import os
 import sys
 
 import numpy as np
+
 import trimesh
 
 import genesis as gs
@@ -324,17 +325,14 @@ class Raytracer:
         for solver in (self.sim.pbstf_solver, self.sim.ipbstf_solver):
             if solver.is_active:
                 for entity in solver.entities:
-                    if entity.surface.vis_mode == "visual" and isinstance(
-                        entity.material, gs.materials.PBSTF.PorousElastic
-                    ):
-                        self.add_deformable(str(entity.uid))
-                    else:
-                        self.add_particles(str(entity.uid), solver.particle_radius, entity.material.rho)
+                    self.add_particles(str(entity.uid), solver.particle_radius, entity.material.rho)
 
         # PBD entities
         if self.sim.pbd_solver.is_active:
             for pbd_entity in self.sim.pbd_solver.entities:
-                if pbd_entity.surface.vis_mode == "visual":
+                if pbd_entity.surface.vis_mode == "tetrahedral":
+                    gs.raise_exception("Tetrahedral PBD visualization requires Rasterizer.")
+                if pbd_entity.surface.vis_mode in ("visual", "collision"):
                     self.add_deformable(str(pbd_entity.uid))
                 else:
                     if self.render_particle_as == "sphere":
@@ -350,6 +348,8 @@ class Raytracer:
                 if fem_entity.surface.vis_mode == "visual":
                     for vgeom in fem_entity.vgeoms:
                         self.add_deformable(str(vgeom.uid))
+                elif fem_entity.surface.vis_mode == "tetrahedral":
+                    gs.raise_exception("Tetrahedral finite element method visualization requires Rasterizer.")
 
     def get_transform(self, matrix):
         if matrix is None:
@@ -761,33 +761,11 @@ class Raytracer:
             particles_all = miscu.qd_to_numpy(solver.particles_render.pos, transpose=True)[env_idx]
             particles_vel_all = miscu.qd_to_numpy(solver.particles_render.vel, transpose=True)[env_idx]
             active_all = miscu.qd_to_numpy(solver.particles_render.active, transpose=True)[env_idx]
-            if solver is self.sim.pbstf_solver and solver.n_vverts > 0:
-                vverts_all = miscu.qd_to_numpy(
-                    solver.vverts_render.pos, env_idx, keepdim=False, transpose=True
-                )
-            else:
-                vverts_all = None
             for entity in solver.entities:
-                if entity.surface.vis_mode == "visual" and isinstance(
-                    entity.material, gs.materials.PBSTF.PorousElastic
-                ):
-                    vverts = vverts_all[entity.vvert_start : entity.vvert_end]
-                    self.update_deformable(
-                        str(entity.uid),
-                        vverts,
-                        entity.vmesh.trimesh.faces,
-                        trimesh.Trimesh(
-                            vertices=vverts,
-                            faces=entity.vmesh.trimesh.faces,
-                            process=False,
-                        ).vertex_normals,
-                        np.array([]) if entity.vmesh.uvs is None else entity.vmesh.uvs,
-                    )
-                else:
-                    active = active_all[entity.particle_start : entity.particle_end]
-                    particles = particles_all[entity.particle_start : entity.particle_end][active]
-                    particles_vel = particles_vel_all[entity.particle_start : entity.particle_end][active]
-                    self.update_particles(str(entity.uid), particles, solver.particle_radius, particles_vel)
+                active = active_all[entity.particle_start : entity.particle_end]
+                particles = particles_all[entity.particle_start : entity.particle_end][active]
+                particles_vel = particles_vel_all[entity.particle_start : entity.particle_end][active]
+                self.update_particles(str(entity.uid), particles, solver.particle_radius, particles_vel)
 
         # PBD entities
         if self.sim.pbd_solver.is_active:
@@ -798,7 +776,7 @@ class Raytracer:
             vverts_all = self.sim.pbd_solver.vverts_render.pos.to_numpy()[:, idx]
 
             for pbd_entity in self.sim.pbd_solver.entities:
-                if pbd_entity.surface.vis_mode == "visual":
+                if pbd_entity.surface.vis_mode in ("visual", "collision"):
                     vverts = vverts_all[pbd_entity.vvert_start : pbd_entity.vvert_end]
 
                     self.update_deformable(

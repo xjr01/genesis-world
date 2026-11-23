@@ -1,0 +1,12 @@
+{
+  "hand": "right",
+  "orientation_mode": "closing_y",
+  "orientation_assist": {
+    "is_enabled": false,
+    "gain_deg_per_mm": -0.181379499,
+    "max_abs_angle_deg": 15
+  },
+  "table_z_m": 0.8,
+  "min_tool_table_clearance_m": -0.0035,
+  "min_clearance_delta_m": -0.0035
+}

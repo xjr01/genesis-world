@@ -2,18 +2,26 @@ import functools
 from pathlib import Path
 
 import numpy as np
-import quadrants as qd
 import torch
+
+from scipy.spatial import cKDTree
 import trimesh
 
+import quadrants as qd
+
 import genesis as gs
+from genesis.engine.entities.particle_concentration import kernel_get_concentration, kernel_set_concentration
+from genesis.engine.states.cache import QueriedStates
 import genesis.utils.geom as gu
 import genesis.utils.mesh as mu
+from genesis.utils.misc import broadcast_tensor, qd_to_torch, to_gs_tensor
 import genesis.utils.particle as pu
-from genesis.engine.states.cache import QueriedStates
-from genesis.utils.misc import to_gs_tensor, broadcast_tensor
 
 from .base_entity import Entity
+
+
+# Chunk length for nearest-particle support queries; bounds query memory on flattened visual meshes
+_VVERT_SUPPORT_CHUNK = 1 << 18
 
 
 def assert_active(method):
@@ -57,6 +65,43 @@ class ParticleEntity(Entity):
         Whether to enable skinning for rendering this entity's mesh.
     """
 
+    @gs.assert_built
+    def get_particles_concentration(self, envs_idx=None):
+        """Return passive liquid concentrations, with shape [B, N] or [N] for an unbatched scene."""
+        if not isinstance(
+            self.material, (gs.materials.PBD.Liquid, gs.materials.PBSTF.Liquid, gs.materials.IPBF.Liquid)
+        ):
+            gs.raise_exception("Concentration requires a PBD, PBSTF, or IPBF liquid material.")
+        envs_idx = self.scene._sanitize_envs_idx(envs_idx)
+        concentrations = self._sanitize_particles_tensor(None, gs.tc_float, None, envs_idx)
+        if gs.use_zerocopy:
+            concentrations[:] = qd_to_torch(self.solver.particles.c, transpose=True)[
+                envs_idx, self.particle_start : self.particle_end
+            ]
+        else:
+            kernel_get_concentration(envs_idx, self.particle_start, concentrations, self.solver.particles)
+        return concentrations if self.scene.n_envs else concentrations[0]
+
+    @gs.assert_built
+    def set_particles_concentration(self, concentrations, particles_idx_local=None, envs_idx=None):
+        """Set passive liquid concentrations in [0, 1]; scalar inputs broadcast across selected particles."""
+        if not isinstance(
+            self.material, (gs.materials.PBD.Liquid, gs.materials.PBSTF.Liquid, gs.materials.IPBF.Liquid)
+        ):
+            gs.raise_exception("Concentration requires a PBD, PBSTF, or IPBF liquid material.")
+        envs_idx = self.scene._sanitize_envs_idx(envs_idx)
+        particles_idx = self._sanitize_particles_idx_local(particles_idx_local, envs_idx) + self.particle_start
+        concentrations = self._sanitize_particles_tensor(concentrations, gs.tc_float, particles_idx, envs_idx)
+        if not ((concentrations >= 0.0) & (concentrations <= 1.0)).all():
+            gs.raise_exception("Concentrations must be finite and between zero and one.")
+        if gs.use_zerocopy:
+            concentrations_t = qd_to_torch(self.solver.particles.c, transpose=True, copy=False)
+            concentrations_t[envs_idx[:, None], particles_idx] = concentrations
+            if gs.backend == gs.metal:
+                torch.mps.synchronize()
+        else:
+            kernel_set_concentration(particles_idx, envs_idx, concentrations, self.solver.particles)
+
     def __init__(
         self,
         scene,
@@ -90,7 +135,9 @@ class ParticleEntity(Entity):
             self._vmesh = gs.Mesh.from_morph_surface(self.morph, self.surface)
             self._surface = self._vmesh[0].surface
 
-        elif isinstance(self._morph, (gs.options.morphs.Primitive, gs.options.morphs.Mesh)):
+        elif isinstance(
+            self._morph, (gs.options.morphs.Primitive, gs.options.morphs.Mesh, gs.options.morphs.TetrahedralMesh)
+        ):
             meshes = gs.Mesh.from_morph_surface(self.morph, self.surface)
             if len(meshes) > 1:
                 gs.raise_exception("Mesh file with multiple sub-meshes are not supported.")
@@ -112,7 +159,7 @@ class ParticleEntity(Entity):
 
     def _sanitize_particles_idx_local(self, particles_idx_local=None, envs_idx=None):
         if particles_idx_local is None:
-            particles_idx_local = range(self._n_particles)
+            particles_idx_local = torch.arange(self._n_particles, dtype=gs.tc_int, device=gs.device)
 
         if envs_idx is None:
             particles_idx_local_ = broadcast_tensor(particles_idx_local, gs.tc_int, (-1,), ("envs_idx",))
@@ -189,15 +236,21 @@ class ParticleEntity(Entity):
         raise NotImplementedError
 
     def _add_vverts_to_solver(self):
-        # Compute supports for rendering vverts using neighboring particles
-        dist2 = np.sum(np.square(self._vverts[:, None, :] - self._particles[None, :, :]), axis=2)
-        support_idxs = np.argpartition(dist2, self.solver._n_vvert_supports - 1, axis=1)[
-            :, : self.solver._n_vvert_supports
-        ]
-        row_indices = np.arange(dist2.shape[0])[:, None]
-        sorted_order = np.lexsort((support_idxs, dist2[row_indices, support_idxs]))
-        support_idxs = support_idxs[row_indices, sorted_order].astype(gs.np_int)
-        support_idxs = np.clip(support_idxs, 0, len(self._particles) - 1)
+        """Bind every visual vertex to its nearest particles for skinned rendering."""
+        n_supports = self.solver._n_vvert_supports
+        particle_tree = cKDTree(self._particles)
+        support_idxs = np.empty((len(self._vverts), n_supports), dtype=gs.np_int)
+        for i_vv in range(0, len(self._vverts), _VVERT_SUPPORT_CHUNK):
+            block = slice(i_vv, i_vv + _VVERT_SUPPORT_CHUNK)
+            dists, idxs = particle_tree.query(self._vverts[block], k=n_supports)
+            if n_supports == 1:
+                support_idxs[block, 0] = idxs
+                continue
+            # Small entities repeat a valid particle to fill the fixed-width support slots
+            idxs = np.minimum(idxs, len(self._particles) - 1)
+            # nearest first, ties broken by particle index so the supports are deterministic
+            order = np.lexsort((idxs, dists), axis=-1)
+            support_idxs[block] = np.take_along_axis(idxs, order, axis=-1)
 
         all_ps = self._particles[support_idxs]
         Ps = all_ps[:, :-1].swapaxes(-2, -1) - np.expand_dims(all_ps[:, -1], axis=-1)
@@ -299,7 +352,8 @@ class ParticleEntity(Entity):
                 gs.raise_exception(
                     "Entity has particles outside solver boundary. Note that for MPMSolver, boundary is slightly "
                     "tighter than the specified domain due to safety padding.\n\nCurrent boundary:\n"
-                    f"{self._solver.boundary}\n\nEntity to be added:\nmin: {particles.min(0)}\nmax: {particles.max(0)}\n"
+                    f"{self._solver.boundary}\n\nEntity to be added:\nmin: {particles.min(0)}\n"
+                    f"max: {particles.max(0)}\n"
                 )
 
             combined_verts, combined_faces = trimesh.util.append_faces(

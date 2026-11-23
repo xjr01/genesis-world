@@ -1,0 +1,53 @@
+{
+  "source": "asset_library/coffee_final_20261017_sponge_r3/asset.usd",
+  "source_sha256": "32725761cf7594c5322b284b5877a69c6c8b2d96f1430b7964c804ed119045ce",
+  "source_prim": "/root/collision/proxy_00000",
+  "method": "Simplified surface followed by Genesis tetrahedralize_mesh (TetGen)",
+  "surface_simplification": "box",
+  "structured_grid": false,
+  "tetrahedralizer": "genesis.utils.mesh.tetrahedralize_mesh",
+  "tetgen_config": {
+    "order": 1,
+    "quality": true,
+    "minratio": 1.6,
+    "mindihedral": 10,
+    "nobisect": false,
+    "maxvolume": 1.5e-07,
+    "verbose": 0
+  },
+  "tetgen_switches": "pq1.6/10a1.5e-07",
+  "original_surface_vertices": 96,
+  "original_surface_faces": 188,
+  "simplified_surface_vertices": 8,
+  "simplified_surface_faces": 12,
+  "vertices": 733,
+  "tetrahedra": 3057,
+  "minimum_volume_m3": 7.494976992142647e-09,
+  "maximum_volume_m3": 1.846046152343891e-07,
+  "volume_m3": 0.00023214001362293954,
+  "original_volume_m3": 0.0002319369156752993,
+  "simplified_input_volume_m3": 0.00023214001362293954,
+  "tetrahedral_boundary_volume_m3": 0.00023214001362293954,
+  "relative_volume_change": 0.0008756602934418822,
+  "mass_kg": 0.006964200408688186,
+  "bounds_m": [
+    [
+      -0.05000000074505806,
+      -0.0364999994635582,
+      0.0
+    ],
+    [
+      0.05000000074505806,
+      0.0364999994635582,
+      0.03180000185966492
+    ]
+  ],
+  "maximum_sampled_surface_distance_m": 0.0007545628027525662,
+  "surface_distance_sample_scope": "Both surfaces: vertices, unique-edge midpoints and triangle centers",
+  "authored_outer_dimensions_preserved": true,
+  "render_geometry": "Original authored visual meshes, interpolated from actual simulation tetrahedra",
+  "solver_iterations": 30,
+  "validation": "Geometry and all fine visual vertices verified; mechanical validation recorded separately",
+  "geometry_validation": "docs/SPONGE_3000_VALIDATION.json",
+  "generation_command": "./run_custom_genesis.sh tools/build_sponge_coarse.py --output <new-path>.npz --max-volume 1.5e-7 --max-tetrahedra 3500"
+}

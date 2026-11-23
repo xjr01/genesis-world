@@ -6,32 +6,41 @@ import genesis as gs
 from genesis.options.morphs import Morph
 from genesis.options.solvers import (
     BaseCouplerOptions,
+    DEMOptions,
+    FLIPOptions,
     FEMOptions,
+    IPBFOptions,
     IPBSTFOptions,
     IPCCouplerOptions,
     KinematicOptions,
     LegacyCouplerOptions,
     MPMOptions,
     PBDOptions,
+    PBDUnifiedOptions,
     PBSTFOptions,
     RigidOptions,
     SAPCouplerOptions,
     SFOptions,
-    SimOptions,
     SPHOptions,
+    SimOptions,
     ToolOptions,
 )
 from genesis.repr_base import RBC
 
 from .couplers import IPCCoupler, LegacyCoupler, SAPCoupler
+from .couplers.pbd_rigid_fragments import PBDRigidFragmentBridge
 from .entities import HybridEntity
 from .sensors import SensorManager
 from .solvers import (
+    DEMSolver,
     FEMSolver,
+    FLIPSolver,
+    IPBFSolver,
     IPBSTFSolver,
     KinematicSolver,
     MPMSolver,
     PBDSolver,
+    PBDUnifiedSolver,
     PBSTFSolver,
     RigidSolver,
     SFSolver,
@@ -75,8 +84,10 @@ class Simulator(RBC):
         An FEMOptions object that contains all the options for the FEMSolver.
     sf_options : gs.SFOptions
         An SFOptions object that contains all the options for the SFSolver.
-    pbd_options : gs.PBDOptions
-        A PBDOptions object that contains all the options for the PBDSolver.
+    pbd_options : gs.PBDOptions | gs.PBDUnifiedOptions
+        Selects the PBD solver and its simulation settings.
+    ipbf_options : gs.IPBFOptions
+        Options for the implicit position-based fluid (IPBF) solver.
     ipbstf_options : gs.IPBSTFOptions
         Options for the implicit position-based surface-tension fluid (IPBSTF) solver.
     pbstf_options : gs.PBSTFOptions
@@ -95,7 +106,10 @@ class Simulator(RBC):
         sph_options: SPHOptions,
         fem_options: FEMOptions,
         sf_options: SFOptions,
-        pbd_options: PBDOptions,
+        pbd_options: PBDOptions | PBDUnifiedOptions,
+        dem_options: DEMOptions,
+        flip_options: FLIPOptions,
+        ipbf_options: IPBFOptions,
         ipbstf_options: IPBSTFOptions,
         pbstf_options: PBSTFOptions,
     ):
@@ -112,6 +126,9 @@ class Simulator(RBC):
         self.fem_options = fem_options
         self.sf_options = sf_options
         self.pbd_options = pbd_options
+        self.dem_options = dem_options
+        self.flip_options = flip_options
+        self.ipbf_options = ipbf_options
         self.ipbstf_options = ipbstf_options
         self.pbstf_options = pbstf_options
 
@@ -131,11 +148,18 @@ class Simulator(RBC):
         self.kinematic_solver = KinematicSolver(self.scene, self, self.kinematic_options)
         self.mpm_solver = MPMSolver(self.scene, self, self.mpm_options)
         self.sph_solver = SPHSolver(self.scene, self, self.sph_options)
-        self.pbd_solver = PBDSolver(self.scene, self, self.pbd_options)
+        self.pbd_solver = (
+            PBDUnifiedSolver(self.scene, self, self.pbd_options)
+            if isinstance(self.pbd_options, PBDUnifiedOptions)
+            else PBDSolver(self.scene, self, self.pbd_options)
+        )
+        self.ipbf_solver = IPBFSolver(self.scene, self, self.ipbf_options)
         self.ipbstf_solver = IPBSTFSolver(self.scene, self, self.ipbstf_options)
         self.pbstf_solver = PBSTFSolver(self.scene, self, self.pbstf_options)
         self.fem_solver = FEMSolver(self.scene, self, self.fem_options)
         self.sf_solver = SFSolver(self.scene, self, self.sf_options)
+        self.dem_solver = DEMSolver(self.scene, self, self.dem_options)
+        self.flip_solver = FLIPSolver(self.scene, self, self.flip_options)
 
         self._solvers: list["Solver"] = gs.List(
             [
@@ -145,10 +169,13 @@ class Simulator(RBC):
                 self.mpm_solver,
                 self.sph_solver,
                 self.pbd_solver,
+                self.ipbf_solver,
                 self.ipbstf_solver,
                 self.pbstf_solver,
                 self.fem_solver,
                 self.sf_solver,
+                self.dem_solver,
+                self.flip_solver,
             ]
         )
 
@@ -175,6 +202,9 @@ class Simulator(RBC):
         # sensors
         self._sensor_manager = SensorManager(self)
 
+        # PBD-fragment lifecycle bridge (see engine/couplers/pbd_rigid_fragments.py); None keeps every hook inert.
+        self._pbd_rigid_fragment_bridge: PBDRigidFragmentBridge | None = None
+
     def _add_entity(self, morph: Morph, material, surface, visualize_contact=False, name: str | None = None):
         if isinstance(material, gs.materials.Tool):
             entity = self.tool_solver.add_entity(self.n_entities, material, morph, surface, name=name)
@@ -192,6 +222,12 @@ class Simulator(RBC):
             entity = self.sph_solver.add_entity(self.n_entities, material, morph, surface, name=name)
         elif isinstance(material, gs.materials.PBD.Base):
             entity = self.pbd_solver.add_entity(self.n_entities, material, morph, surface, name=name)
+        elif isinstance(material, gs.materials.DEM.Base):
+            entity = self.dem_solver.add_entity(self.n_entities, material, morph, surface, name=name)
+        elif isinstance(material, gs.materials.FLIP.Base):
+            entity = self.flip_solver.add_entity(self.n_entities, material, morph, surface, name=name)
+        elif isinstance(material, gs.materials.IPBF.Base):
+            entity = self.ipbf_solver.add_entity(self.n_entities, material, morph, surface, name=name)
         elif isinstance(material, gs.materials.IPBSTF.Base):
             entity = self.ipbstf_solver.add_entity(self.n_entities, material, morph, surface, name=name)
         elif isinstance(material, gs.materials.PBSTF.Base):
@@ -216,6 +252,11 @@ class Simulator(RBC):
         self._B = self.scene._B
         self._para_level = self.scene._para_level
 
+        # The bridge registers its FREE shadow links from the static partition (built at add_entity time) before
+        # any solver allocates fields; ownership stays unique because rigid builds ahead of PBD in the loop below.
+        if self._pbd_rigid_fragment_bridge is not None:
+            self._pbd_rigid_fragment_bridge.register_shadow_links()
+
         # solvers
         # IPCCoupler needs full substep flow for pre/post coupling phases
         self._rigid_only = self.rigid_solver.is_active and not isinstance(self._coupler, (SAPCoupler, IPCCoupler))
@@ -226,6 +267,11 @@ class Simulator(RBC):
                 if not isinstance(solver, RigidSolver):
                     self._rigid_only = False
         self._coupler.build()
+
+        # After every solver built (its default lifecycle flags are in place), the bridge turns its registered
+        # fragments into shadows: driven gate on, native contacts off, followed pose seeded from the initial state.
+        if self._pbd_rigid_fragment_bridge is not None:
+            self._pbd_rigid_fragment_bridge.enter_shadow_lifecycle()
 
         if self.n_envs > 0 and self.sf_solver.is_active:
             gs.raise_exception("Batching is not supported for SF solver as of now.")
@@ -245,7 +291,10 @@ class Simulator(RBC):
             if solver.n_entities > 0:
                 solver.set_state(0, solver_state, envs_idx)
 
-        self._coupler.reset(envs_idx=envs_idx)
+        if isinstance(self._coupler, IPCCoupler) and state.coupler_state is not None:
+            self._coupler.set_state(state.coupler_state, envs_idx=envs_idx)
+        else:
+            self._coupler.reset(envs_idx=envs_idx)
 
         # TODO: keeping as is for now
         self.reset_grad()
@@ -298,12 +347,20 @@ class Simulator(RBC):
             self.rigid_solver.check_errno()
         if self.ipbstf_solver.is_active and self._cur_substep_global % RATE_CHECK_ERRNO == 0:
             self.ipbstf_solver.check_errno()
+        if self.ipbf_solver.is_active and self._cur_substep_global % RATE_CHECK_ERRNO == 0:
+            self.ipbf_solver.check_errno()
         if self.pbstf_solver.is_active and self._cur_substep_global % RATE_CHECK_ERRNO == 0:
             self.pbstf_solver.check_errno()
+        if self.pbd_solver.is_active and self._cur_substep_global % RATE_CHECK_ERRNO == 0:
+            self.pbd_solver.check_errno()
 
         if self._rigid_only and not self._requires_grad:  # "Only Advance!" --Thomas Wade :P
             for _ in range(self._substeps):
+                if self._pbd_rigid_fragment_bridge is not None:
+                    self._pbd_rigid_fragment_bridge.substep_head(self.cur_substep_local)
                 self.rigid_solver.substep(self.cur_substep_local)
+                if self._pbd_rigid_fragment_bridge is not None:
+                    self._pbd_rigid_fragment_bridge.substep_tail(self.cur_substep_local)
                 self._cur_substep_global += 1
         else:
             self.process_input(in_backward=in_backward)
@@ -342,10 +399,16 @@ class Simulator(RBC):
             solver.process_input_grad()
 
     def substep(self, f):
+        # The bridge owns shadow-link poses and commits handoffs before any solver advances, so ownership is unique
+        # even though rigid steps ahead of PBD inside substep_pre_coupling.
+        if self._pbd_rigid_fragment_bridge is not None:
+            self._pbd_rigid_fragment_bridge.substep_head(f)
         self._coupler.preprocess(f)
         self.substep_pre_coupling(f)
         self._coupler.couple(f)
         self.substep_post_coupling(f)
+        if self._pbd_rigid_fragment_bridge is not None:
+            self._pbd_rigid_fragment_bridge.substep_tail(f)
 
     def sub_step_grad(self, f):
         self.substep_post_coupling_grad(f)
@@ -437,6 +500,7 @@ class Simulator(RBC):
             s_global=self.cur_step_global,
             f_local=self.cur_substep_local,
             solvers=self._solvers,
+            coupler_state=self._coupler.get_state() if isinstance(self._coupler, IPCCoupler) else None,
         )
 
         # `SimState.__init__` calls `solver.get_state` on every solver, and solvers that maintain a per-solver queue

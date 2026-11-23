@@ -2,9 +2,10 @@ import numpy as np
 import torch
 
 import genesis as gs
+from genesis.engine.entities.particle_concentration import initial_concentration
+from genesis.repr_base import RBC
 import genesis.utils.geom as gu
 import genesis.utils.particle as pu
-from genesis.repr_base import RBC
 
 
 class Emitter(RBC):
@@ -69,6 +70,13 @@ class Emitter(RBC):
         )
         self._entity.set_particles_pos(positions, particles_idx)
         self._entity.set_particles_vel(velocities, particles_idx)
+        if isinstance(self._entity.material, (gs.materials.PBD.Liquid, gs.materials.PBSTF.Liquid)):
+            concentrations = initial_concentration(
+                positions, self._entity.material.c_init, self._entity.material.c_init_z_mid
+            )
+            self._entity.set_particles_concentration(concentrations, particles_idx)
+        elif isinstance(self._entity.material, gs.materials.IPBF.Liquid):
+            self._entity.set_particles_concentration(self._entity.material.c_init, particles_idx)
         self._entity.set_particles_active(gs.ACTIVE, particles_idx)
 
         self._next_particle += n_particles

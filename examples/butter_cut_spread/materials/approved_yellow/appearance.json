@@ -1,0 +1,55 @@
+{
+  "material": {
+    "diffuse_reflection_color": [
+      0.995,
+      0.6228776204020273,
+      0.25021156308186265
+    ],
+    "diffuse_reflection_weight": 1.0,
+    "specular_reflection_roughness": 0.4,
+    "specular_reflection_ior": 1.46,
+    "enable_diffuse_transmission": true,
+    "subsurface_weight": 0.2,
+    "subsurface_transmission_color": [
+      0.96,
+      0.8,
+      0.32
+    ],
+    "subsurface_scattering_color": [
+      1.0,
+      1.0,
+      1.0
+    ],
+    "subsurface_scale": 0.0001,
+    "subsurface_anisotropy": 0.15,
+    "thin_walled": false,
+    "enable_specular_transmission": false,
+    "geometry_opacity": 1.0
+  },
+  "provenance": {
+    "status": "approved_image_color_fit_transport_assumed",
+    "reference_image_sha256": "6e6100591ae4037cc3c8651cc2d618cbe9d2703bd4f8a3bd48cd9a95ea2bcb01",
+    "reference_doi": "",
+    "reference_temperature_c": null,
+    "target_lab": [
+      81.10994081876136,
+      0.30816161212821047,
+      27.397097506002854
+    ],
+    "colorimetry_assumption": "Display sRGB, D65/2-degree Lab, median top-face ROI matched to the supplied visual reference. Reference illumination and camera response are unknown; this is not measured butter albedo.",
+    "fitted_parameters": [
+      "diffuse_reflection_color"
+    ],
+    "assumed_parameters": [
+      "diffuse_reflection_weight",
+      "subsurface_weight",
+      "subsurface_transmission_color",
+      "subsurface_scale",
+      "subsurface_scattering_color",
+      "subsurface_anisotropy",
+      "specular_reflection_roughness",
+      "specular_reflection_ior"
+    ],
+    "fit_report": "fit.json"
+  }
+}

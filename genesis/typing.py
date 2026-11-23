@@ -84,6 +84,8 @@ if TYPE_CHECKING:
     FArrayType = Sequence[ValidFloat] | np.ndarray
     PositiveFArrayType = FArrayType
     Vec2IType = IArrayType
+    Vec4IType = IArrayType
+    Vec4IArrayType = Sequence[Sequence[StrictInt]] | np.ndarray
     PositiveVec2IType = IArrayType
     PositiveVec3IType = IArrayType
     Vec2FType = FArrayType
@@ -130,6 +132,8 @@ else:
     FArrayType = Annotated[tuple[ValidFloat, ...], Field(min_length=1, strict=False)]
     PositiveFArrayType = Annotated[tuple[PositiveFloat, ...], Field(min_length=1, strict=False)]
     Vec2IType = Annotated[tuple[StrictInt, StrictInt], Field(strict=False)]
+    Vec4IType = Annotated[tuple[StrictInt, StrictInt, StrictInt, StrictInt], Field(strict=False)]
+    Vec4IArrayType = Annotated[tuple[Vec4IType, ...], Field(min_length=1, strict=False)]
     PositiveVec2IType = Annotated[tuple[PositiveInt, PositiveInt], Field(strict=False)]
     PositiveVec3IType = Annotated[tuple[PositiveInt, PositiveInt, PositiveInt], Field(strict=False)]
     Vec2FType = Annotated[tuple[ValidFloat, ValidFloat], Field(strict=False)]

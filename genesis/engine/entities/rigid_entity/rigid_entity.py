@@ -922,6 +922,19 @@ class KinematicEntity(Entity):
         # Exclude joints with 0 dofs to align with Mujoco
         links_j_infos = [[j_info for j_info in link_j_infos if j_info["n_dofs"] > 0] for link_j_infos in links_j_infos]
 
+        if morph.collision_links is not None:
+            parsed_link_names = {l_info["name"] for l_info in l_infos}
+            unknown_link_names = set(morph.collision_links).difference(parsed_link_names)
+            if unknown_link_names:
+                gs.raise_exception(
+                    f"Unknown collision links {sorted(unknown_link_names)} in morph '{morph._identifier()}'."
+                )
+            for l_info, link_g_infos in zip(l_infos, links_g_infos):
+                if l_info["name"] not in morph.collision_links:
+                    link_g_infos[:] = [
+                        g_info for g_info in link_g_infos if not (g_info["contype"] or g_info["conaffinity"])
+                    ]
+
         return l_infos, links_j_infos, links_g_infos, eqs_info
 
     def _load_scene(self, morph, surface):

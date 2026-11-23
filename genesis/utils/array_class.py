@@ -2,15 +2,16 @@ import dataclasses
 import math
 from enum import IntEnum
 
-import quadrants as qd
-from typing_extensions import dataclass_transform  # Made it into standard lib from Python 3.12
 import numpy as np
 import torch
 
+from typing_extensions import dataclass_transform  # Made it into standard lib from Python 3.12
+
+import quadrants as qd
+
 import genesis as gs
 
-
-V_ANNOTATION = qd.Tensor
+V_ANNOTATION = qd.template()
 
 
 def _tensor_backend():
@@ -83,6 +84,7 @@ def V_SCALAR_FROM(dtype, value):
 
 
 class ErrorCode(IntEnum):
+    INVALID_FLIP_STATE_NAN = 1 << 18
     SUCCESS = 0b000000000000000000000000000000000
     OVERFLOW_COLLISION_PAIRS = 0b00000000000000000000000000000001
     OVERFLOW_CANDIDATE_CONTACTS = 0b00000000000000000000000000000010
@@ -93,9 +95,17 @@ class ErrorCode(IntEnum):
     INVALID_ACC_NAN = 0b00000000000000000000000001000000
     INVALID_IPBSTF_STATE_NAN = 0b00000000000000000000000010000000
     INVALID_PBSTF_STATE_NAN = 0b00000000000000000000000100000000
-    OVERFLOW_IPBSTF_SURFACE_NEIGHBORS = 0b00000000000000000000001000000000
-    OVERFLOW_IPBSTF_LOCAL_MESH_QUEUE = 0b00000000000000000000010000000000
-    OVERFLOW_IPBSTF_LOCAL_MESH_NEIGHBORS = 0b00000000000000000000100000000000
+    INVALID_PBSTF_DEFORMABLE_COLLIDER = 0b00000000000000000000001000000000
+    INVALID_FEM_RIGID_SURFACE_INTERSECTION = 0b00000000000000000000010000000000
+    INVALID_PBD_RIGID_SURFACE_INTERSECTION = 0b00000000000000000000100000000000
+    INVALID_PBD_COHESIVE_REACTION = 1 << 15
+    INVALID_PBD_VELOCITY_PROJECTION = 1 << 16
+    INVALID_PBD_STATE = 0b00000000000000000001000000000000
+    INVALID_PBD_VOLUME = 0b00000000000000000010000000000000
+    INVALID_IPBF_STATE_NAN = 0b00000000000000000100000000000000
+    OVERFLOW_IPBSTF_SURFACE_NEIGHBORS = 1 << 19
+    OVERFLOW_IPBSTF_LOCAL_MESH_QUEUE = 1 << 20
+    OVERFLOW_IPBSTF_LOCAL_MESH_NEIGHBORS = 1 << 21
 
 
 # =========================================== RigidInfo ===========================================
@@ -1801,6 +1811,12 @@ class LinksState:
     contact_force: qd.Tensor
     is_hibernated: qd.Tensor
     awake_steps: qd.Tensor
+    # Whether an external authority (the PBD-fragment bridge) currently owns this link's pose and velocity; the
+    # integrator then advances neither and the bridge rewrites qpos/vel and their next buffers every substep head.
+    is_externally_driven: qd.Tensor
+    # Runtime per-env contact switch read by the broadphase valid-pair check; build-time pair allocation is
+    # unaffected, so a shadow fragment's future contacts stay preallocated while it responds to none.
+    is_contact_enabled: qd.Tensor
 
 
 def get_links_state(solver):
@@ -1857,6 +1873,8 @@ def get_links_state(solver):
         contact_force=V(dtype=gs.qd_vec3, shape=shape, needs_grad=requires_grad),
         is_hibernated=V(dtype=gs.qd_int, shape=shape),
         awake_steps=V(dtype=gs.qd_int, shape=shape),
+        is_externally_driven=V(dtype=gs.qd_bool, shape=shape),
+        is_contact_enabled=V(dtype=gs.qd_bool, shape=shape),
     )
 
 
@@ -1996,6 +2014,7 @@ class GeomsInfo:
     is_decomposed: qd.Tensor
     is_hollow: qd.Tensor
     needs_coup: qd.Tensor
+    is_coup_reaction_enabled: qd.Tensor
     coup_friction: qd.Tensor
     coup_softness: qd.Tensor
     coup_restitution: qd.Tensor
@@ -2033,6 +2052,7 @@ def get_geoms_info(solver, is_active=True):
         is_decomposed=V(dtype=gs.qd_bool, shape=shape),
         is_hollow=V(dtype=gs.qd_bool, shape=shape),
         needs_coup=V(dtype=gs.qd_int, shape=shape),
+        is_coup_reaction_enabled=V(dtype=gs.qd_bool, shape=shape),
         coup_friction=V(dtype=gs.qd_float, shape=shape),
         coup_softness=V(dtype=gs.qd_float, shape=shape),
         coup_restitution=V(dtype=gs.qd_float, shape=shape),
@@ -2342,6 +2362,54 @@ def get_rigid_adjoint_cache(solver):
         qpos=V(dtype=gs.qd_float, shape=(substeps_local + 1, solver.n_qs_, solver._B), needs_grad=requires_grad),
         dofs_vel=V(dtype=gs.qd_float, shape=(substeps_local + 1, solver.n_dofs_, solver._B), needs_grad=requires_grad),
         dofs_acc=V(dtype=gs.qd_float, shape=(substeps_local + 1, solver.n_dofs_, solver._B), needs_grad=requires_grad),
+    )
+
+
+# =========================================== FEMProjectionState ===========================================
+
+
+@dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
+class FEMProjectionState:
+    normals: qd.Tensor
+    reactions: qd.Tensor
+    rigid_vel: qd.Tensor
+    friction: qd.Tensor
+    is_sticking: qd.Tensor
+    is_active: qd.Tensor
+    is_processed: qd.Tensor
+    has_changed: qd.Tensor
+    has_contact: qd.Tensor
+    is_pcg_active_saved: qd.Tensor
+
+
+@dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
+class RigidSurfaceInfo:
+    projection_geoms_idx: qd.Tensor
+    surface_geom_slots: qd.Tensor
+    surface_geoms_idx: qd.Tensor
+    atlas_offsets: qd.Tensor
+
+
+@dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
+class RigidSurfaceContactState:
+    corrections: qd.Tensor
+    n_corrections: qd.Tensor
+    is_active: qd.Tensor
+    has_intersection: qd.Tensor
+    previous_geoms_pos: qd.Tensor
+    previous_geoms_quat: qd.Tensor
+
+
+def get_rigid_surface_contact_state(n_envs, n_vertices, n_geoms):
+    """Allocate corrections and relative-motion history for a deformable surface against rigid geoms."""
+    # Field-backed buffers support optional contact state in the legacy coupler's class kernels.
+    return RigidSurfaceContactState(
+        corrections=qd.Vector.field(n=3, dtype=gs.qd_float, shape=(n_envs, n_vertices)),
+        n_corrections=qd.field(dtype=gs.qd_int, shape=(n_envs, n_vertices)),
+        is_active=qd.field(dtype=gs.qd_bool, shape=(n_envs,)),
+        has_intersection=qd.field(dtype=gs.qd_int, shape=(n_envs,)),
+        previous_geoms_pos=qd.Vector.field(n=3, dtype=gs.qd_float, shape=(n_envs, n_geoms)),
+        previous_geoms_quat=qd.Vector.field(n=4, dtype=gs.qd_float, shape=(n_envs, n_geoms)),
     )
 
 

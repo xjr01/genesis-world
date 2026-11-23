@@ -1,16 +1,27 @@
 import contextlib
 import os
+from dataclasses import dataclass
 
-import numpy as np
 import numba as nb
+import numpy as np
 
-import OpenGL.GL as GL
 import OpenGL.constant as GL_constant
+from OpenGL import GL
 
-from .material import MetallicRoughnessMaterial, SpecularGlossinessMaterial
+from .constants import MAX_N_LIGHTS, RenderFlags
 from .light import DirectionalLight, PointLight
-from .constants import RenderFlags, MAX_N_LIGHTS
+from .material import MetallicRoughnessMaterial, SpecularGlossinessMaterial
 from .numba_gl_wrapper import GLWrapper
+from .primitive import Primitive
+
+
+@dataclass(frozen=True)
+class RenderBuffer:
+    """One primitive's vertex attribute or instance transform array for visual playback."""
+
+    primitive: Primitive
+    name: str
+    data: np.ndarray
 
 
 _DISABLE_OFFSCREEN_MARKERS = "GS_DISABLE_OFFSCREEN_MARKERS" in os.environ
@@ -1176,6 +1187,20 @@ class JITRenderer:
             self.gen_func_ptr()
         self._update_buffer_fn(updates, self.gl.wrapper_instance)
         self._buffer.clear()
+
+    def capture_buffers(self) -> tuple[RenderBuffer, ...]:
+        """Copy queued updates before a render pass flushes them. The caller holds the viewer lock."""
+        return tuple(RenderBuffer(primitive, name, data.copy()) for (primitive, name), data in self._buffer.items())
+
+    def restore_buffers(self, scene, buffers: tuple[RenderBuffer, ...]) -> None:
+        """Restore recorded arrays and the bounds used by shadows. The caller holds the viewer lock."""
+        for buffer in buffers:
+            self._buffer[(buffer.primitive, buffer.name)] = buffer.data
+            if buffer.name == "model":
+                buffer.primitive.poses = buffer.data.transpose((0, 2, 1))
+        for node in scene.mesh_nodes:
+            node.mesh._bounds = None
+        scene._bounds = None
 
     def read_depth_buf(self, weight, height, z_near, z_far):
         if self._read_depth_buf is None:

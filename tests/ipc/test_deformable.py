@@ -26,6 +26,113 @@ if TYPE_CHECKING:
     from genesis.engine.couplers import IPCCoupler
 
 
+@pytest.mark.required
+@pytest.mark.parametrize("n_envs", [0, 2])
+def test_ipc_state_and_checkpoint(n_envs, show_viewer, asset_tmp_path):
+    dt = 0.01
+    mesh_path = asset_tmp_path / "checkpoint_cloth.obj"
+    mesh_path.write_text("v 0 0 0\nv 0.1 0 0\nv 0 0.1 0\nv 0.1 0.1 0\nf 1 2 3\nf 2 4 3\n")
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=dt,
+            gravity=(0.0, 0.0, -9.8),
+        ),
+        coupler_options=gs.options.IPCCouplerOptions(
+            contact_d_hat=0.0015,
+            # Contact and free-fall entities share the convergence criteria
+            newton_tolerance=1e-6,
+            newton_translation_tolerance=1e-6,
+            linear_system_tolerance=1e-6,
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(1.2, -1.2, 1.2),
+            camera_lookat=(0.2, 0.0, 0.5),
+        ),
+        show_viewer=show_viewer,
+    )
+    entities = (
+        scene.add_entity(
+            morph=gs.morphs.Box(
+                pos=(0.0, 0.0, 0.5),
+                size=(0.1, 0.1, 0.1),
+            ),
+            material=gs.materials.FEM.Elastic(
+                E=5.0e4,
+                nu=0.45,
+                rho=1000.0,
+            ),
+        ),
+        scene.add_entity(
+            morph=gs.morphs.Mesh(
+                file=str(mesh_path),
+                pos=(0.3, 0.0, 0.5),
+                decimate=False,
+            ),
+            material=gs.materials.FEM.Cloth(
+                bending_stiffness=1.0e-6,
+                self_friction_mu=2.0,
+            ),
+        ),
+    )
+    rigid = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(0.6, 0.0, 0.5),
+            size=(0.1, 0.1, 0.1),
+        ),
+        material=gs.materials.Rigid(
+            coup_type="ipc_only",
+        ),
+    )
+    scene.add_entity(
+        morph=gs.morphs.Plane(),
+        material=gs.materials.Rigid(
+            coup_type="ipc_only",
+        ),
+    )
+    contact_cloth = scene.add_entity(
+        morph=gs.morphs.Mesh(
+            file=str(mesh_path),
+            pos=(0.9, 0.0, 0.0023),
+            decimate=False,
+        ),
+        material=gs.materials.FEM.Cloth(
+            thickness=0.0001,
+            bending_stiffness=1.0e-6,
+        ),
+    )
+    scene.build(n_envs=n_envs)
+    initial_positions = tuple(entity.get_state().pos.clone() for entity in entities)
+    initial_rigid_position = rigid.get_pos().clone()
+    scene.step()
+    states = tuple(entity.get_state() for entity in entities)
+    for state, position in zip(states, initial_positions):
+        assert_allclose(state.vel[..., 2], -9.8 * dt, atol=1e-4)
+        assert_allclose(state.vel, (state.pos - position) / dt, atol=1e-4)
+
+    checkpoint = scene.get_state()
+    scene.step()
+    continued_states = tuple(entity.get_state() for entity in (*entities, contact_cloth))
+    continued_rigid_position = rigid.get_pos().clone()
+    continued_rigid_velocity = rigid.get_vel().clone()
+    scene.restore(checkpoint)
+    scene.step()
+    for entity, expected in zip((*entities, contact_cloth), continued_states):
+        state = entity.get_state()
+        assert_allclose(state.pos, expected.pos, atol=1e-5)
+        assert_allclose(state.vel, expected.vel, atol=1e-5)
+    assert (contact_cloth.get_state().pos[..., 2] > 0.0).all()
+    assert_allclose(rigid.get_pos(), continued_rigid_position, atol=1e-5)
+    assert_allclose(rigid.get_vel(), continued_rigid_velocity, atol=1e-5)
+
+    scene.reset()
+    for entity, position in zip(entities, initial_positions):
+        state = entity.get_state()
+        assert_allclose(state.pos, position, atol=1e-6)
+        assert_allclose(state.vel, 0.0, atol=1e-6)
+    assert_allclose(rigid.get_pos(), initial_rigid_position, atol=1e-6)
+    assert_allclose(rigid.get_vel(), 0.0, atol=1e-6)
+
+
 @pytest.mark.slow  # ~250s
 @pytest.mark.required
 @pytest.mark.parametrize("coup_type", ["two_way_soft_constraint", "external_articulation"])

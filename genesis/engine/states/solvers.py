@@ -13,15 +13,17 @@ class SimState(RBC):
         s_global,
         f_local,
         solvers,
+        coupler_state=None,
     ):
         self._scene = scene
         self._s_global = s_global
-        self._solvers_state = list()
+        self._solvers_state = []
         for solver in solvers:
             self._solvers_state.append(solver.get_state(f_local))
+        self._coupler_state = coupler_state
 
     def serializable(self):
-        self.scene = None
+        self._scene = None
 
         for solver_state in self._solvers_state:
             if solver_state is not None:
@@ -38,6 +40,10 @@ class SimState(RBC):
     @property
     def solvers_state(self):
         return self._solvers_state
+
+    @property
+    def coupler_state(self):
+        return self._coupler_state
 
     def __iter__(self):
         return iter(self._solvers_state)
@@ -104,6 +110,10 @@ class RigidSolverState:
         self.i_pos_shift = gs.zeros((_B, scene.sim.rigid_solver.n_links, 3), **args)
         self.mass_shift = gs.zeros((_B, scene.sim.rigid_solver.n_links), **args)
         self.friction_ratio = gs.ones((_B, scene.sim.rigid_solver.n_geoms), **args)
+        # Fragment lifecycle switches (0/1), restored bit-exactly by set_state (see is_externally_driven /
+        # is_contact_enabled in array_class.py)
+        self.links_externally_driven = gs.zeros((_B, scene.sim.rigid_solver.n_links), **args)
+        self.links_contact_enabled = gs.ones((_B, scene.sim.rigid_solver.n_links), **args)
 
     def serializable(self):
         self.scene = None
@@ -115,6 +125,8 @@ class RigidSolverState:
         self.i_pos_shift = self.i_pos_shift.detach()
         self.mass_shift = self.mass_shift.detach()
         self.friction_ratio = self.friction_ratio.detach()
+        self.links_externally_driven = self.links_externally_driven.detach()
+        self.links_contact_enabled = self.links_contact_enabled.detach()
 
     @property
     def s_global(self):
@@ -243,19 +255,17 @@ class SPHSolverState:
 
 
 class _ParticleFluidSolverState:
-    def __init__(self, scene, solver, n_particles=None):
+    def __init__(self, scene, solver):
         self._scene = scene
-        if n_particles is None:
-            n_particles = solver.n_particles
         args = {
             "dtype": gs.tc_float,
             "requires_grad": False,
             "scene": scene,
         }
-        self._pos = gs.zeros((scene.sim._B, n_particles, 3), **args)
-        self._vel = gs.zeros((scene.sim._B, n_particles, 3), **args)
+        self._pos = gs.zeros((scene.sim._B, solver.n_particles, 3), **args)
+        self._vel = gs.zeros((scene.sim._B, solver.n_particles, 3), **args)
         args["dtype"] = gs.tc_bool
-        self._active = gs.zeros((scene.sim._B, n_particles), **args)
+        self._active = gs.zeros((scene.sim._B, solver.n_particles), **args)
 
     def serializable(self):
         self._scene = None
@@ -288,63 +298,152 @@ class IPBSTFSolverState(_ParticleFluidSolverState):
 
 
 class PBSTFSolverState(_ParticleFluidSolverState):
-    """Dynamic state queried from a PBSTFSolver."""
+    """Dynamic state queried from a position-based surface tension flow (PBSTF) solver."""
 
     def __init__(self, scene):
+        super().__init__(scene, scene.sim.pbstf_solver)
         solver = scene.sim.pbstf_solver
-        super().__init__(scene, solver, solver.n_fluid_particles)
-        self._porous_pos = gs.zeros(
-            (scene.sim._B, solver.n_porous_particles, 3),
-            dtype=gs.tc_float,
-            requires_grad=False,
-            scene=scene,
-        )
-        self._porous_vel = gs.zeros(
-            (scene.sim._B, solver.n_porous_particles, 3),
-            dtype=gs.tc_float,
-            requires_grad=False,
-            scene=scene,
-        )
-        self._porous_active = gs.zeros(
-            (scene.sim._B, solver.n_porous_particles),
-            dtype=gs.tc_bool,
-            requires_grad=False,
-            scene=scene,
-        )
-        self._porous_is_fixed = gs.zeros(
-            (scene.sim._B, solver.n_porous_particles),
-            dtype=gs.tc_bool,
-            requires_grad=False,
-            scene=scene,
-        )
+        args = {
+            "dtype": gs.tc_float,
+            "requires_grad": False,
+            "scene": scene,
+        }
+        self._static_colliders_pos = gs.zeros((scene.sim._B, solver._n_static_colliders, 3), **args)
+        self._static_colliders_quat = gs.zeros((scene.sim._B, solver._n_static_colliders, 4), **args)
+        self._c = gs.zeros((scene.sim._B, solver.n_particles), **args)
+        self._is_fixed = gs.zeros((scene.sim._B, solver.n_particles), dtype=gs.tc_bool, scene=scene)
+        self._deformable_static_colliders_surface_vertices = None
+        self._deformable_static_colliders_voxel_positions = None
+        self._deformable_static_colliders_voxel_search_order = None
+        self._is_deformable_static_colliders_sdf_active = None
+        if solver._n_deformable_static_colliders > 0:
+            self._deformable_static_colliders_surface_vertices = gs.zeros(
+                (scene.sim._B, solver._n_deformable_surface_vertices, 3), **args
+            )
+            self._deformable_static_colliders_voxel_positions = gs.zeros(
+                (scene.sim._B, solver._n_deformable_voxels, 3), **args
+            )
+            args["dtype"] = gs.tc_int
+            self._deformable_static_colliders_voxel_search_order = gs.zeros(
+                (scene.sim._B, solver._n_deformable_voxel_search_order), **args
+            )
+        if solver._n_deformable_sdf_colliders > 0:
+            args["dtype"] = gs.tc_bool
+            self._is_deformable_static_colliders_sdf_active = gs.zeros(
+                (scene.sim._B, solver._n_deformable_sdf_colliders), **args
+            )
+        self._absorbed_collider_idx = None
+        self._absorbed_voxel_idx = None
+        self._absorption_voxel_distance = None
+        self._absorption_local_pos = None
+        self._absorption_target_local_pos = None
+        self._absorption_progress = None
+        self._absorption_capture_budget = None
+        if solver._n_absorbent_static_colliders > 0:
+            args["dtype"] = gs.tc_int
+            self._absorbed_collider_idx = gs.zeros((scene.sim._B, solver.n_particles), **args)
+            self._absorbed_voxel_idx = gs.zeros((scene.sim._B, solver.n_particles), **args)
+            self._absorption_voxel_distance = gs.zeros((scene.sim._B, solver.n_particles), **args)
+            args["dtype"] = gs.tc_float
+            self._absorption_local_pos = gs.zeros((scene.sim._B, solver.n_particles, 3), **args)
+            self._absorption_target_local_pos = gs.zeros((scene.sim._B, solver.n_particles, 3), **args)
+            self._absorption_progress = gs.zeros((scene.sim._B, solver.n_particles), **args)
+            self._absorption_capture_budget = gs.zeros((scene.sim._B, solver._n_absorbent_static_colliders), **args)
 
     def serializable(self):
         super().serializable()
-        self._porous_pos = self._porous_pos.detach()
-        self._porous_vel = self._porous_vel.detach()
-        self._porous_active = self._porous_active.detach()
-        self._porous_is_fixed = self._porous_is_fixed.detach()
+        self._static_colliders_pos = self._static_colliders_pos.detach()
+        self._static_colliders_quat = self._static_colliders_quat.detach()
+        self._c = self._c.detach()
+        self._is_fixed = self._is_fixed.detach()
+        if self._deformable_static_colliders_surface_vertices is not None:
+            self._deformable_static_colliders_surface_vertices = (
+                self._deformable_static_colliders_surface_vertices.detach()
+            )
+            self._deformable_static_colliders_voxel_positions = (
+                self._deformable_static_colliders_voxel_positions.detach()
+            )
+            self._deformable_static_colliders_voxel_search_order = (
+                self._deformable_static_colliders_voxel_search_order.detach()
+            )
+        if self._is_deformable_static_colliders_sdf_active is not None:
+            self._is_deformable_static_colliders_sdf_active = self._is_deformable_static_colliders_sdf_active.detach()
+        if self._absorbed_collider_idx is not None:
+            self._absorbed_collider_idx = self._absorbed_collider_idx.detach()
+            self._absorbed_voxel_idx = self._absorbed_voxel_idx.detach()
+            self._absorption_voxel_distance = self._absorption_voxel_distance.detach()
+            self._absorption_local_pos = self._absorption_local_pos.detach()
+            self._absorption_target_local_pos = self._absorption_target_local_pos.detach()
+            self._absorption_progress = self._absorption_progress.detach()
+            self._absorption_capture_budget = self._absorption_capture_budget.detach()
 
     @property
-    def porous_pos(self):
-        return self._porous_pos
+    def static_colliders_pos(self):
+        return self._static_colliders_pos
 
     @property
-    def porous_vel(self):
-        return self._porous_vel
+    def static_colliders_quat(self):
+        return self._static_colliders_quat
 
     @property
-    def porous_active(self):
-        return self._porous_active
+    def c(self):
+        return self._c
 
     @property
-    def porous_is_fixed(self):
-        return self._porous_is_fixed
+    def is_fixed(self):
+        return self._is_fixed
+
+    @property
+    def deformable_static_colliders_surface_vertices(self):
+        return self._deformable_static_colliders_surface_vertices
+
+    @property
+    def deformable_static_colliders_voxel_positions(self):
+        return self._deformable_static_colliders_voxel_positions
+
+    @property
+    def deformable_static_colliders_voxel_search_order(self):
+        return self._deformable_static_colliders_voxel_search_order
+
+    @property
+    def is_deformable_static_colliders_sdf_active(self):
+        return self._is_deformable_static_colliders_sdf_active
+
+    @property
+    def absorbed_collider_idx(self):
+        return self._absorbed_collider_idx
+
+    @property
+    def absorbed_voxel_idx(self):
+        return self._absorbed_voxel_idx
+
+    @property
+    def absorption_voxel_distance(self):
+        return self._absorption_voxel_distance
+
+    @property
+    def absorption_local_pos(self):
+        return self._absorption_local_pos
+
+    @property
+    def absorption_target_local_pos(self):
+        return self._absorption_target_local_pos
+
+    @property
+    def absorption_progress(self):
+        return self._absorption_progress
+
+    @property
+    def absorption_capture_budget(self):
+        return self._absorption_capture_budget
 
 
 class PBDSolverState:
     """
-    Dynamic state queried from a PBDSolver.
+    Dynamic entity state queried from a PBDSolver.
+
+    Solver-owned boundary balls are reconstructed from their local geometry and set poses, so
+    they are deliberately excluded from Scene snapshots.
     """
 
     def __init__(self, scene):
@@ -354,11 +453,18 @@ class PBDSolverState:
             "requires_grad": scene.requires_grad,
             "scene": self._scene,
         }
-        self._pos = gs.zeros((scene.sim._B, scene.sim.pbd_solver.n_particles, 3), **args)
-        self._vel = gs.zeros((self._scene.sim._B, scene.sim.pbd_solver.n_particles, 3), **args)
+        n_entity_particles = sum(entity.n_particles for entity in scene.sim.pbd_solver.entities)
+        self._pos = gs.zeros((scene.sim._B, n_entity_particles, 3), **args)
+        self._vel = gs.zeros((self._scene.sim._B, n_entity_particles, 3), **args)
         args["dtype"] = gs.tc_bool
         args["requires_grad"] = False
-        self._free = gs.zeros((self._scene.sim._B, scene.sim.pbd_solver.n_particles), **args)
+        self._free = gs.zeros((self._scene.sim._B, n_entity_particles), **args)
+
+    def serializable(self):
+        self._scene = None
+        self._pos = self._pos.detach()
+        self._vel = self._vel.detach()
+        self._free = self._free.detach()
 
     @property
     def scene(self):
@@ -375,6 +481,41 @@ class PBDSolverState:
     @property
     def free(self):
         return self._free
+
+
+class DEMSolverState:
+    """
+    Dynamic state queried from a DEMSolver.
+    """
+
+    def __init__(self, scene):
+        self._scene = scene
+        args = {
+            "dtype": gs.tc_float,
+            "requires_grad": scene.requires_grad,
+            "scene": self._scene,
+        }
+        self._pos = gs.zeros((scene.sim._B, scene.sim.dem_solver.n_particles, 3), **args)
+        self._vel = gs.zeros((self._scene.sim._B, scene.sim.dem_solver.n_particles, 3), **args)
+        args["dtype"] = gs.tc_bool
+        args["requires_grad"] = False
+        self._active = gs.zeros((self._scene.sim._B, scene.sim.dem_solver.n_particles), **args)
+
+    @property
+    def scene(self):
+        return self._scene
+
+    @property
+    def pos(self):
+        return self._pos
+
+    @property
+    def vel(self):
+        return self._vel
+
+    @property
+    def active(self):
+        return self._active
 
 
 class FEMSolverState:
@@ -413,3 +554,95 @@ class FEMSolverState:
     @property
     def active(self):
         return self._active
+
+
+class IPBFSolverState(_ParticleFluidSolverState):
+    """Dynamic state of an implicit position-based fluid solver."""
+
+    def __init__(self, scene):
+        super().__init__(scene, scene.sim.ipbf_solver)
+        self._c = gs.zeros((scene.sim._B, scene.sim.ipbf_solver.n_particles), dtype=gs.tc_float, scene=scene)
+        self._boundary_group = gs.zeros(self._active.shape, dtype=gs.tc_int, scene=scene)
+
+    @property
+    def c(self):
+        return self._c
+
+    @property
+    def boundary_group(self):
+        return self._boundary_group
+
+    def serializable(self):
+        super().serializable()
+        self._c = self._c.detach()
+        self._boundary_group = self._boundary_group.detach()
+
+
+class PBDFluidSolverState(PBDSolverState):
+    """Particle liquid state including concentrations, activation and container membership.
+
+    The solid extensions (rest positions, cluster rest centroids, bond and seam liveness) let a Scene
+    snapshot restore fracturable / plastic bodies exactly.
+    """
+
+    def __init__(self, scene):
+        super().__init__(scene)
+        shape = self.free.shape
+        self._c = gs.zeros(shape, dtype=gs.tc_float, scene=scene)
+        self._active = gs.zeros(shape, dtype=gs.tc_bool, scene=scene)
+        self._boundary_group = gs.zeros(shape, dtype=gs.tc_int, scene=scene)
+        solver = scene.sim.pbd_solver
+        self._solid_rest = gs.zeros(self._pos.shape, dtype=gs.tc_float, scene=scene)
+        self._cluster_rest_cm = gs.zeros((shape[0], solver.n_clusters, 3), dtype=gs.tc_float, scene=scene)
+        self._bonds_alive = gs.zeros((shape[0], solver.n_bonds), dtype=gs.tc_bool, scene=scene)
+        self._seams_alive_count = gs.zeros((shape[0], solver.n_seams), dtype=gs.tc_int, scene=scene)
+        self._seams_damage = gs.zeros((shape[0], solver.n_seams), dtype=gs.tc_float, scene=scene)
+        self._seams_is_dead = gs.zeros((shape[0], solver.n_seams), dtype=gs.tc_bool, scene=scene)
+
+    def serializable(self):
+        super().serializable()
+        self._c = self._c.detach()
+        self._active = self._active.detach()
+        self._boundary_group = self._boundary_group.detach()
+        self._solid_rest = self._solid_rest.detach()
+        self._cluster_rest_cm = self._cluster_rest_cm.detach()
+        self._bonds_alive = self._bonds_alive.detach()
+        self._seams_alive_count = self._seams_alive_count.detach()
+        self._seams_damage = self._seams_damage.detach()
+        self._seams_is_dead = self._seams_is_dead.detach()
+
+    @property
+    def c(self):
+        return self._c
+
+    @property
+    def active(self):
+        return self._active
+
+    @property
+    def boundary_group(self):
+        return self._boundary_group
+
+    @property
+    def solid_rest(self):
+        return self._solid_rest
+
+    @property
+    def cluster_rest_cm(self):
+        return self._cluster_rest_cm
+
+    @property
+    def bonds_alive(self):
+        return self._bonds_alive
+
+    @property
+    def seams_alive_count(self):
+        return self._seams_alive_count
+
+    @property
+    def seams_damage(self):
+        return self._seams_damage
+
+    @property
+    def seams_is_dead(self):
+        return self._seams_is_dead

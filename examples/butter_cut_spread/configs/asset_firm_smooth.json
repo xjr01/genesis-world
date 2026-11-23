@@ -1,0 +1,8 @@
+{
+  "shear_modulus": 80000.0,
+  "bulk_modulus": 150000.0,
+  "yield_stress": 600.0,
+  "consistency": 25.0,
+  "flow_exponent": 0.5,
+  "rho": 900.0
+}

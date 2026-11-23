@@ -1,0 +1,124 @@
+{
+  "source_repository": "https://github.com/happy1041/genesis-ipc-shirt-demo",
+  "source_commit": "c88813fab6ebc3678a0976d338e9e00f8b199a10",
+  "plans": [
+    {
+      "path": "plans/01_first_fold.json",
+      "source": "reproduction/scene527_55k_73s/source_records/01_first_fold/plan.json",
+      "sha256": "f303b1448312b8adf87dac08b3ba3d088bf9b638351dbd7c63ee6bf3c52158ff",
+      "samples": 740,
+      "accepted": true,
+      "max_position_aperture_error": 1.1102230246251565e-15
+    },
+    {
+      "path": "plans/02_first_pull.json",
+      "source": "reproduction/scene527_55k_73s/source_records/02_first_pull/plan.json",
+      "sha256": "deb63f7151cf2fc9d1a3bc90db517d5872680279f19dde296a1ac1c1f5e9079b",
+      "samples": 397,
+      "accepted": true,
+      "max_position_aperture_error": 5.551115123125783e-16
+    },
+    {
+      "path": "plans/03_second_fold.json",
+      "source": "reproduction/scene527_55k_73s/source_records/03_second_fold/plan.json",
+      "sha256": "22de6f8477ce286ed68c39442e96d6c3432a19b08f758ba87cea44c230caf85d",
+      "samples": 805,
+      "accepted": true,
+      "max_position_aperture_error": 7.771561172376096e-16
+    },
+    {
+      "path": "plans/04_third_right.json",
+      "source": "reproduction/scene527_55k_73s/source_records/04_third_right/plan.json",
+      "sha256": "d82c10ad06a2303bfd89c95af020034365aa4b08d043718d1d8c86295f342ef4",
+      "samples": 676,
+      "accepted": true,
+      "max_position_aperture_error": 8.326672684688674e-16
+    },
+    {
+      "path": "plans/05_third_left.json",
+      "source": "reproduction/scene527_55k_73s/source_records/05_third_left/plan.json",
+      "sha256": "9c616eafdea0c1a81bb21df0d67d517798df7de33ecf45cfc10497fa4ba76016",
+      "samples": 679,
+      "accepted": true,
+      "max_position_aperture_error": 8.881784197001252e-16
+    },
+    {
+      "path": "plans/06_sweep.json",
+      "source": "reproduction/scene527_55k_73s/source_records/06_sweep/plan.json",
+      "sha256": "503e62627d5397a5138d0b8db92d180b52aa1cc1cd01e1a31875e787c8630482",
+      "samples": 301,
+      "accepted": true,
+      "max_position_aperture_error": 1.6653345369377348e-16
+    },
+    {
+      "path": "plans/07_press_slide_home.json",
+      "source": "reproduction/scene527_55k_73s/source_records/07_press_slide_home/plan.json",
+      "sha256": "86c8bf6fb5bde2646680c03569368d779ba180297a7c9cef79aaefcc23a56562",
+      "samples": 301,
+      "accepted": true,
+      "max_position_aperture_error": 8.326672684688674e-16
+    }
+  ],
+  "history": [
+    {
+      "path": "history/8k/replay.npz",
+      "source": "reproduction/workbench_examples/8k/replay.npz",
+      "sha256": "918c2f9d19e8a6558a46c361929c65c762522979c7b1beea7953c6e512e292a0"
+    },
+    {
+      "path": "history/8k/atlas.npz",
+      "source": "reproduction/workbench_examples/8k/atlas.npz",
+      "sha256": "945b4dbde7c7720346ede3cfecda1c760c669d96dd86bb54889e4f29b837d22a"
+    },
+    {
+      "path": "history/8k/atlas.json",
+      "source": "reproduction/workbench_examples/8k/atlas.json",
+      "sha256": "61984a40b9c51cd1c92fbca0f75ec3f3627103ea4f27789fdca5ca118a858649"
+    },
+    {
+      "path": "history/8k/manifest.json",
+      "source": "reproduction/workbench_examples/8k/manifest.json",
+      "sha256": "8bc59e915b1b3283347c9b0c7c7538f7f522720d5f3243d9abee93c9ecdb6b52"
+    },
+    {
+      "path": "history/8k/tcp.csv",
+      "source": "reproduction/workbench_examples/8k/tcp.csv",
+      "sha256": "a3ba05b5e0d7c7af21fbc4293f0eafc53b54a775cbfe32b5173490d574837668"
+    },
+    {
+      "path": "history/8k/workbench.template.json",
+      "source": "reproduction/workbench_examples/8k/workbench.template.json",
+      "sha256": "b879ec0bb44af74e128f9a705edff583595fa75fb1a0eaba8b01378975f47362"
+    },
+    {
+      "path": "history/13k/replay.npz",
+      "source": "reproduction/workbench_examples/13k/replay.npz",
+      "sha256": "af50e8a0a7f9be4d51c0f48e01dc0e775c0a33f94e3b059c21556b50087528ce"
+    },
+    {
+      "path": "history/13k/atlas.npz",
+      "source": "reproduction/workbench_examples/13k/atlas.npz",
+      "sha256": "a11bd16a637ad4438ee0d92ebf26ee608d907107a762a1d65b12772ed6f67df7"
+    },
+    {
+      "path": "history/13k/atlas.json",
+      "source": "reproduction/workbench_examples/13k/atlas.json",
+      "sha256": "989f3f1deac2909e4d5d6aed3759bde34bff0e025f17b3fdaff8a83ba30ee105"
+    },
+    {
+      "path": "history/13k/manifest.json",
+      "source": "reproduction/workbench_examples/13k/manifest.json",
+      "sha256": "49d88b0bbe9481abe0272de3246f293f26d5e002858483ad6c34ec92c39bd4da"
+    },
+    {
+      "path": "history/13k/tcp.csv",
+      "source": "reproduction/workbench_examples/13k/tcp.csv",
+      "sha256": "a3ba05b5e0d7c7af21fbc4293f0eafc53b54a775cbfe32b5173490d574837668"
+    },
+    {
+      "path": "history/13k/workbench.template.json",
+      "source": "reproduction/workbench_examples/13k/workbench.template.json",
+      "sha256": "0f4f2f46413d8311f3b52c2bde4d96b3ea73406f5ada59993daad07e35869611"
+    }
+  ]
+}

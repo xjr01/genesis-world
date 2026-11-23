@@ -40,6 +40,9 @@ class Cloth(Base):
         Default is "stable_neohookean".
     friction_mu : float, optional
         Friction coefficient. Default is 0.1.
+    self_friction_mu : float | None, optional
+        Friction coefficient for cloth self-contact. ``None`` uses ``friction_mu``. A separate value preserves
+        surface contact calibration while tuning resistance to sliding between folded layers. Default is None.
     contact_resistance : float | None, optional
         IPC contact resistance/stiffness override. ``None`` uses the IPC coupler
         global default. Default is None.
@@ -66,4 +69,5 @@ class Cloth(Base):
     rho: PositiveFloat = 200.0
     thickness: PositiveFloat = 0.001
     bending_stiffness: NonNegativeFloat | None = None
+    self_friction_mu: NonNegativeFloat | None = None
     model: Literal["linear", "stable_neohookean", "linear_corotated"] = "stable_neohookean"

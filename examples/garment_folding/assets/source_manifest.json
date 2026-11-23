@@ -1,0 +1,113 @@
+{
+  "source_bundle": "scene527_55k_73s",
+  "robot_change": "Mesh URIs localized; all other XML attributes and elements retained.",
+  "files": [
+    {
+      "path": "assets/cloth/short-shirt-8000f.obj",
+      "source": "assets/cloth/short-shirt-8000f.obj",
+      "source_commit": "f7bbdaf22ca2cfef63e149d976575297b45a43fa",
+      "sha256": "78d1ec7cf751c2087b3df211a0e390a18dd93abc13f94de834cf9d65c261e441"
+    },
+    {
+      "path": "assets/cloth/short-shirt-13767f.obj",
+      "source": "assets/cloth/short-shirt-13767f.obj",
+      "source_commit": "f7bbdaf22ca2cfef63e149d976575297b45a43fa",
+      "sha256": "e4fa8f9e3aab183be3844ad9c2b4e97d07c9e788d5f59edcf7e846dffed2a731"
+    },
+    {
+      "path": "assets/cloth/short-shirt-55068f.obj",
+      "source": "assets/cloth/short-shirt-55068f.obj",
+      "sha256": "92ad1f68995a2d8b827d9de1c896465f436b8384c38d311abc9eadbbec9cf9cd"
+    },
+    {
+      "path": "controls/trajectory.npz",
+      "source": "controls/trajectory.npz",
+      "sha256": "fc95729acd82e2293f31535fe073e449eac5be3c8a807a2c5c34bbbfab090464"
+    },
+    {
+      "path": "assets/robots/dual_x5_2025_ipc_v1/meshes/link1.STL",
+      "source": "transport/arx_x5_official_20260920/extracted_2025/X5/meshes/link1.STL",
+      "sha256": "86fe043261954c68f8cca7ca8531774a595a4e0a94c868de7b682cbe349e437d"
+    },
+    {
+      "path": "assets/robots/dual_x5_2025_ipc_v1/meshes/link2.STL",
+      "source": "transport/arx_x5_official_20260920/extracted_2025/X5/meshes/link2.STL",
+      "sha256": "d039c569b210418477d03614e541a2cb610a34d56c95cf39eea05fd89be77a0d"
+    },
+    {
+      "path": "assets/robots/dual_x5_2025_ipc_v1/meshes/link3.STL",
+      "source": "transport/arx_x5_official_20260920/extracted_2025/X5/meshes/link3.STL",
+      "sha256": "56b33fcb12291193a6374ecd6c9ef75a40c7c2c560ad0a16d28214362320f801"
+    },
+    {
+      "path": "assets/robots/dual_x5_2025_ipc_v1/meshes/link4.STL",
+      "source": "transport/arx_x5_official_20260920/extracted_2025/X5/meshes/link4.STL",
+      "sha256": "f7d2b7388f59bd7acac4c4e0f06e3681850731ea2db8a48e9d7db7217b656755"
+    },
+    {
+      "path": "assets/robots/dual_x5_2025_ipc_v1/meshes/link5.STL",
+      "source": "transport/arx_x5_official_20260920/extracted_2025/X5/meshes/link5.STL",
+      "sha256": "f5fc02334a63f980bb5d843711d44530e3cfefb89fa0b0b8aa3b3851e3d61929"
+    },
+    {
+      "path": "assets/robots/dual_x5_2025_ipc_v1/meshes/left_link15_ipc_hull.obj",
+      "source": "assets/robots/dual_x5_2025_ipc_v1/meshes/left_link15_ipc_hull.obj",
+      "sha256": "d887ae9a9bb1b198c595ddd72d7fb246b006ca74bc7909dd3cccc9a70fb83b27"
+    },
+    {
+      "path": "assets/robots/dual_x5_2025_ipc_v1/meshes/62449317_left_link16.STL",
+      "source": "transport/robolab_isaacsim_cloth_handoff_20260916/assets/robot/acone_ipc/meshes/62449317_left_link16.STL",
+      "sha256": "d61fff9fc22912d6d58852501b8405b76c009589af9cc173c4bef8682221cfac"
+    },
+    {
+      "path": "assets/robots/dual_x5_2025_ipc_v1/meshes/left_link16_ipc_hull.obj",
+      "source": "assets/robots/dual_x5_2025_ipc_v1/meshes/left_link16_ipc_hull.obj",
+      "sha256": "e25491b460e508de9aef0fa0a7800882f66e5ab82b8256e1908c7f48523e69df"
+    },
+    {
+      "path": "assets/robots/dual_x5_2025_ipc_v1/meshes/456a019e_left_link17.STL",
+      "source": "transport/robolab_isaacsim_cloth_handoff_20260916/assets/robot/acone_ipc/meshes/456a019e_left_link17.STL",
+      "sha256": "5aeb93355602e61df81584cd98ed6ceda6c0fd68d331971f920a3adb6a2d54c9"
+    },
+    {
+      "path": "assets/robots/dual_x5_2025_ipc_v1/meshes/e3fbb293_left_link18.STL",
+      "source": "transport/robolab_isaacsim_cloth_handoff_20260916/assets/robot/acone_ipc/meshes/e3fbb293_left_link18.STL",
+      "sha256": "e7264a85a9d3a8a5f83ebea631497a040553f20c8d107a75db181d0186c28a35"
+    },
+    {
+      "path": "assets/robots/dual_x5_2025_ipc_v1/meshes/right_link25_ipc_hull.obj",
+      "source": "assets/robots/dual_x5_2025_ipc_v1/meshes/right_link25_ipc_hull.obj",
+      "sha256": "d887ae9a9bb1b198c595ddd72d7fb246b006ca74bc7909dd3cccc9a70fb83b27"
+    },
+    {
+      "path": "assets/robots/dual_x5_2025_ipc_v1/meshes/8d891049_right_link26.STL",
+      "source": "transport/robolab_isaacsim_cloth_handoff_20260916/assets/robot/acone_ipc/meshes/8d891049_right_link26.STL",
+      "sha256": "8aec01a9ab9c86b95682863eef860e583c6039cc5679238266a5811e00e8d817"
+    },
+    {
+      "path": "assets/robots/dual_x5_2025_ipc_v1/meshes/right_link26_ipc_hull.obj",
+      "source": "assets/robots/dual_x5_2025_ipc_v1/meshes/right_link26_ipc_hull.obj",
+      "sha256": "3fe26e2aca302365e4a48384dd9bb991a1c52e05865823a1f510727669adedda"
+    },
+    {
+      "path": "assets/robots/dual_x5_2025_ipc_v1/meshes/d17ab828_right_link27.STL",
+      "source": "transport/robolab_isaacsim_cloth_handoff_20260916/assets/robot/acone_ipc/meshes/d17ab828_right_link27.STL",
+      "sha256": "9af488e36fac2cd6aa5c39351afad8c5065be84f8636fd7178fa29486f6b5c3d"
+    },
+    {
+      "path": "assets/robots/dual_x5_2025_ipc_v1/meshes/98b471b0_right_link28.STL",
+      "source": "transport/robolab_isaacsim_cloth_handoff_20260916/assets/robot/acone_ipc/meshes/98b471b0_right_link28.STL",
+      "sha256": "3671b257d78e21961388b8bfab09caeb3657e4596b96b0ceb4bf3403dfcdb522"
+    },
+    {
+      "path": "assets/robots/dual_x5_2025_ipc_v1/meshes/base_link.STL",
+      "source": "transport/arx_x5_official_20260920/extracted_2025/X5/meshes/base_link.STL",
+      "sha256": "0c3b630320f94609da92957b1c95f090541e96e7e5a3a3f6389db6ccbdcc7c4d"
+    },
+    {
+      "path": "assets/robots/dual_x5_2025_ipc_v1/dual_x5_2025_ipc.urdf",
+      "source": "assets/robots/dual_x5_2025_ipc_v1/dual_x5_2025_ipc.urdf",
+      "sha256": "4ada964ef83a2923d586394b4a68a6d96dcf38cb1521d565906b44f0a2f0240f"
+    }
+  ]
+}
